@@ -7,6 +7,7 @@ Visor de imágenes nativo para Windows (C++ / Win32). Ventana real del sistema, 
 - Ventana estándar de Windows (minimizar, maximizar, ajuste a bordes, DPI)
 - Barra inferior con anterior/siguiente, ajustar, 100%, rotar, pantalla completa y abrir
 - Zoom al cursor, pan, rotación y pantalla completa (F11)
+- El ajuste a ventana se mantiene al redimensionar; el zoom manual no se pierde
 - Caché LRU + precarga de las imágenes vecinas
 - Arrastrar y soltar archivos o carpetas
 - Menú contextual (clic derecho)
@@ -32,7 +33,7 @@ Si un motor no puede, pasa al siguiente. En la barra se muestra qué motor abri�
 build.bat
 ```
 
-El ejecutable queda en `build\bin\artpicst.exe`.
+El ejecutable queda en `build\bin\artpicst.exe` (CMake) o `build\artpicst.exe` (cl.exe).
 
 ## Uso
 
@@ -52,7 +53,7 @@ Sin argumentos abre una ventana vacía lista para arrastrar o usar **Ctrl+O**.
 | --- | --- |
 | Anterior / siguiente | Flechas, Espacio, Retroceso, botones ◀ ▶ |
 | Primera / última | Inicio / Fin |
-| Zoom | Rueda del ratón |
+| Zoom | Rueda del ratón, `+` / `-` |
 | Pan | Clic izquierdo + arrastrar |
 | Ajustar a ventana | `F` |
 | Tamaño real (100%) | `0` o `1` |
@@ -63,4 +64,5 @@ Sin argumentos abre una ventana vacía lista para arrastrar o usar **Ctrl+O**.
 | Abrir carpeta | `Ctrl+Shift+O` |
 | Copiar imagen | `Ctrl+C` |
 | Copiar ruta | `Ctrl+Shift+C` |
+| Info en barra | `I` fija o auto; `F1` muestra atajos |
 | Menú | Clic derecho |

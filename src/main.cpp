@@ -1,6 +1,3 @@
-#define STB_IMAGE_IMPLEMENTATION
-#include "stb_image.h"
-
 #ifndef UNICODE
 #define UNICODE
 #endif
@@ -13,6 +10,15 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0601
+#endif
+#ifndef STBI_WINDOWS_UTF8
+#define STBI_WINDOWS_UTF8
+#endif
+
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
 
 #include <windows.h>
 #include <windowsx.h>
@@ -28,10 +34,11 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
-#include <cwctype>
+#include <cwchar>
 #include <fstream>
 #include <iterator>
 #include <list>
@@ -67,18 +74,25 @@ const int MAX_DIMENSION = 20000;
 const LONGLONG MAX_FILE_BYTES = 500LL * 1024LL * 1024LL;
 const UINT OSD_MS = 4000;
 const int HUD_HEIGHT = 52;
+const UINT_PTR TIMER_OSD = 1;
 
 template <typename T>
 struct ComPtr {
     T* p = nullptr;
+    ComPtr() = default;
     ~ComPtr() { reset(); }
+    ComPtr(const ComPtr&) = delete;
+    ComPtr& operator=(const ComPtr&) = delete;
     void reset() {
         if (p) {
             p->Release();
             p = nullptr;
         }
     }
-    T** operator&() { return &p; }
+    T** operator&() {
+        reset();
+        return &p;
+    }
     T* operator->() const { return p; }
     T* get() const { return p; }
     explicit operator bool() const { return p != nullptr; }
@@ -169,6 +183,7 @@ struct AppState {
     float zoom = 1.0f;
     float offsetX = 0.0f;
     float offsetY = 0.0f;
+    bool fitMode = true;
 
     bool isDragging = false;
     int dragStartX = 0;
@@ -186,6 +201,7 @@ struct AppState {
     std::condition_variable prefetchCV;
     std::mutex prefetchMutex;
     size_t prefetchTargetIndex = 0;
+    std::atomic<uint64_t> folderGeneration{0};
 
     bool showOSD = true;
     bool osdPinned = true;
@@ -206,6 +222,8 @@ struct AppState {
     ULONG_PTR gdiplusToken = 0;
     GdiplusStartupInput gdiplusStartupInput;
     bool comInitialized = false;
+    HRESULT comHr = E_FAIL;
+    HBRUSH classBrush = nullptr;
 
     AppState() {
         gdiplusStartupInput.GdiplusVersion = 1;
@@ -257,6 +275,8 @@ void InvokeHud(HudId id);
 std::wstring WideToLower(std::wstring value);
 std::string WideToUtf8(const std::wstring& value);
 void ApplyWindowMode(HWND hwnd, WindowMode mode);
+std::wstring NormalizePath(const std::wstring& path);
+void ZoomAt(float factor, int pivotX, int pivotY);
 
 static bool SafePixelBytes(int width, int height, size_t& outBytes) {
     if (width <= 0 || height <= 0) return false;
@@ -313,14 +333,29 @@ std::wstring Utf8ToWide(const char* value) {
 }
 
 std::wstring WideToLower(std::wstring value) {
-    std::transform(value.begin(), value.end(), value.begin(), [](wchar_t c) {
-        return static_cast<wchar_t>(std::towlower(c));
-    });
+    if (!value.empty()) {
+        CharLowerBuffW(value.data(), static_cast<DWORD>(value.size()));
+    }
     return value;
 }
 
 bool PathsEqualCaseInsensitive(const std::wstring& a, const std::wstring& b) {
     return WideToLower(a) == WideToLower(b);
+}
+
+std::wstring CacheKey(const std::wstring& path) {
+    return WideToLower(path);
+}
+
+std::wstring NormalizePath(const std::wstring& path) {
+    if (path.empty()) return path;
+    DWORD needed = GetFullPathNameW(path.c_str(), 0, nullptr, nullptr);
+    if (needed == 0) return path;
+    std::wstring full(needed, L'\0');
+    DWORD written = GetFullPathNameW(path.c_str(), needed, full.data(), nullptr);
+    if (written == 0 || written >= needed) return path;
+    full.resize(written);
+    return full;
 }
 
 bool InitGDIPlus() {
@@ -382,8 +417,9 @@ bool CopyCachedPixels(const CachedImage& src, unsigned char*& dest) {
 }
 
 bool TryCopyFromCache(const std::wstring& filepath, CachedImage& outCopy) {
+    const std::wstring key = CacheKey(filepath);
     std::lock_guard<std::mutex> lock(g_state.cacheMutex);
-    auto it = g_state.cacheIndex.find(filepath);
+    auto it = g_state.cacheIndex.find(key);
     if (it == g_state.cacheIndex.end() || it->second == g_state.imageCache.end()) {
         return false;
     }
@@ -411,7 +447,8 @@ void AddToCache(const std::wstring& filepath, unsigned char* data, int width, in
         return;
     }
     std::lock_guard<std::mutex> lock(g_state.cacheMutex);
-    auto it = g_state.cacheIndex.find(filepath);
+    const std::wstring key = CacheKey(filepath);
+    auto it = g_state.cacheIndex.find(key);
     if (it != g_state.cacheIndex.end()) {
         if (it->second != g_state.imageCache.end()) g_state.imageCache.erase(it->second);
         g_state.cacheIndex.erase(it);
@@ -425,17 +462,17 @@ void AddToCache(const std::wstring& filepath, unsigned char* data, int width, in
     cached.filepath = filepath;
     cached.decoder = decoder;
     g_state.imageCache.push_back(std::move(cached));
-    g_state.cacheIndex[filepath] = std::prev(g_state.imageCache.end());
+    g_state.cacheIndex[key] = std::prev(g_state.imageCache.end());
     while (g_state.imageCache.size() > CACHE_SIZE) {
         auto oldest = g_state.imageCache.begin();
-        g_state.cacheIndex.erase(oldest->filepath);
+        g_state.cacheIndex.erase(CacheKey(oldest->filepath));
         g_state.imageCache.pop_front();
     }
 }
 
 bool IsInCache(const std::wstring& filepath) {
     std::lock_guard<std::mutex> lock(g_state.cacheMutex);
-    return g_state.cacheIndex.find(filepath) != g_state.cacheIndex.end();
+    return g_state.cacheIndex.find(CacheKey(filepath)) != g_state.cacheIndex.end();
 }
 
 void ClearCache() {
@@ -476,6 +513,9 @@ void ShowOSD(const std::wstring& status) {
     g_state.showOSD = true;
     g_state.osdDisplayTime = GetTickCount();
     if (!status.empty()) g_state.statusMessage = status;
+    if (g_state.hwnd && !g_state.osdPinned) {
+        SetTimer(g_state.hwnd, TIMER_OSD, OSD_MS + 80, nullptr);
+    }
 }
 
 void HandleError(const std::wstring& errorMsg, bool showUser) {
@@ -548,6 +588,7 @@ void ScanFolderForImages(const std::wstring& folderPath) {
         g_state.currentFolder = folderPath;
         g_state.currentImageIndex = 0;
     }
+    g_state.folderGeneration.fetch_add(1, std::memory_order_relaxed);
     ClearCache();
 }
 
@@ -662,10 +703,11 @@ unsigned char* DecodeWithGdiplus(const std::wstring& filepath, int& width, int& 
         return nullptr;
     }
     const UINT dstStride = static_cast<UINT>(w * 4);
-    auto* src = static_cast<const unsigned char*>(data.Scan0);
+    auto* src = static_cast<unsigned char*>(data.Scan0);
+    const INT srcStride = data.Stride;
     for (int y = 0; y < h; ++y) {
         memcpy(pixels + static_cast<size_t>(y) * dstStride,
-               src + static_cast<size_t>(y) * static_cast<size_t>(std::abs(data.Stride)),
+               src + static_cast<ptrdiff_t>(y) * static_cast<ptrdiff_t>(srcStride),
                dstStride);
     }
     bmp.UnlockBits(&data);
@@ -761,8 +803,6 @@ bool LoadImageFromPath(const std::wstring& filepath) {
     unsigned char* pixels = DecodeImageFile(filepath, width, height, channels, decoder);
     if (!pixels) {
         std::wstring msg = L"No se pudo cargar: " + GetFileName(filepath);
-        std::wstring detail = Utf8ToWide(stbi_failure_reason());
-        if (!detail.empty()) msg += L" (" + detail + L")";
         HandleError(msg, false);
         return false;
     }
@@ -824,6 +864,7 @@ void PrefetchThreadFunc() {
         const size_t targetIndex = g_state.prefetchTargetIndex;
         lock.unlock();
 
+        const uint64_t generation = g_state.folderGeneration.load(std::memory_order_relaxed);
         const size_t count = ImageCount();
         if (count == 0) continue;
         const size_t indices[4] = {
@@ -834,6 +875,7 @@ void PrefetchThreadFunc() {
         };
         for (size_t idx : indices) {
             if (!g_state.prefetchRunning) break;
+            if (generation != g_state.folderGeneration.load(std::memory_order_relaxed)) break;
             const std::wstring filepath = ImagePathAt(idx);
             if (filepath.empty() || IsInCache(filepath)) continue;
             if (!ValidateFileIntegrity(filepath)) continue;
@@ -841,10 +883,14 @@ void PrefetchThreadFunc() {
             std::wstring decoder;
             unsigned char* pixels = DecodeImageFile(filepath, width, height, channels, decoder);
             if (!pixels) continue;
+            if (generation != g_state.folderGeneration.load(std::memory_order_relaxed)) {
+                stbi_image_free(pixels);
+                break;
+            }
             AddToCache(filepath, pixels, width, height, channels, 0, decoder);
         }
     }
-    if (comHr == S_OK) CoUninitialize();
+    if (SUCCEEDED(comHr)) CoUninitialize();
 }
 
 void StartPrefetchThread() {
@@ -908,6 +954,7 @@ void FitImageToWindow(int windowWidth, int windowHeight) {
     g_state.zoom = std::max(MIN_ZOOM, std::min(MAX_ZOOM, std::min(scaleX, scaleY)));
     g_state.offsetX = (windowWidth - imageWidth * g_state.zoom) * 0.5f;
     g_state.offsetY = (windowHeight - imageHeight * g_state.zoom) * 0.5f;
+    g_state.fitMode = true;
     EnsureImageVisible();
 }
 
@@ -915,6 +962,7 @@ void ActualSize() {
     if (!g_state.imageData || !g_state.hwnd) return;
     RECT client{};
     GetClientRect(g_state.hwnd, &client);
+    g_state.fitMode = false;
     g_state.zoom = 1.0f;
     int imageWidth = 0, imageHeight = 0;
     DisplaySize(imageWidth, imageHeight);
@@ -922,6 +970,22 @@ void ActualSize() {
     g_state.offsetY = (ViewHeight(client.bottom) - imageHeight) * 0.5f;
     EnsureImageVisible();
     ShowOSD(L"100%");
+    InvalidateRect(g_state.hwnd, nullptr, FALSE);
+}
+
+void ZoomAt(float factor, int pivotX, int pivotY) {
+    if (!g_state.imageData || !g_state.hwnd) return;
+    const float oldZoom = g_state.zoom;
+    const float newZoom = std::max(MIN_ZOOM, std::min(MAX_ZOOM, oldZoom * factor));
+    if (newZoom == oldZoom) return;
+    g_state.fitMode = false;
+    const float imageX = (static_cast<float>(pivotX) - g_state.offsetX) / oldZoom;
+    const float imageY = (static_cast<float>(pivotY) - g_state.offsetY) / oldZoom;
+    g_state.zoom = newZoom;
+    g_state.offsetX = static_cast<float>(pivotX) - imageX * g_state.zoom;
+    g_state.offsetY = static_cast<float>(pivotY) - imageY * g_state.zoom;
+    EnsureImageVisible();
+    ShowOSD();
     InvalidateRect(g_state.hwnd, nullptr, FALSE);
 }
 
@@ -973,6 +1037,11 @@ void LayoutHud(const RECT& client) {
 }
 
 HudId HitTestHud(int x, int y) {
+    if (g_state.hwnd) {
+        RECT client{};
+        GetClientRect(g_state.hwnd, &client);
+        LayoutHud(client);
+    }
     for (int i = 0; i < g_state.hudCount; ++i) {
         if (PtInRect(&g_state.hud[i].rc, POINT{ x, y })) return g_state.hud[i].id;
     }
@@ -1179,10 +1248,25 @@ bool CopyPathToClipboard() {
 
 bool CopyImageToClipboard() {
     if (!g_state.imageData) return false;
-    Bitmap bitmap(g_state.imageWidth, g_state.imageHeight,
+    Bitmap source(g_state.imageWidth, g_state.imageHeight,
                   g_state.imageWidth * 4, PixelFormat32bppARGB, g_state.imageData);
+    int boxW = 0, boxH = 0;
+    DisplaySize(boxW, boxH);
+    Bitmap* output = &source;
+    Bitmap rotated(boxW, boxH, PixelFormat32bppARGB);
+    if (g_state.currentRotation != 0) {
+        if (rotated.GetLastStatus() != Ok) return false;
+        Graphics g(&rotated);
+        g.SetInterpolationMode(InterpolationModeHighQualityBicubic);
+        g.TranslateTransform(static_cast<REAL>(boxW) * 0.5f, static_cast<REAL>(boxH) * 0.5f);
+        g.RotateTransform(static_cast<REAL>(g_state.currentRotation));
+        g.TranslateTransform(-static_cast<REAL>(g_state.imageWidth) * 0.5f,
+                             -static_cast<REAL>(g_state.imageHeight) * 0.5f);
+        g.DrawImage(&source, 0, 0, g_state.imageWidth, g_state.imageHeight);
+        output = &rotated;
+    }
     HBITMAP hBitmap = nullptr;
-    if (bitmap.GetHBITMAP(Color(0, 0, 0, 0), &hBitmap) != Ok || !hBitmap) return false;
+    if (output->GetHBITMAP(Color(0, 0, 0, 0), &hBitmap) != Ok || !hBitmap) return false;
     if (!OpenClipboard(g_state.hwnd)) {
         DeleteObject(hBitmap);
         return false;
@@ -1224,6 +1308,9 @@ void ApplyWindowMode(HWND hwnd, WindowMode mode) {
     style |= WS_OVERLAPPEDWINDOW;
     style &= ~WS_POPUP;
     SetWindowLongW(hwnd, GWL_STYLE, style);
+    if (g_state.windowedExStyle) {
+        SetWindowLongW(hwnd, GWL_EXSTYLE, g_state.windowedExStyle);
+    }
     EnableDarkTitleBar(hwnd);
     g_state.isFullscreen = false;
     g_state.windowMode = mode;
@@ -1295,13 +1382,14 @@ void JumpTo(size_t index) {
 }
 
 void OpenPath(const std::wstring& path) {
-    DWORD attrs = GetFileAttributesW(path.c_str());
+    const std::wstring resolved = NormalizePath(path);
+    DWORD attrs = GetFileAttributesW(resolved.c_str());
     if (attrs == INVALID_FILE_ATTRIBUTES) {
         HandleError(L"No se pudo abrir la ruta.", false);
         return;
     }
     if (attrs & FILE_ATTRIBUTE_DIRECTORY) {
-        ScanFolderForImages(path);
+        ScanFolderForImages(resolved);
         if (ImageCount() == 0) {
             ShowOSD(L"No hay imágenes en la carpeta");
             UpdateWindowTitle();
@@ -1313,15 +1401,15 @@ void OpenPath(const std::wstring& path) {
         InvalidateRect(g_state.hwnd, nullptr, FALSE);
         return;
     }
-    size_t slash = path.find_last_of(L"\\/");
-    std::wstring folder = (slash == std::wstring::npos) ? L"." : path.substr(0, slash);
+    size_t slash = resolved.find_last_of(L"\\/");
+    std::wstring folder = (slash == std::wstring::npos) ? L"." : resolved.substr(0, slash);
     ScanFolderForImages(folder);
     size_t idx = 0;
-    if (FindImageIndex(path, idx)) {
+    if (FindImageIndex(resolved, idx)) {
         LoadImageByIndex(idx);
         RequestPrefetch(idx);
-    } else if (LoadImageFromPath(path)) {
-        EnsureFileInList(path);
+    } else if (LoadImageFromPath(resolved)) {
+        EnsureFileInList(resolved);
     } else if (ImageCount() > 0) {
         LoadImageByIndex(0);
         RequestPrefetch(0);
@@ -1409,6 +1497,8 @@ void ShowContextMenu(HWND hwnd, int x, int y) {
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, 5, L"Ajustar a ventana\tF");
     AppendMenuW(menu, MF_STRING, 6, L"Tamaño real\t1");
+    AppendMenuW(menu, MF_STRING, 9, L"Acercar\t+");
+    AppendMenuW(menu, MF_STRING, 10, L"Alejar\t-");
     AppendMenuW(menu, MF_STRING, 7, L"Rotar\tR");
     AppendMenuW(menu, MF_STRING, 8, L"Pantalla completa\tF11");
     const int cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, x, y, 0, hwnd, nullptr);
@@ -1422,6 +1512,18 @@ void ShowContextMenu(HWND hwnd, int x, int y) {
         case 6: ActualSize(); break;
         case 7: RotateImage(); break;
         case 8: ToggleFullscreen(); break;
+        case 9: {
+            RECT client{};
+            GetClientRect(hwnd, &client);
+            ZoomAt(ZOOM_STEP, (client.right - client.left) / 2, ViewHeight(client.bottom) / 2);
+            break;
+        }
+        case 10: {
+            RECT client{};
+            GetClientRect(hwnd, &client);
+            ZoomAt(1.0f / ZOOM_STEP, (client.right - client.left) / 2, ViewHeight(client.bottom) / 2);
+            break;
+        }
         default: break;
     }
 }
@@ -1448,7 +1550,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             const int height = HIWORD(lParam);
             CreateDoubleBuffer(width, height);
             if (g_state.imageData && width > 0 && height > 0) {
-                FitImageToWindow(width, height);
+                if (g_state.fitMode) FitImageToWindow(width, height);
+                else EnsureImageVisible();
             }
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
@@ -1513,6 +1616,24 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 case VK_F11:
                     ToggleFullscreen();
                     break;
+                case VK_F1:
+                    ShowOSD(L"Flechas navegar · rueda zoom · F ajustar · R rotar · F11 pantalla");
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                    break;
+                case VK_OEM_PLUS:
+                case VK_ADD: {
+                    RECT client{};
+                    GetClientRect(hwnd, &client);
+                    ZoomAt(ZOOM_STEP, (client.right - client.left) / 2, ViewHeight(client.bottom) / 2);
+                    break;
+                }
+                case VK_OEM_MINUS:
+                case VK_SUBTRACT: {
+                    RECT client{};
+                    GetClientRect(hwnd, &client);
+                    ZoomAt(1.0f / ZOOM_STEP, (client.right - client.left) / 2, ViewHeight(client.bottom) / 2);
+                    break;
+                }
                 case 'I':
                     g_state.osdPinned = !g_state.osdPinned;
                     ShowOSD(g_state.osdPinned ? L"Info fija" : L"Info auto");
@@ -1550,18 +1671,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             RECT client{};
             GetClientRect(hwnd, &client);
             if (pt.y >= client.bottom - HUD_HEIGHT) return 0;
-            const float oldZoom = g_state.zoom;
-            const float factor = (delta > 0) ? ZOOM_STEP : (1.0f / ZOOM_STEP);
-            const float newZoom = std::max(MIN_ZOOM, std::min(MAX_ZOOM, oldZoom * factor));
-            if (newZoom == oldZoom) return 0;
-            const float imageX = (pt.x - g_state.offsetX) / oldZoom;
-            const float imageY = (pt.y - g_state.offsetY) / oldZoom;
-            g_state.zoom = newZoom;
-            g_state.offsetX = pt.x - imageX * g_state.zoom;
-            g_state.offsetY = pt.y - imageY * g_state.zoom;
-            EnsureImageVisible();
-            ShowOSD();
-            InvalidateRect(hwnd, nullptr, FALSE);
+            ZoomAt((delta > 0) ? ZOOM_STEP : (1.0f / ZOOM_STEP), pt.x, pt.y);
             return 0;
         }
         case WM_LBUTTONDBLCLK: {
@@ -1627,18 +1737,28 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
             return 0;
+        case WM_TIMER:
+            if (wParam == TIMER_OSD) {
+                KillTimer(hwnd, TIMER_OSD);
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+            return 0;
         case WM_DROPFILES: {
             HDROP hDrop = reinterpret_cast<HDROP>(wParam);
             const UINT fileCount = DragQueryFileW(hDrop, 0xFFFFFFFF, nullptr, 0);
             if (fileCount > 0) {
-                wchar_t filePath[MAX_PATH] = {};
-                DragQueryFileW(hDrop, 0, filePath, MAX_PATH);
-                OpenPath(filePath);
+                const UINT chars = DragQueryFileW(hDrop, 0, nullptr, 0);
+                std::wstring filePath(chars, L'\0');
+                if (DragQueryFileW(hDrop, 0, filePath.data(), chars + 1) > 0) {
+                    if (!filePath.empty() && filePath.back() == L'\0') filePath.pop_back();
+                    OpenPath(filePath);
+                }
             }
             DragFinish(hDrop);
             return 0;
         }
         case WM_DESTROY:
+            KillTimer(hwnd, TIMER_OSD);
             StopPrefetchThread();
             FreeCurrentImage();
             FreeDoubleBuffer();
@@ -1703,6 +1823,7 @@ void ParseStartupOptions(std::wstring& outFolder, WindowMode& outMode) {
     if (firstPath.size() >= 2 && firstPath.front() == L'"' && firstPath.back() == L'"') {
         firstPath = firstPath.substr(1, firstPath.size() - 2);
     }
+    firstPath = NormalizePath(firstPath);
     DWORD attrs = GetFileAttributesW(firstPath.c_str());
     if (attrs == INVALID_FILE_ATTRIBUTES) {
         g_state.startupFilePath = firstPath;
@@ -1742,12 +1863,13 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
     g_state.hInstance = hInstance;
 
     HRESULT comHr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    g_state.comHr = comHr;
     g_state.comInitialized = SUCCEEDED(comHr);
     LogMessage(L"Iniciando ARTPICST");
 
     if (!InitGDIPlus()) {
         MessageBoxW(nullptr, L"Error al inicializar GDI+.", L"ARTPICST", MB_OK | MB_ICONERROR);
-        if (g_state.comInitialized) CoUninitialize();
+        if (SUCCEEDED(g_state.comHr)) CoUninitialize();
         return 1;
     }
 
@@ -1757,15 +1879,20 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInstance;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wc.hbrBackground = CreateSolidBrush(BG_COLOR);
+    g_state.classBrush = CreateSolidBrush(BG_COLOR);
+    wc.hbrBackground = g_state.classBrush;
     wc.lpszClassName = CLASS_NAME;
     wc.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
     wc.hIconSm = wc.hIcon;
 
     if (!RegisterClassExW(&wc)) {
         MessageBoxW(nullptr, L"Error al registrar la ventana.", L"ARTPICST", MB_OK | MB_ICONERROR);
+        if (g_state.classBrush) {
+            DeleteObject(g_state.classBrush);
+            g_state.classBrush = nullptr;
+        }
         CleanupGDIPlus();
-        if (g_state.comInitialized) CoUninitialize();
+        if (SUCCEEDED(g_state.comHr)) CoUninitialize();
         return 1;
     }
 
@@ -1786,8 +1913,13 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
 
     if (!hwnd) {
         MessageBoxW(nullptr, L"Error al crear la ventana.", L"ARTPICST", MB_OK | MB_ICONERROR);
+        UnregisterClassW(CLASS_NAME, hInstance);
+        if (g_state.classBrush) {
+            DeleteObject(g_state.classBrush);
+            g_state.classBrush = nullptr;
+        }
         CleanupGDIPlus();
-        if (g_state.comInitialized) CoUninitialize();
+        if (SUCCEEDED(g_state.comHr)) CoUninitialize();
         return 1;
     }
 
@@ -1805,6 +1937,11 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
     }
 
     CleanupGDIPlus();
-    if (g_state.comInitialized) CoUninitialize();
+    UnregisterClassW(CLASS_NAME, hInstance);
+    if (g_state.classBrush) {
+        DeleteObject(g_state.classBrush);
+        g_state.classBrush = nullptr;
+    }
+    if (SUCCEEDED(g_state.comHr)) CoUninitialize();
     return static_cast<int>(msg.wParam);
 }

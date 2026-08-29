@@ -34,7 +34,7 @@ if %ERRORLEVEL% NEQ 0 (
 if not exist build mkdir build
 
 set "OUTPUT=build\artpicst.exe"
-cl /nologo /EHsc /std:c++17 /O2 /utf-8 /Iinclude /Fe:"%OUTPUT%" src\main.cpp /link gdiplus.lib user32.lib kernel32.lib shell32.lib gdi32.lib msimg32.lib ole32.lib oleaut32.lib uuid.lib dwmapi.lib windowscodecs.lib comdlg32.lib /SUBSYSTEM:WINDOWS
+cl /nologo /EHsc /std:c++17 /O2 /utf-8 /W4 /Iinclude /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /DSTBI_WINDOWS_UTF8 /D_WIN32_WINNT=0x0601 /Fe:"%OUTPUT%" src\main.cpp artpicst.manifest /link gdiplus.lib user32.lib kernel32.lib shell32.lib gdi32.lib msimg32.lib ole32.lib oleaut32.lib uuid.lib dwmapi.lib windowscodecs.lib comdlg32.lib /SUBSYSTEM:WINDOWS
 if %ERRORLEVEL% NEQ 0 exit /b %ERRORLEVEL%
 
 echo.

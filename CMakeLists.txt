@@ -27,6 +27,7 @@ if(WIN32)
         NOMINMAX
         WIN32_LEAN_AND_MEAN
         STBI_WINDOWS_UTF8
+        _WIN32_WINNT=0x0601
     )
     target_link_libraries(artpicst PRIVATE
         gdiplus user32 kernel32 shell32 gdi32 msimg32 ole32 oleaut32 uuid dwmapi windowscodecs comdlg32
