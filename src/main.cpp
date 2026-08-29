@@ -191,6 +191,7 @@ AppState g_state;
 // Declaraciones adelantadas para evitar errores de compilación por uso antes de definición
 std::wstring GetFileName(const std::wstring& filepath);
 std::wstring GetFileSizeString(const std::wstring& filepath);
+bool PathsEqualCaseInsensitive(const std::wstring& a, const std::wstring& b);
 void FreeCurrentImage();
 void ScanFolderForImages(const std::wstring& folderPath);
 bool LoadImage(const std::wstring& filepath);
@@ -206,6 +207,8 @@ void ToggleFullscreen();
 void RenderOSD(HDC hdc);
 void CreateDoubleBuffer(int width, int height);
 void RenderImage();
+void LoadInitialImageSafely();
+bool TryLoadStartupFile();
 bool CopyPathToClipboard();
 bool CopyImageToClipboard();
 
@@ -705,6 +708,50 @@ bool LoadImageByIndex(size_t index) {
     
     g_state.currentImageIndex = index;
     return LoadImage(g_state.imageFiles[index]);
+}
+
+bool PathsEqualCaseInsensitive(const std::wstring& a, const std::wstring& b) {
+    if (a.size() != b.size()) {
+        return false;
+    }
+
+    for (size_t i = 0; i < a.size(); ++i) {
+        if (std::towlower(static_cast<wchar_t>(a[i])) != std::towlower(static_cast<wchar_t>(b[i]))) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool TryLoadStartupFile() {
+    if (g_state.startupFilePath.empty()) {
+        return false;
+    }
+
+    if (ValidateFileIntegrity(g_state.startupFilePath) && CanDecodeImageFile(g_state.startupFilePath)) {
+        return LoadImage(g_state.startupFilePath);
+    }
+
+    for (size_t i = 0; i < g_state.imageFiles.size(); ++i) {
+        if (PathsEqualCaseInsensitive(g_state.imageFiles[i], g_state.startupFilePath)) {
+            return LoadImageByIndex(i);
+        }
+    }
+
+    return false;
+}
+
+void LoadInitialImageSafely() {
+    if (g_state.imageFiles.empty()) {
+        return;
+    }
+
+    if (!g_state.startupFilePath.empty() && TryLoadStartupFile()) {
+        return;
+    }
+
+    LoadImageByIndex(0);
 }
 
 // Solicitar pre-carga de imágenes
@@ -1276,72 +1323,94 @@ void CreateDoubleBuffer(int width, int height) {
     ReleaseDC(g_state.hwnd, hdc);
 }
 
-// Renderizar imagen con soporte de rotación
-void RenderImage() {
-    if (!g_state.hdcMem || !g_state.imageData) {
+// Renderizar el fondo de la ventana cuando no hay imagen cargada
+void RenderEmptyState(HDC hdc, const RECT& clientRect) {
+    if (!hdc) {
         return;
     }
-    
+
+    HBRUSH hBrush = CreateSolidBrush(BG_COLOR);
+    if (hBrush) {
+        FillRect(hdc, &clientRect, hBrush);
+        DeleteObject(hBrush);
+    }
+
+    if (g_state.imageFiles.empty()) {
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, RGB(220, 220, 220));
+
+        HFONT hFont = CreateFont(22, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                 CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+        if (hFont) {
+            HFONT hOldFont = (HFONT)SelectObject(hdc, hFont);
+            RECT txt = clientRect;
+            DrawText(hdc, L"Arrastra una imagen o una carpeta aquí", -1, &txt,
+                     DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+            SelectObject(hdc, hOldFont);
+            DeleteObject(hFont);
+        }
+    }
+}
+
+// Renderizar imagen con soporte de rotación
+void RenderImage() {
+    if (!g_state.hdcMem || !g_state.hwnd) {
+        return;
+    }
+
     RECT rect;
     GetClientRect(g_state.hwnd, &rect);
-    
+
     // Limpiar con fondo oscuro
     HBRUSH hBrush = CreateSolidBrush(BG_COLOR);
     FillRect(g_state.hdcMem, &rect, hBrush);
     DeleteObject(hBrush);
-    
+
+    if (!g_state.imageData) {
+        RenderEmptyState(g_state.hdcMem, rect);
+        return;
+    }
+
     // Crear Bitmap desde datos de imagen
-    Bitmap* bitmap = new Bitmap(g_state.imageWidth, g_state.imageHeight, 
-                                 g_state.imageWidth * 4, PixelFormat32bppARGB, 
+    Bitmap* bitmap = new Bitmap(g_state.imageWidth, g_state.imageHeight,
+                                 g_state.imageWidth * 4, PixelFormat32bppARGB,
                                  g_state.imageData);
-    
+
     if (bitmap) {
         Graphics graphics(g_state.hdcMem);
         graphics.SetInterpolationMode(InterpolationModeHighQualityBicubic);
         graphics.SetSmoothingMode(SmoothingModeHighQuality);
         graphics.SetPixelOffsetMode(PixelOffsetModeHighQuality);
-        
-        // Calcular dimensiones según rotación
+
         int imgWidth = g_state.imageWidth;
         int imgHeight = g_state.imageHeight;
-        
+
         if (g_state.currentRotation == 90 || g_state.currentRotation == 270) {
             std::swap(imgWidth, imgHeight);
         }
-        
-        // Calcular posición y tamaño
+
         int drawX = (int)g_state.offsetX;
         int drawY = (int)g_state.offsetY;
         int drawWidth = (int)(imgWidth * g_state.zoom);
         int drawHeight = (int)(imgHeight * g_state.zoom);
-        
-        // Aplicar rotación si es necesario
+
         if (g_state.currentRotation != 0) {
-            // Guardar estado actual
             GraphicsState state = graphics.Save();
-            
-            // Centro de rotación
             float centerX = drawX + drawWidth / 2.0f;
             float centerY = drawY + drawHeight / 2.0f;
-            
-            // Aplicar transformación de rotación
             graphics.TranslateTransform(centerX, centerY);
             graphics.RotateTransform((float)g_state.currentRotation);
             graphics.TranslateTransform(-centerX, -centerY);
-            
-            // Dibujar imagen rotada
             graphics.DrawImage(bitmap, drawX, drawY, drawWidth, drawHeight);
-            
-            // Restaurar estado
             graphics.Restore(state);
         } else {
-            // Dibujar imagen sin rotación
             graphics.DrawImage(bitmap, drawX, drawY, drawWidth, drawHeight);
         }
-        
+
         delete bitmap;
     }
-    
+
     // Renderizar OSD
     RenderOSD(g_state.hdcMem);
 }
@@ -1550,13 +1619,21 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         if (pos != std::wstring::npos) {
                             std::wstring folder = newPath.substr(0, pos);
                             ScanFolderForImages(folder);
-                            
-                            // Encontrar el índice del archivo arrastrado
-                            auto it = std::find(g_state.imageFiles.begin(), g_state.imageFiles.end(), newPath);
-                            if (it != g_state.imageFiles.end()) {
-                                size_t index = std::distance(g_state.imageFiles.begin(), it);
-                                LoadImageByIndex(index);
-                                RequestPrefetch(index);
+
+                            // Encontrar el índice del archivo arrastrado con comparación sensible a mayúsculas
+                            size_t selectedIndex = SIZE_MAX;
+                            for (size_t i = 0; i < g_state.imageFiles.size(); ++i) {
+                                if (PathsEqualCaseInsensitive(g_state.imageFiles[i], newPath)) {
+                                    selectedIndex = i;
+                                    break;
+                                }
+                            }
+
+                            if (selectedIndex != SIZE_MAX) {
+                                LoadImageByIndex(selectedIndex);
+                                RequestPrefetch(selectedIndex);
+                            } else if (!g_state.imageFiles.empty()) {
+                                LoadImageByIndex(0);
                             }
                         }
                     }
@@ -1701,6 +1778,10 @@ void ParseStartupOptions(LPWSTR lpCmdLine, std::wstring& outFolder, WindowMode& 
                     outFolder = firstPath.substr(0, pos);
                 }
             }
+        } else if (!firstPath.empty()) {
+            // Si Windows pasa una ruta que aún no existe o la carpeta está temporalmente disponible,
+            // conservamos la ruta para intentar cargarla directamente más tarde.
+            g_state.startupFilePath = firstPath;
         }
     }
 }
@@ -1752,9 +1833,15 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
     ScanFolderForImages(folderPath);
 
     if (!g_state.startupFilePath.empty()) {
-        auto it = std::find(g_state.imageFiles.begin(), g_state.imageFiles.end(), g_state.startupFilePath);
-        if (it != g_state.imageFiles.end()) {
-            size_t startupIndex = std::distance(g_state.imageFiles.begin(), it);
+        size_t startupIndex = SIZE_MAX;
+        for (size_t i = 0; i < g_state.imageFiles.size(); ++i) {
+            if (PathsEqualCaseInsensitive(g_state.imageFiles[i], g_state.startupFilePath)) {
+                startupIndex = i;
+                break;
+            }
+        }
+
+        if (startupIndex != SIZE_MAX) {
             g_state.currentImageIndex = startupIndex;
         }
     }
@@ -1819,16 +1906,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
     // Cargar la imagen de inicio exacta si se abrió un archivo desde el Explorador;
     // si no, cargar la primera imagen válida de la carpeta.
     if (!g_state.imageFiles.empty()) {
-        if (!g_state.startupFilePath.empty()) {
-            auto it = std::find(g_state.imageFiles.begin(), g_state.imageFiles.end(), g_state.startupFilePath);
-            if (it != g_state.imageFiles.end()) {
-                LoadImageByIndex(static_cast<size_t>(std::distance(g_state.imageFiles.begin(), it)));
-            } else {
-                LoadImageByIndex(0);
-            }
-        } else {
-            LoadImageByIndex(0);
-        }
+        LoadInitialImageSafely();
     }
 
     // Mostrar ventana en el modo solicitado, sin forzar fullscreen a la fuerza
