@@ -1153,8 +1153,6 @@ void RenderImage() {
     
     RECT rect;
     GetClientRect(g_state.hwnd, &rect);
-    int windowWidth = rect.right;
-    int windowHeight = rect.bottom;
     
     // Limpiar con fondo oscuro
     HBRUSH hBrush = CreateSolidBrush(BG_COLOR);
@@ -1350,9 +1348,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             
             // Limitar zoom
             g_state.zoom = std::max(MIN_ZOOM, std::min(MAX_ZOOM, g_state.zoom));
-            
-            // Zoom focal centrado en el cursor con precisión mejorada
-            float zoomRatio = g_state.zoom / oldZoom;
             
             // Calcular la posición del cursor relativa a la imagen antes del zoom
             float imageX = (pt.x - g_state.offsetX) / oldZoom;

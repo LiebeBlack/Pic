@@ -53,7 +53,6 @@ if(MSVC)
         /Ot
         /Oy
         /GF
-        /MT
     )
     target_link_options(artpicst PRIVATE
         "/LTCG"
