@@ -26,6 +26,7 @@
 #include <atomic>
 #include <cwctype>
 #include <cstdio>
+#include <fstream>
 
 #pragma comment(lib, "gdiplus.lib")
 #pragma comment(lib, "shell32.lib")
@@ -375,10 +376,24 @@ bool ValidateFileIntegrity(const std::wstring& filepath) {
     return true;
 }
 
+// Registro simple de diagnóstico para ver qué ocurre al arrancar o cerrar la app.
+void LogMessage(const std::wstring& message) {
+    try {
+        std::wofstream logFile(L"artpicst.log", std::ios::app);
+        if (logFile.is_open()) {
+            logFile << L"[" << std::chrono::system_clock::now().time_since_epoch().count() << L"] " << message << L"\n";
+            logFile.close();
+        }
+    } catch (...) {
+        // Silencio intencional: no romper la app al escribir log.
+    }
+}
+
 // Manejo de errores robusto con graceful degradation
 void HandleError(const std::wstring& errorMsg, bool showUser = true) {
     g_state.lastError = errorMsg;
     g_state.errorCount++;
+    LogMessage(errorMsg);
     
     // Logging de errores para depuración
     #ifdef _DEBUG
@@ -441,6 +456,53 @@ void HandleError(const std::wstring& errorMsg, bool showUser = true) {
     }
 }
 
+// Comprueba si la extensión es compatible con los formatos que stb puede decodificar.
+bool IsSupportedImageExtension(const std::wstring& ext) {
+    static const std::wstring supported[] = {
+        L"jpg", L"jpeg", L"jpe", L"jfif",
+        L"png",
+        L"bmp",
+        L"gif",
+        L"webp",
+        L"tga",
+        L"tif", L"tiff",
+        L"ico", L"cur",
+        L"psd",
+        L"hdr",
+        L"pic",
+        L"pnm", L"ppm", L"pgm",
+        L"avif", L"heic", L"heif",
+        L"jxl", L"jxr"
+    };
+
+    for (const auto& item : supported) {
+        if (ext == item) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Intenta validar si un archivo realmente es una imagen decodificable con stb.
+bool CanDecodeImageFile(const std::wstring& filePath) {
+    int w = 0, h = 0, c = 0;
+    int size_needed = WideCharToMultiByte(CP_UTF8, 0, filePath.c_str(), -1, NULL, 0, NULL, NULL);
+    if (size_needed <= 0) {
+        return false;
+    }
+
+    std::string utf8Path(size_needed, 0);
+    WideCharToMultiByte(CP_UTF8, 0, filePath.c_str(), -1, &utf8Path[0], size_needed, NULL, NULL);
+
+    unsigned char* probe = stbi_load(utf8Path.c_str(), &w, &h, &c, 4);
+    if (probe) {
+        stbi_image_free(probe);
+        return w > 0 && h > 0;
+    }
+
+    return false;
+}
+
 // Obtener archivos de imagen en una carpeta
 void ScanFolderForImages(const std::wstring& folderPath) {
     g_state.imageFiles.clear();
@@ -456,22 +518,23 @@ void ScanFolderForImages(const std::wstring& folderPath) {
             if (!(findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
                 std::wstring filename = findData.cFileName;
                 const size_t dotPos = filename.find_last_of(L'.');
-                if (dotPos == std::wstring::npos) {
+                std::wstring ext;
+                if (dotPos != std::wstring::npos) {
+                    ext = filename.substr(dotPos + 1);
+                    std::transform(ext.begin(), ext.end(), ext.begin(), ::towlower);
+                }
+
+                if (!ext.empty() && IsSupportedImageExtension(ext)) {
+                    g_state.imageFiles.push_back(folderPath + L"\\" + filename);
                     continue;
                 }
 
-                std::wstring ext = filename.substr(dotPos + 1);
-                
-                // Convertir extensión a minúsculas
-                std::transform(ext.begin(), ext.end(), ext.begin(), ::towlower);
-                
-                // Verificar si es una imagen soportada (soporte completo)
-                if (ext == L"jpg" || ext == L"jpeg" || ext == L"png" || 
-                    ext == L"bmp" || ext == L"gif" || ext == L"webp" || 
-                    ext == L"tga" || ext == L"psd" || ext == L"hdr" ||
-                    ext == L"pic" || ext == L"pnm" || ext == L"ppm" ||
-                    ext == L"pgm") {
-                    g_state.imageFiles.push_back(folderPath + L"\\" + filename);
+                // Si tiene extensión rara o no tiene extensión, intentamos validar con stb.
+                if (ext.empty() || !ext.empty()) {
+                    const std::wstring fullPath = folderPath + L"\\" + filename;
+                    if (CanDecodeImageFile(fullPath)) {
+                        g_state.imageFiles.push_back(fullPath);
+                    }
                 }
             }
         } while (FindNextFile(hFind, &findData));
@@ -1488,8 +1551,18 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
     UNREFERENCED_PARAMETER(hPrevInstance);
     UNREFERENCED_PARAMETER(nCmdShow);
 
+    // Activar DPI-aware para evitar que la ventana se cierre o se dibuje mal.
+    if (IsWindows10OrGreater()) {
+        SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    } else if (IsWindowsVistaOrGreater()) {
+        SetProcessDPIAware();
+    }
+
+    LogMessage(L"Iniciando ARTPICST");
+
     // Inicializar GDI+
     if (!InitGDIPlus()) {
+        LogMessage(L"Error al inicializar GDI+");
         MessageBox(NULL, L"Error al inicializar GDI+", L"Error", MB_OK | MB_ICONERROR);
         return 1;
     }
@@ -1512,17 +1585,21 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
     
     // Obtener carpeta de imágenes
     std::wstring folderPath = GetFolderFromArgs(lpCmdLine);
+    LogMessage(L"Carpeta inicial: " + folderPath);
     ScanFolderForImages(folderPath);
     
     if (g_state.imageFiles.empty()) {
         std::wstring selectedFolder;
         if (SelectFolderDialog(NULL, selectedFolder)) {
             ScanFolderForImages(selectedFolder);
+            LogMessage(L"Carpeta seleccionada manualmente: " + selectedFolder);
         }
     }
-    
+
+    // Guardar la app: no crear ni mostrar ninguna ventana si no hay imágenes válidas.
     if (g_state.imageFiles.empty()) {
-        MessageBox(NULL, L"No se encontraron imágenes compatibles en la carpeta seleccionada. Abre la app desde una carpeta con JPG, PNG, BMP o WebP.", L"ARTPICST", MB_OK | MB_ICONINFORMATION);
+        LogMessage(L"No se encontraron imágenes compatibles");
+        MessageBox(NULL, L"No se encontraron imágenes compatibles en la carpeta seleccionada. Abre la app desde una carpeta con JPG, PNG, BMP, WebP o TGA.", L"ARTPICST", MB_OK | MB_ICONINFORMATION);
         CleanupGDIPlus();
         return 0;
     }
