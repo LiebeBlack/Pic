@@ -121,6 +121,7 @@ struct AppState {
     std::vector<std::wstring> imageFiles;
     size_t currentImageIndex;
     std::wstring currentFolder;
+    std::wstring startupFilePath;
     
     // Transformación
     float zoom;
@@ -1694,6 +1695,7 @@ void ParseStartupOptions(LPWSTR lpCmdLine, std::wstring& outFolder, WindowMode& 
             if (attrs & FILE_ATTRIBUTE_DIRECTORY) {
                 outFolder = firstPath;
             } else {
+                g_state.startupFilePath = firstPath;
                 size_t pos = firstPath.find_last_of(L'\\');
                 if (pos != std::wstring::npos) {
                     outFolder = firstPath.substr(0, pos);
@@ -1748,6 +1750,14 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
     g_state.isFullscreen = (startMode == WindowMode::Fullscreen);
     LogMessage(L"Carpeta inicial: " + folderPath + L" | Modo: " + (startMode == WindowMode::Fullscreen ? L"fullscreen" : (startMode == WindowMode::Normal ? L"normal" : L"maximized")));
     ScanFolderForImages(folderPath);
+
+    if (!g_state.startupFilePath.empty()) {
+        auto it = std::find(g_state.imageFiles.begin(), g_state.imageFiles.end(), g_state.startupFilePath);
+        if (it != g_state.imageFiles.end()) {
+            size_t startupIndex = std::distance(g_state.imageFiles.begin(), it);
+            g_state.currentImageIndex = startupIndex;
+        }
+    }
     
     if (g_state.imageFiles.empty()) {
         std::wstring selectedFolder;
@@ -1757,14 +1767,16 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
         }
     }
 
-    // Guardar la app: no crear ni mostrar ninguna ventana si no hay imágenes válidas.
+    // Si la carpeta inicial no contiene imágenes compatibles, no cerrar la app:
+    // la ventana puede seguir abierta para que el usuario arrastre archivos o elija otra carpeta.
     if (g_state.imageFiles.empty()) {
         LogMessage(L"No se encontraron imágenes compatibles");
-        MessageBox(NULL, L"No se encontraron imágenes compatibles en la carpeta seleccionada. Abre la app desde una carpeta con JPG, PNG, BMP, WebP o TGA.", L"ARTPICST", MB_OK | MB_ICONINFORMATION);
-        CleanupGDIPlus();
-        return 0;
+        MessageBox(NULL,
+                   L"No se encontraron imágenes compatibles en la carpeta seleccionada. Puedes arrastrar archivos o carpetas aquí para abrirlos, o elegir otra carpeta.",
+                   L"ARTPICST",
+                   MB_OK | MB_ICONINFORMATION);
     }
-    
+
     // Crear ventana en modo normal maximizado, sin forzar fullscreen
     int screenWidth = GetSystemMetrics(SM_CXSCREEN);
     int screenHeight = GetSystemMetrics(SM_CYSCREEN);
@@ -1804,9 +1816,21 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
         return 1;
     }
     
-    // Cargar primera imagen
-    LoadImageByIndex(0);
-    
+    // Cargar la imagen de inicio exacta si se abrió un archivo desde el Explorador;
+    // si no, cargar la primera imagen válida de la carpeta.
+    if (!g_state.imageFiles.empty()) {
+        if (!g_state.startupFilePath.empty()) {
+            auto it = std::find(g_state.imageFiles.begin(), g_state.imageFiles.end(), g_state.startupFilePath);
+            if (it != g_state.imageFiles.end()) {
+                LoadImageByIndex(static_cast<size_t>(std::distance(g_state.imageFiles.begin(), it)));
+            } else {
+                LoadImageByIndex(0);
+            }
+        } else {
+            LoadImageByIndex(0);
+        }
+    }
+
     // Mostrar ventana en el modo solicitado, sin forzar fullscreen a la fuerza
     if (startMode == WindowMode::Normal) {
         ShowWindow(hwnd, SW_SHOWNORMAL);
