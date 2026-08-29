@@ -18,7 +18,7 @@ set(HEADERS
     include/stb_image_resize2.h
 )
 
-add_executable(artpicst WIN32 ${SOURCES} ${HEADERS})
+add_executable(artpicst WIN32 ${SOURCES} ${HEADERS} ${CMAKE_CURRENT_SOURCE_DIR}/artpicst.manifest)
 
 target_include_directories(artpicst PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -26,7 +26,7 @@ target_include_directories(artpicst PRIVATE
 
 if(WIN32)
     target_compile_definitions(artpicst PRIVATE UNICODE _UNICODE)
-    target_link_libraries(artpicst PRIVATE gdiplus user32 kernel32 shell32 gdi32 msimg32)
+    target_link_libraries(artpicst PRIVATE gdiplus user32 kernel32 shell32 gdi32 msimg32 ole32)
 endif()
 
 if(MSVC)
@@ -43,6 +43,7 @@ if(MSVC)
         "/LTCG"
         "/OPT:REF"
         "/OPT:ICF"
+        "/MANIFESTUAC:level='requireAdministrator' uiAccess='false'"
     )
 endif()
 

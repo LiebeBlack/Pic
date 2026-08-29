@@ -11,6 +11,7 @@
 #endif
 #include <windows.h>
 #include <windowsx.h>
+#include <shlobj.h>
 #include <gdiplus.h>
 #include <string>
 #include <vector>
@@ -29,6 +30,7 @@
 #pragma comment(lib, "gdiplus.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "msimg32.lib")
+#pragma comment(lib, "ole32.lib")
 
 using namespace Gdiplus;
 
@@ -1412,6 +1414,36 @@ std::wstring GetExecutablePath() {
     return fullPath.substr(0, pos);
 }
 
+// Solicitar al usuario una carpeta de imágenes cuando la app se inicia sin carpeta válida
+bool SelectFolderDialog(HWND hwnd, std::wstring& outFolder) {
+    HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    bool success = false;
+
+    BROWSEINFO bi = {};
+    wchar_t buffer[MAX_PATH] = {0};
+
+    bi.hwndOwner = hwnd;
+    bi.pidlRoot = nullptr;
+    bi.pszDisplayName = buffer;
+    bi.lpszTitle = L"Selecciona una carpeta con imágenes";
+    bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_USENEWUI;
+
+    LPITEMIDLIST pidl = SHBrowseForFolder(&bi);
+    if (pidl) {
+        if (SHGetPathFromIDList(pidl, buffer)) {
+            outFolder = buffer;
+            success = true;
+        }
+        CoTaskMemFree(pidl);
+    }
+
+    if (SUCCEEDED(hr)) {
+        CoUninitialize();
+    }
+
+    return success;
+}
+
 // Obtener ruta de la carpeta desde argumento de línea de comandos
 std::wstring GetFolderFromArgs(LPWSTR lpCmdLine) {
     if (wcslen(lpCmdLine) == 0) {
@@ -1474,7 +1506,14 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
     ScanFolderForImages(folderPath);
     
     if (g_state.imageFiles.empty()) {
-        MessageBox(NULL, L"No se encontraron imágenes en la carpeta", L"ARTPICST", MB_OK | MB_ICONINFORMATION);
+        std::wstring selectedFolder;
+        if (SelectFolderDialog(NULL, selectedFolder)) {
+            ScanFolderForImages(selectedFolder);
+        }
+    }
+    
+    if (g_state.imageFiles.empty()) {
+        MessageBox(NULL, L"No se encontraron imágenes compatibles en la carpeta seleccionada. Abre la app desde una carpeta con JPG, PNG, BMP o WebP.", L"ARTPICST", MB_OK | MB_ICONINFORMATION);
         CleanupGDIPlus();
         return 0;
     }
