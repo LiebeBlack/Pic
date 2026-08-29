@@ -1771,7 +1771,7 @@ bool SelectFolderDialog(HWND hwnd, std::wstring& outFolder) {
 // Parsear argumentos de línea de comandos para carpeta y modo de ventana
 void ParseStartupOptions(LPWSTR lpCmdLine, std::wstring& outFolder, WindowMode& outMode) {
     outFolder = GetDefaultImageFolder();
-    outMode = WindowMode::Maximized;
+    outMode = WindowMode::Fullscreen;
 
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(lpCmdLine, &argc);
@@ -1869,7 +1869,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
     
     // Obtener carpeta de imágenes y modo de inicio
     std::wstring folderPath;
-    WindowMode startMode = WindowMode::Maximized;
+    WindowMode startMode = WindowMode::Fullscreen;
     ParseStartupOptions(lpCmdLine, folderPath, startMode);
     g_state.windowMode = startMode;
     g_state.isFullscreen = (startMode == WindowMode::Fullscreen);
@@ -1908,7 +1908,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
                    MB_OK | MB_ICONINFORMATION);
     }
 
-    // Crear ventana en modo normal maximizado, sin forzar fullscreen
+    // Crear ventana en modo completo o normal según el arranque
     int screenWidth = GetSystemMetrics(SM_CXSCREEN);
     int screenHeight = GetSystemMetrics(SM_CYSCREEN);
 
@@ -1919,15 +1919,11 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
     int height = screenHeight;
 
     if (startMode == WindowMode::Normal) {
-        windowStyle = WS_POPUP | WS_VISIBLE;
         width = std::max(900, screenWidth - 80);
         height = std::max(600, screenHeight - 80);
         x = (screenWidth - width) / 2;
         y = (screenHeight - height) / 2;
     } else if (startMode == WindowMode::Maximized) {
-        windowStyle = WS_POPUP | WS_VISIBLE;
-        x = 0;
-        y = 0;
         width = screenWidth;
         height = screenHeight;
     }
@@ -1955,13 +1951,24 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
 
     InvalidateRect(hwnd, NULL, FALSE);
 
-    // Mostrar ventana en el modo solicitado, sin forzar fullscreen a la fuerza
+    // Mostrar ventana en el modo solicitado, garantizando fullscreen real en la pantalla principal
     if (startMode == WindowMode::Normal) {
         ShowWindow(hwnd, SW_SHOWNORMAL);
     } else if (startMode == WindowMode::Maximized) {
         ShowWindow(hwnd, SW_SHOWMAXIMIZED);
     } else {
-        ShowWindow(hwnd, SW_SHOWMAXIMIZED);
+        HMONITOR hMonitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        MONITORINFO mi = { sizeof(mi) };
+        if (GetMonitorInfo(hMonitor, &mi)) {
+            SetWindowPos(hwnd, HWND_TOP,
+                         mi.rcMonitor.left, mi.rcMonitor.top,
+                         mi.rcMonitor.right - mi.rcMonitor.left,
+                         mi.rcMonitor.bottom - mi.rcMonitor.top,
+                         SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+        } else {
+            ShowWindow(hwnd, SW_SHOWMAXIMIZED);
+        }
+        g_state.isFullscreen = true;
     }
     UpdateWindow(hwnd);
     
