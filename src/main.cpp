@@ -63,9 +63,16 @@
 using namespace Gdiplus;
 
 const wchar_t CLASS_NAME[] = L"ARTPICSTWindow";
-const COLORREF BG_COLOR = RGB(18, 18, 18);
-const COLORREF BAR_COLOR = RGB(28, 28, 30);
-const COLORREF ACCENT_COLOR = RGB(90, 160, 255);
+const COLORREF BG_COLOR = RGB(12, 14, 18);
+const COLORREF BAR_COLOR = RGB(21, 24, 29);
+const COLORREF ACCENT_COLOR = RGB(102, 176, 255);
+const COLORREF ACCENT_SOFT = RGB(78, 130, 205);
+const COLORREF PANEL_COLOR = RGB(33, 37, 43);
+const COLORREF PANEL_BORDER = RGB(68, 75, 85);
+const COLORREF BAR_EDGE = RGB(52, 58, 66);
+const COLORREF TEXT_SOFT = RGB(176, 184, 194);
+const COLORREF TEXT_STRONG = RGB(239, 243, 249);
+const COLORREF SHADOW_COLOR = RGB(7, 9, 12);
 const float MIN_ZOOM = 0.05f;
 const float MAX_ZOOM = 64.0f;
 const float ZOOM_STEP = 1.15f;
@@ -512,9 +519,16 @@ bool ValidateFileIntegrity(const std::wstring& filepath) {
 void ShowOSD(const std::wstring& status) {
     g_state.showOSD = true;
     g_state.osdDisplayTime = GetTickCount();
-    if (!status.empty()) g_state.statusMessage = status;
-    if (g_state.hwnd && !g_state.osdPinned) {
-        SetTimer(g_state.hwnd, TIMER_OSD, OSD_MS + 80, nullptr);
+    if (status.empty()) {
+        g_state.statusMessage.clear();
+    } else {
+        g_state.statusMessage = status;
+    }
+    if (g_state.hwnd) {
+        if (!g_state.osdPinned) {
+            SetTimer(g_state.hwnd, TIMER_OSD, OSD_MS + 80, nullptr);
+        }
+        InvalidateRect(g_state.hwnd, nullptr, FALSE);
     }
 }
 
@@ -914,7 +928,7 @@ void RotateImage() {
         FitImageToWindow(client.right - client.left, client.bottom - client.top);
     }
     StoreCurrentInCache();
-    ShowOSD(L"Rotada");
+    ShowOSD(L"Imagen rotada");
     InvalidateRect(g_state.hwnd, nullptr, FALSE);
 }
 
@@ -1053,11 +1067,21 @@ void DrawRoundish(HDC hdc, const RECT& rc, COLORREF fill, COLORREF border) {
     HBRUSH brush = CreateSolidBrush(fill);
     HPEN oldPen = static_cast<HPEN>(SelectObject(hdc, pen));
     HBRUSH oldBrush = static_cast<HBRUSH>(SelectObject(hdc, brush));
-    RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, 8, 8);
+    RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, 10, 10);
     SelectObject(hdc, oldPen);
     SelectObject(hdc, oldBrush);
     DeleteObject(pen);
     DeleteObject(brush);
+
+    RECT topGlow = rc;
+    topGlow.bottom = topGlow.top + 2;
+    HBRUSH topBrush = CreateSolidBrush(RGB(255, 255, 255));
+    HBRUSH oldBrush2 = static_cast<HBRUSH>(SelectObject(hdc, topBrush));
+    SetBkColor(hdc, RGB(255, 255, 255));
+    SetTextColor(hdc, RGB(255, 255, 255));
+    FrameRect(hdc, &topGlow, topBrush);
+    SelectObject(hdc, oldBrush2);
+    DeleteObject(topBrush);
 }
 
 void RenderHud(HDC hdc, const RECT& client) {
@@ -1067,7 +1091,14 @@ void RenderHud(HDC hdc, const RECT& client) {
     FillRect(hdc, &bar, barBrush);
     DeleteObject(barBrush);
 
-    HPEN line = CreatePen(PS_SOLID, 1, RGB(48, 48, 52));
+    RECT shadow = bar;
+    shadow.top -= 2;
+    shadow.bottom = bar.top;
+    HBRUSH shadowBrush = CreateSolidBrush(SHADOW_COLOR);
+    FillRect(hdc, &shadow, shadowBrush);
+    DeleteObject(shadowBrush);
+
+    HPEN line = CreatePen(PS_SOLID, 1, BAR_EDGE);
     HPEN oldPen = static_cast<HPEN>(SelectObject(hdc, line));
     MoveToEx(hdc, 0, bar.top, nullptr);
     LineTo(hdc, client.right, bar.top);
@@ -1083,9 +1114,9 @@ void RenderHud(HDC hdc, const RECT& client) {
     for (int i = 0; i < g_state.hudCount; ++i) {
         const bool hot = g_state.hud[i].id == g_state.hudHot;
         DrawRoundish(hdc, g_state.hud[i].rc,
-                     hot ? RGB(50, 80, 120) : RGB(42, 42, 46),
-                     hot ? ACCENT_COLOR : RGB(64, 64, 70));
-        SetTextColor(hdc, hot ? RGB(255, 255, 255) : RGB(230, 230, 230));
+                     hot ? ACCENT_SOFT : PANEL_COLOR,
+                     hot ? ACCENT_COLOR : PANEL_BORDER);
+        SetTextColor(hdc, hot ? TEXT_STRONG : RGB(233, 236, 240));
         DrawTextW(hdc, g_state.hud[i].label, -1, &g_state.hud[i].rc,
                   DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
@@ -1095,7 +1126,7 @@ void RenderHud(HDC hdc, const RECT& client) {
         info.left = g_state.hud[g_state.hudCount - 1].rc.right + 16;
     }
     if (info.left < info.right - 20) {
-        SetTextColor(hdc, RGB(180, 180, 185));
+        SetTextColor(hdc, TEXT_SOFT);
         std::wstring text;
         if (g_state.imageData && !g_state.currentFilePath.empty()) {
             int dw = 0, dh = 0;
@@ -1114,7 +1145,7 @@ void RenderHud(HDC hdc, const RECT& client) {
                 text += rot;
             }
         } else {
-            text = L"Arrastra una imagen  ·  Ctrl+O abrir  ·  F11 pantalla completa";
+            text = L"Arrastra una imagen o una carpeta aquí  ·  Ctrl + O para abrir  ·  F11 para pantalla completa";
         }
         if (!g_state.statusMessage.empty() &&
             (g_state.osdPinned || GetTickCount() - g_state.osdDisplayTime < OSD_MS)) {
@@ -1155,8 +1186,15 @@ void RenderEmptyState(HDC hdc, const RECT& clientRect) {
     HBRUSH hBrush = CreateSolidBrush(BG_COLOR);
     FillRect(hdc, &view, hBrush);
     DeleteObject(hBrush);
+
+    RECT glow = view;
+    glow.bottom = glow.top + 1;
+    HBRUSH glowBrush = CreateSolidBrush(RGB(26, 29, 35));
+    FillRect(hdc, &glow, glowBrush);
+    DeleteObject(glowBrush);
+
     SetBkMode(hdc, TRANSPARENT);
-    SetTextColor(hdc, RGB(220, 220, 220));
+    SetTextColor(hdc, TEXT_STRONG);
     HFONT hTitle = CreateFontW(26, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
                                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
@@ -1168,10 +1206,10 @@ void RenderEmptyState(HDC hdc, const RECT& clientRect) {
     title.bottom = view.top + (view.bottom - view.top) / 2 + 10;
     DrawTextW(hdc, L"ARTPICST", -1, &title, DT_SINGLELINE | DT_CENTER | DT_BOTTOM);
     SelectObject(hdc, hHint);
-    SetTextColor(hdc, RGB(160, 160, 165));
+    SetTextColor(hdc, TEXT_SOFT);
     RECT hint = view;
     hint.top = title.bottom + 8;
-    DrawTextW(hdc, L"Arrastra una imagen o carpeta  ·  Ctrl+O abrir archivo  ·  Ctrl+Shift+O carpeta",
+    DrawTextW(hdc, L"Arrastra una imagen o una carpeta aquí  ·  Ctrl + O para abrir  ·  Ctrl + Shift + O para explorar",
               -1, &hint, DT_SINGLELINE | DT_CENTER | DT_TOP);
     SelectObject(hdc, old);
     DeleteObject(hTitle);
@@ -1342,7 +1380,7 @@ void ToggleFullscreen() {
     if (!g_state.hwnd) return;
     if (!g_state.isFullscreen) ApplyWindowMode(g_state.hwnd, WindowMode::Fullscreen);
     else ApplyWindowMode(g_state.hwnd, WindowMode::Normal);
-    ShowOSD(g_state.isFullscreen ? L"Pantalla completa" : L"Ventana");
+    ShowOSD(g_state.isFullscreen ? L"Pantalla completa" : L"Modo ventana");
     InvalidateRect(g_state.hwnd, nullptr, FALSE);
 }
 
@@ -1475,7 +1513,7 @@ void InvokeHud(HudId id) {
                 RECT rect{};
                 GetClientRect(g_state.hwnd, &rect);
                 FitImageToWindow(rect.right, rect.bottom);
-                ShowOSD(L"Ajuste");
+                ShowOSD(L"Ajuste perfecto");
                 InvalidateRect(g_state.hwnd, nullptr, FALSE);
             }
             break;
@@ -1489,11 +1527,11 @@ void InvokeHud(HudId id) {
 
 void ShowContextMenu(HWND hwnd, int x, int y) {
     HMENU menu = CreatePopupMenu();
-    AppendMenuW(menu, MF_STRING, 1, L"Abrir imagen\tCtrl+O");
-    AppendMenuW(menu, MF_STRING, 2, L"Abrir carpeta\tCtrl+Shift+O");
+    AppendMenuW(menu, MF_STRING, 1, L"Abrir imagen\tCtrl + O");
+    AppendMenuW(menu, MF_STRING, 2, L"Abrir carpeta\tCtrl + Shift + O");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, 3, L"Copiar imagen\tCtrl+C");
-    AppendMenuW(menu, MF_STRING, 4, L"Copiar ruta\tCtrl+Shift+C");
+    AppendMenuW(menu, MF_STRING, 3, L"Copiar imagen\tCtrl + C");
+    AppendMenuW(menu, MF_STRING, 4, L"Copiar ruta\tCtrl + Shift + C");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, 5, L"Ajustar a ventana\tF");
     AppendMenuW(menu, MF_STRING, 6, L"Tamaño real\t1");
@@ -1617,7 +1655,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     ToggleFullscreen();
                     break;
                 case VK_F1:
-                    ShowOSD(L"Flechas navegar · rueda zoom · F ajustar · R rotar · F11 pantalla");
+                    ShowOSD(L"Flechas para navegar · rueda para acercar · F ajustar · R rotar · F11 pantalla completa");
                     InvalidateRect(hwnd, nullptr, FALSE);
                     break;
                 case VK_OEM_PLUS:
@@ -1740,6 +1778,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_TIMER:
             if (wParam == TIMER_OSD) {
                 KillTimer(hwnd, TIMER_OSD);
+                if (!g_state.osdPinned) {
+                    g_state.statusMessage.clear();
+                }
+                g_state.showOSD = false;
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
             return 0;
@@ -1762,6 +1804,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             StopPrefetchThread();
             FreeCurrentImage();
             FreeDoubleBuffer();
+            g_state.hwnd = nullptr;
+            g_state.statusMessage.clear();
+            g_state.hudHot = HUD_NONE;
             PostQuitMessage(0);
             return 0;
         default:
