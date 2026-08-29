@@ -11,6 +11,7 @@
 #endif
 #include <windows.h>
 #include <windowsx.h>
+#include <VersionHelpers.h>
 #include <shlobj.h>
 #include <gdiplus.h>
 #include <string>
