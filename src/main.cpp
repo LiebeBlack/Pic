@@ -28,6 +28,7 @@
 
 #pragma comment(lib, "gdiplus.lib")
 #pragma comment(lib, "shell32.lib")
+#pragma comment(lib, "msimg32.lib")
 
 using namespace Gdiplus;
 
