@@ -97,6 +97,12 @@ struct CachedImage {
     }
 };
 
+enum class WindowMode {
+    Normal,
+    Maximized,
+    Fullscreen
+};
+
 // Estado de la aplicación
 struct AppState {
     HWND hwnd;
@@ -145,8 +151,11 @@ struct AppState {
     bool showOSD;
     DWORD osdDisplayTime;
     
-    // Fullscreen
+    // Fullscreen / ventana
     bool isFullscreen;
+    WindowMode windowMode;
+    bool hasPreviousWindowRect;
+    RECT previousWindowRect;
     
     // Manejo de errores
     std::wstring lastError;
@@ -162,7 +171,8 @@ struct AppState {
                  isDragging(false), dragStartX(0), dragStartY(0), 
                  dragStartOffsetX(0.0f), dragStartOffsetY(0.0f),
                  prefetchRunning(false), prefetchRequested(false), prefetchTargetIndex(0),
-                 showOSD(true), osdDisplayTime(0), isFullscreen(true), errorCount(0), gdiplusToken(0) {
+                 showOSD(true), osdDisplayTime(0), isFullscreen(false), windowMode(WindowMode::Maximized),
+                 hasPreviousWindowRect(false), previousWindowRect{0,0,0,0}, errorCount(0), gdiplusToken(0) {
         gdiplusStartupInput.GdiplusVersion = 1;
     }
     
@@ -836,33 +846,58 @@ void RotateImage() {
     InvalidateRect(g_state.hwnd, NULL, FALSE);
 }
 
+// Ajustar la imagen a la ventana y mantenerla centrada cuando cambia el tamaño
+void UpdateViewportLayout(bool forceFit = false) {
+    if (!g_state.hwnd || !g_state.imageData) {
+        return;
+    }
+
+    RECT rect;
+    GetClientRect(g_state.hwnd, &rect);
+    if (rect.right <= 0 || rect.bottom <= 0) {
+        return;
+    }
+
+    if (forceFit || g_state.zoom <= 0.0f) {
+        FitImageToWindow(rect.right, rect.bottom);
+    } else {
+        EnsureImageVisible();
+    }
+}
+
 // Alternar modo fullscreen
 void ToggleFullscreen() {
     if (!g_state.hwnd) return;
-    
-    g_state.isFullscreen = !g_state.isFullscreen;
-    
-    if (g_state.isFullscreen) {
-        // Entrar en fullscreen
+
+    if (!g_state.isFullscreen) {
+        if (!g_state.hasPreviousWindowRect) {
+            GetWindowRect(g_state.hwnd, &g_state.previousWindowRect);
+            g_state.hasPreviousWindowRect = true;
+        }
+
         HMONITOR hMonitor = MonitorFromWindow(g_state.hwnd, MONITOR_DEFAULTTONEAREST);
         MONITORINFO mi = {sizeof(mi)};
         GetMonitorInfo(hMonitor, &mi);
-        
-        SetWindowPos(g_state.hwnd, HWND_TOP, 
+
+        SetWindowPos(g_state.hwnd, HWND_TOP,
                      mi.rcMonitor.left, mi.rcMonitor.top,
                      mi.rcMonitor.right - mi.rcMonitor.left,
                      mi.rcMonitor.bottom - mi.rcMonitor.top,
                      SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+        g_state.isFullscreen = true;
     } else {
-        // Salir de fullscreen (ventana normal)
-        int screenWidth = GetSystemMetrics(SM_CXSCREEN);
-        int screenHeight = GetSystemMetrics(SM_CYSCREEN);
-        
-        SetWindowPos(g_state.hwnd, HWND_TOP,
-                     0, 0, screenWidth, screenHeight,
-                     SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+        if (g_state.hasPreviousWindowRect) {
+            SetWindowPos(g_state.hwnd, HWND_TOP,
+                         g_state.previousWindowRect.left,
+                         g_state.previousWindowRect.top,
+                         g_state.previousWindowRect.right - g_state.previousWindowRect.left,
+                         g_state.previousWindowRect.bottom - g_state.previousWindowRect.top,
+                         SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+        }
+        g_state.isFullscreen = false;
     }
-    
+
+    UpdateViewportLayout(true);
     InvalidateRect(g_state.hwnd, NULL, FALSE);
 }
 
@@ -1335,9 +1370,17 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
             if (g_state.imageData && width > 0 && height > 0) {
                 FitImageToWindow(width, height);
+                EnsureImageVisible();
             }
             
             InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
+        }
+
+        case WM_GETMINMAXINFO: {
+            LPMINMAXINFO minMaxInfo = (LPMINMAXINFO)lParam;
+            minMaxInfo->ptMinTrackSize.x = 320;
+            minMaxInfo->ptMinTrackSize.y = 220;
             return 0;
         }
         
@@ -1468,6 +1511,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 
                 g_state.offsetX = g_state.dragStartOffsetX + (x - g_state.dragStartX);
                 g_state.offsetY = g_state.dragStartOffsetY + (y - g_state.dragStartY);
+                EnsureImageVisible();
                 
                 InvalidateRect(hwnd, NULL, FALSE);
             }
@@ -1596,34 +1640,61 @@ bool SelectFolderDialog(HWND hwnd, std::wstring& outFolder) {
     return success;
 }
 
-// Obtener ruta de la carpeta desde argumento de línea de comandos
-std::wstring GetFolderFromArgs(LPWSTR lpCmdLine) {
-    if (wcslen(lpCmdLine) == 0) {
-        return GetExecutablePath();
+// Parsear argumentos de línea de comandos para carpeta y modo de ventana
+void ParseStartupOptions(LPWSTR lpCmdLine, std::wstring& outFolder, WindowMode& outMode) {
+    outFolder = GetExecutablePath();
+    outMode = WindowMode::Maximized;
+
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(lpCmdLine, &argc);
+    if (!argv) {
+        return;
     }
-    
-    std::wstring arg(lpCmdLine);
-    
-    // Eliminar comillas si existen
-    if (arg[0] == L'"' && arg[arg.length() - 1] == L'"') {
-        arg = arg.substr(1, arg.length() - 2);
+
+    std::wstring firstPath;
+    for (int i = 0; i < argc; ++i) {
+        std::wstring arg = argv[i];
+        if (arg == L"--fullscreen" || arg == L"-f") {
+            outMode = WindowMode::Fullscreen;
+            continue;
+        }
+        if (arg == L"--normal" || arg == L"-n") {
+            outMode = WindowMode::Normal;
+            continue;
+        }
+        if (arg == L"--maximized" || arg == L"-m") {
+            outMode = WindowMode::Maximized;
+            continue;
+        }
+
+        if (arg.empty() || arg[0] == L'-') {
+            continue;
+        }
+
+        if (firstPath.empty()) {
+            firstPath = arg;
+        }
     }
-    
-    // Verificar si es un archivo o carpeta
-    DWORD attrs = GetFileAttributes(arg.c_str());
-    if (attrs != INVALID_FILE_ATTRIBUTES) {
-        if (attrs & FILE_ATTRIBUTE_DIRECTORY) {
-            return arg;
-        } else {
-            // Es un archivo, obtener la carpeta
-            size_t pos = arg.find_last_of(L'\\');
-            if (pos != std::wstring::npos) {
-                return arg.substr(0, pos);
+
+    LocalFree(argv);
+
+    if (!firstPath.empty()) {
+        if (firstPath.front() == L'"' && firstPath.back() == L'"') {
+            firstPath = firstPath.substr(1, firstPath.size() - 2);
+        }
+
+        DWORD attrs = GetFileAttributes(firstPath.c_str());
+        if (attrs != INVALID_FILE_ATTRIBUTES) {
+            if (attrs & FILE_ATTRIBUTE_DIRECTORY) {
+                outFolder = firstPath;
+            } else {
+                size_t pos = firstPath.find_last_of(L'\\');
+                if (pos != std::wstring::npos) {
+                    outFolder = firstPath.substr(0, pos);
+                }
             }
         }
     }
-    
-    return GetExecutablePath();
 }
 
 // wWinMain (Unicode entry point expected by the Microsoft CRT)
@@ -1663,9 +1734,13 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
         return 1;
     }
     
-    // Obtener carpeta de imágenes
-    std::wstring folderPath = GetFolderFromArgs(lpCmdLine);
-    LogMessage(L"Carpeta inicial: " + folderPath);
+    // Obtener carpeta de imágenes y modo de inicio
+    std::wstring folderPath;
+    WindowMode startMode = WindowMode::Maximized;
+    ParseStartupOptions(lpCmdLine, folderPath, startMode);
+    g_state.windowMode = startMode;
+    g_state.isFullscreen = (startMode == WindowMode::Fullscreen);
+    LogMessage(L"Carpeta inicial: " + folderPath + L" | Modo: " + (startMode == WindowMode::Fullscreen ? L"fullscreen" : (startMode == WindowMode::Normal ? L"normal" : L"maximized")));
     ScanFolderForImages(folderPath);
     
     if (g_state.imageFiles.empty()) {
@@ -1684,16 +1759,36 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
         return 0;
     }
     
-    // Crear ventana
+    // Crear ventana en modo normal maximizado, sin forzar fullscreen
     int screenWidth = GetSystemMetrics(SM_CXSCREEN);
     int screenHeight = GetSystemMetrics(SM_CYSCREEN);
+
+    DWORD windowStyle = WS_POPUP | WS_VISIBLE;
+    int x = 0;
+    int y = 0;
+    int width = screenWidth;
+    int height = screenHeight;
+
+    if (startMode == WindowMode::Normal) {
+        windowStyle = WS_POPUP | WS_VISIBLE;
+        width = std::max(900, screenWidth - 80);
+        height = std::max(600, screenHeight - 80);
+        x = (screenWidth - width) / 2;
+        y = (screenHeight - height) / 2;
+    } else if (startMode == WindowMode::Maximized) {
+        windowStyle = WS_POPUP | WS_VISIBLE;
+        x = 0;
+        y = 0;
+        width = screenWidth;
+        height = screenHeight;
+    }
     
     HWND hwnd = CreateWindowEx(
         0,
         CLASS_NAME,
         L"ARTPICST",
-        WS_POPUP | WS_VISIBLE,
-        0, 0, screenWidth, screenHeight,
+        windowStyle,
+        x, y, width, height,
         NULL, NULL, hInstance, NULL
     );
     
@@ -1706,8 +1801,14 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
     // Cargar primera imagen
     LoadImageByIndex(0);
     
-    // Mostrar ventana
-    ShowWindow(hwnd, SW_SHOWMAXIMIZED);
+    // Mostrar ventana en el modo solicitado, sin forzar fullscreen a la fuerza
+    if (startMode == WindowMode::Normal) {
+        ShowWindow(hwnd, SW_SHOWNORMAL);
+    } else if (startMode == WindowMode::Maximized) {
+        ShowWindow(hwnd, SW_SHOWMAXIMIZED);
+    } else {
+        ShowWindow(hwnd, SW_SHOWMAXIMIZED);
+    }
     UpdateWindow(hwnd);
     
     // Bucle de mensajes
