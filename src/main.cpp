@@ -6,6 +6,9 @@
 #ifndef _UNICODE
 #define _UNICODE
 #endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
 #include <windowsx.h>
 #include <gdiplus.h>
@@ -1438,8 +1441,8 @@ std::wstring GetFolderFromArgs(LPWSTR lpCmdLine) {
     return GetExecutablePath();
 }
 
-// WinMain
-int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int nCmdShow) {
+// wWinMain (Unicode entry point expected by the Microsoft CRT)
+int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLine, int nCmdShow) {
     // Inicializar GDI+
     if (!InitGDIPlus()) {
         MessageBox(NULL, L"Error al inicializar GDI+", L"Error", MB_OK | MB_ICONERROR);
