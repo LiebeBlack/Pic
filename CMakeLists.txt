@@ -43,7 +43,7 @@ if(MSVC)
         "/LTCG"
         "/OPT:REF"
         "/OPT:ICF"
-        "/MANIFESTUAC:level='requireAdministrator' uiAccess='false'"
+        "/MANIFESTUAC:level='asInvoker' uiAccess='false'"
     )
 endif()
 

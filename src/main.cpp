@@ -455,7 +455,12 @@ void ScanFolderForImages(const std::wstring& folderPath) {
         do {
             if (!(findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
                 std::wstring filename = findData.cFileName;
-                std::wstring ext = filename.substr(filename.find_last_of(L'.') + 1);
+                const size_t dotPos = filename.find_last_of(L'.');
+                if (dotPos == std::wstring::npos) {
+                    continue;
+                }
+
+                std::wstring ext = filename.substr(dotPos + 1);
                 
                 // Convertir extensión a minúsculas
                 std::transform(ext.begin(), ext.end(), ext.begin(), ::towlower);
@@ -920,6 +925,10 @@ std::wstring GetFileSizeString(const std::wstring& filepath) {
 
 // Obtener nombre de archivo sin ruta
 std::wstring GetFileName(const std::wstring& filepath) {
+    if (filepath.empty()) {
+        return L"";
+    }
+
     size_t pos = filepath.find_last_of(L'\\');
     if (pos != std::wstring::npos) {
         return filepath.substr(pos + 1);
