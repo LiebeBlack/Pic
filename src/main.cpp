@@ -1420,22 +1420,26 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_CREATE: {
             g_state.hwnd = hwnd;
-            
+
             // Crear ventana frameless
             LONG style = GetWindowLong(hwnd, GWL_STYLE);
             style &= ~(WS_CAPTION | WS_THICKFRAME | WS_MINIMIZE | WS_MAXIMIZE | WS_SYSMENU);
             SetWindowLong(hwnd, GWL_STYLE, style);
-            
+
             // Establecer fondo
             HBRUSH hBrush = CreateSolidBrush(BG_COLOR);
             SetClassLongPtr(hwnd, GCLP_HBRBACKGROUND, (LONG_PTR)hBrush);
-            
+
             // Habilitar drag & drop
             DragAcceptFiles(hwnd, TRUE);
-            
+
+            RECT clientRect = {0};
+            GetClientRect(hwnd, &clientRect);
+            CreateDoubleBuffer(clientRect.right - clientRect.left, clientRect.bottom - clientRect.top);
+
             // Iniciar hilo de pre-carga
             StartPrefetchThread();
-            
+
             return 0;
         }
         
@@ -1468,13 +1472,24 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_PAINT: {
             PAINTSTRUCT ps;
             HDC hdc = BeginPaint(hwnd, &ps);
-            
+
+            if (!g_state.hdcMem) {
+                RECT clientRect;
+                GetClientRect(hwnd, &clientRect);
+                CreateDoubleBuffer(clientRect.right - clientRect.left, clientRect.bottom - clientRect.top);
+            }
+
             if (g_state.hdcMem) {
                 RenderImage();
-                BitBlt(hdc, 0, 0, ps.rcPaint.right, ps.rcPaint.bottom, 
+                BitBlt(hdc, 0, 0, ps.rcPaint.right, ps.rcPaint.bottom,
                        g_state.hdcMem, 0, 0, SRCCOPY);
+            } else {
+                RECT clientRect = ps.rcPaint;
+                HBRUSH hBrush = CreateSolidBrush(BG_COLOR);
+                FillRect(hdc, &clientRect, hBrush);
+                DeleteObject(hBrush);
             }
-            
+
             EndPaint(hwnd, &ps);
             return 0;
         }
@@ -1694,6 +1709,35 @@ std::wstring GetExecutablePath() {
     return fullPath.substr(0, pos);
 }
 
+// Ruta válida por defecto para arrancar aunque no haya imágenes en la carpeta del ejecutable.
+std::wstring GetDefaultImageFolder() {
+    wchar_t userProfile[MAX_PATH] = {0};
+    if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_MYPICTURES, NULL, SHGFP_TYPE_CURRENT, userProfile)) && userProfile[0] != 0) {
+        DWORD attrs = GetFileAttributesW(userProfile);
+        if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY)) {
+            return userProfile;
+        }
+    }
+
+    std::wstring exeFolder = GetExecutablePath();
+    if (!exeFolder.empty()) {
+        DWORD attrs = GetFileAttributesW(exeFolder.c_str());
+        if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY)) {
+            return exeFolder;
+        }
+    }
+
+    wchar_t documents[MAX_PATH] = {0};
+    if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_PERSONAL, NULL, SHGFP_TYPE_CURRENT, documents)) && documents[0] != 0) {
+        DWORD attrs = GetFileAttributesW(documents);
+        if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY)) {
+            return documents;
+        }
+    }
+
+    return L".";
+}
+
 // Solicitar al usuario una carpeta de imágenes cuando la app se inicia sin carpeta válida
 bool SelectFolderDialog(HWND hwnd, std::wstring& outFolder) {
     HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
@@ -1726,7 +1770,7 @@ bool SelectFolderDialog(HWND hwnd, std::wstring& outFolder) {
 
 // Parsear argumentos de línea de comandos para carpeta y modo de ventana
 void ParseStartupOptions(LPWSTR lpCmdLine, std::wstring& outFolder, WindowMode& outMode) {
-    outFolder = GetExecutablePath();
+    outFolder = GetDefaultImageFolder();
     outMode = WindowMode::Maximized;
 
     int argc = 0;
@@ -1908,6 +1952,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
     if (!g_state.imageFiles.empty()) {
         LoadInitialImageSafely();
     }
+
+    InvalidateRect(hwnd, NULL, FALSE);
 
     // Mostrar ventana en el modo solicitado, sin forzar fullscreen a la fuerza
     if (startMode == WindowMode::Normal) {
