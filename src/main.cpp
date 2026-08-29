@@ -1443,6 +1443,9 @@ std::wstring GetFolderFromArgs(LPWSTR lpCmdLine) {
 
 // wWinMain (Unicode entry point expected by the Microsoft CRT)
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLine, int nCmdShow) {
+    UNREFERENCED_PARAMETER(hPrevInstance);
+    UNREFERENCED_PARAMETER(nCmdShow);
+
     // Inicializar GDI+
     if (!InitGDIPlus()) {
         MessageBox(NULL, L"Error al inicializar GDI+", L"Error", MB_OK | MB_ICONERROR);

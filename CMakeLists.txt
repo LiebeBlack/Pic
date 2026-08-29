@@ -18,7 +18,7 @@ set(HEADERS
     include/stb_image_resize2.h
 )
 
-add_executable(artpicst ${SOURCES} ${HEADERS})
+add_executable(artpicst WIN32 ${SOURCES} ${HEADERS})
 
 target_include_directories(artpicst PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -27,7 +27,6 @@ target_include_directories(artpicst PRIVATE
 if(WIN32)
     target_compile_definitions(artpicst PRIVATE UNICODE _UNICODE)
     target_link_libraries(artpicst PRIVATE gdiplus user32 kernel32 shell32)
-    target_link_options(artpicst PRIVATE "/SUBSYSTEM:WINDOWS" "/ENTRY:WinMain")
 endif()
 
 if(MSVC)
