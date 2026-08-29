@@ -585,6 +585,7 @@ bool LoadImage(const std::wstring& filepath) {
             g_state.imageHeight = cached->height;
             g_state.imageChannels = cached->channels;
             g_state.currentRotation = cached->rotation;
+            ConvertRGBAtoBGRA(g_state.imageData, g_state.imageWidth, g_state.imageHeight);
         } else {
             // Cargar desde disco con manejo de errores
             int size_needed = WideCharToMultiByte(CP_UTF8, 0, filepath.c_str(), -1, NULL, 0, NULL, NULL);
@@ -613,6 +614,8 @@ bool LoadImage(const std::wstring& filepath) {
                 HandleError(errorMsg);
                 return false;
             }
+
+            ConvertRGBAtoBGRA(g_state.imageData, g_state.imageWidth, g_state.imageHeight);
             
             // Validar dimensiones
             if (g_state.imageWidth <= 0 || g_state.imageHeight <= 0 || g_state.imageChannels <= 0) {
@@ -646,6 +649,13 @@ bool LoadImage(const std::wstring& filepath) {
         g_state.zoom = 1.0f;
         g_state.offsetX = 0.0f;
         g_state.offsetY = 0.0f;
+
+        if (g_state.hwnd) {
+            RECT clientRect;
+            GetClientRect(g_state.hwnd, &clientRect);
+            FitImageToWindow(clientRect.right, clientRect.bottom);
+            EnsureImageVisible();
+        }
         
         // Mostrar OSD
         g_state.showOSD = true;
@@ -805,10 +815,15 @@ void RotateImage() {
         return;
     }
     
-    // Rotar estado actual
     g_state.currentRotation = (g_state.currentRotation + 90) % 360;
     
-    // Actualizar caché con la nueva rotación
+    if (g_state.hwnd) {
+        RECT clientRect;
+        GetClientRect(g_state.hwnd, &clientRect);
+        FitImageToWindow(clientRect.right, clientRect.bottom);
+        EnsureImageVisible();
+    }
+    
     if (g_state.currentImageIndex < g_state.imageFiles.size()) {
         const std::wstring& filepath = g_state.imageFiles[g_state.currentImageIndex];
         std::lock_guard<std::mutex> lock(g_state.cacheMutex);
@@ -948,19 +963,93 @@ void PreviousImage() {
     InvalidateRect(g_state.hwnd, NULL, FALSE);
 }
 
-// Ajustar zoom para ajustar imagen a ventana
+// Normalizar los píxeles de RGBA de stb a BGRA para GDI+
+void ConvertRGBAtoBGRA(unsigned char* pixels, int width, int height) {
+    if (!pixels || width <= 0 || height <= 0) {
+        return;
+    }
+
+    const size_t pixelCount = static_cast<size_t>(width) * static_cast<size_t>(height);
+    for (size_t i = 0; i < pixelCount; ++i) {
+        unsigned char* p = pixels + (i * 4);
+        std::swap(p[0], p[2]);
+    }
+}
+
+// Mantener la imagen visible dentro de la ventana aunque se haga zoom o pan
+void EnsureImageVisible() {
+    if (!g_state.imageData || g_state.imageWidth <= 0 || g_state.imageHeight <= 0 || !g_state.hwnd) {
+        return;
+    }
+
+    RECT clientRect;
+    GetClientRect(g_state.hwnd, &clientRect);
+    int windowWidth = clientRect.right - clientRect.left;
+    int windowHeight = clientRect.bottom - clientRect.top;
+    if (windowWidth <= 0 || windowHeight <= 0) {
+        return;
+    }
+
+    int imageWidth = g_state.imageWidth;
+    int imageHeight = g_state.imageHeight;
+    if (g_state.currentRotation == 90 || g_state.currentRotation == 270) {
+        std::swap(imageWidth, imageHeight);
+    }
+
+    float imageDrawWidth = imageWidth * g_state.zoom;
+    float imageDrawHeight = imageHeight * g_state.zoom;
+
+    if (imageDrawWidth < windowWidth) {
+        g_state.offsetX = (windowWidth - imageDrawWidth) * 0.5f;
+    } else {
+        float maxOffsetX = 0.0f;
+        float minOffsetX = windowWidth - imageDrawWidth;
+        if (g_state.offsetX > maxOffsetX) {
+            g_state.offsetX = maxOffsetX;
+        }
+        if (g_state.offsetX < minOffsetX) {
+            g_state.offsetX = minOffsetX;
+        }
+    }
+
+    if (imageDrawHeight < windowHeight) {
+        g_state.offsetY = (windowHeight - imageDrawHeight) * 0.5f;
+    } else {
+        float maxOffsetY = 0.0f;
+        float minOffsetY = windowHeight - imageDrawHeight;
+        if (g_state.offsetY > maxOffsetY) {
+            g_state.offsetY = maxOffsetY;
+        }
+        if (g_state.offsetY < minOffsetY) {
+            g_state.offsetY = minOffsetY;
+        }
+    }
+}
+
+// Ajustar zoom para ajustar imagen a ventana y dejarla centrada
 void FitImageToWindow(int windowWidth, int windowHeight) {
     if (!g_state.imageData || g_state.imageWidth == 0 || g_state.imageHeight == 0) {
         return;
     }
-    
-    float scaleX = (float)windowWidth / g_state.imageWidth;
-    float scaleY = (float)windowHeight / g_state.imageHeight;
-    g_state.zoom = std::min(scaleX, scaleY) * 0.95f; // 95% para dejar un pequeño margen
-    
-    // Centrar imagen
-    g_state.offsetX = (windowWidth - g_state.imageWidth * g_state.zoom) / 2.0f;
-    g_state.offsetY = (windowHeight - g_state.imageHeight * g_state.zoom) / 2.0f;
+    if (windowWidth <= 0 || windowHeight <= 0) {
+        return;
+    }
+
+    int imageWidth = g_state.imageWidth;
+    int imageHeight = g_state.imageHeight;
+    if (g_state.currentRotation == 90 || g_state.currentRotation == 270) {
+        std::swap(imageWidth, imageHeight);
+    }
+
+    float scaleX = static_cast<float>(windowWidth) / static_cast<float>(imageWidth);
+    float scaleY = static_cast<float>(windowHeight) / static_cast<float>(imageHeight);
+    float fitZoom = std::min(scaleX, scaleY) * 0.92f;
+    fitZoom = std::max(MIN_ZOOM, std::min(MAX_ZOOM, fitZoom));
+
+    g_state.zoom = fitZoom;
+    g_state.offsetX = (windowWidth - imageWidth * g_state.zoom) * 0.5f;
+    g_state.offsetY = (windowHeight - imageHeight * g_state.zoom) * 0.5f;
+    EnsureImageVisible();
 }
 
 // Obtener tamaño de archivo en formato legible
@@ -1243,12 +1332,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             int width = LOWORD(lParam);
             int height = HIWORD(lParam);
             CreateDoubleBuffer(width, height);
-            
-            // Si es la primera vez que se muestra, ajustar imagen
-            static bool firstShow = true;
-            if (firstShow && g_state.imageData) {
+
+            if (g_state.imageData && width > 0 && height > 0) {
                 FitImageToWindow(width, height);
-                firstShow = false;
             }
             
             InvalidateRect(hwnd, NULL, FALSE);
@@ -1341,21 +1427,19 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             ScreenToClient(hwnd, &pt);
             
             float oldZoom = g_state.zoom;
-            
-            // Zoom más suave con pasos más pequeños
             float zoomFactor = (delta > 0) ? ZOOM_STEP : (1.0f / ZOOM_STEP);
-            g_state.zoom *= zoomFactor;
-            
-            // Limitar zoom
-            g_state.zoom = std::max(MIN_ZOOM, std::min(MAX_ZOOM, g_state.zoom));
-            
-            // Calcular la posición del cursor relativa a la imagen antes del zoom
+            float newZoom = std::max(MIN_ZOOM, std::min(MAX_ZOOM, g_state.zoom * zoomFactor));
+
+            if (newZoom == oldZoom) {
+                return 0;
+            }
+
             float imageX = (pt.x - g_state.offsetX) / oldZoom;
             float imageY = (pt.y - g_state.offsetY) / oldZoom;
-            
-            // Calcular nuevos offsets para mantener el punto bajo el cursor
+            g_state.zoom = newZoom;
             g_state.offsetX = pt.x - imageX * g_state.zoom;
             g_state.offsetY = pt.y - imageY * g_state.zoom;
+            EnsureImageVisible();
             
             InvalidateRect(hwnd, NULL, FALSE);
             return 0;
