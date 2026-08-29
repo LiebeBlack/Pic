@@ -1787,10 +1787,12 @@ void ApplyWindowMode(HWND hwnd, WindowMode mode) {
         }
 
         if (mode == WindowMode::Normal) {
-            int width = std::max(900, mi.rcMonitor.right - mi.rcMonitor.left - 80);
-            int height = std::max(600, mi.rcMonitor.bottom - mi.rcMonitor.top - 80);
-            int x = mi.rcMonitor.left + ((mi.rcMonitor.right - mi.rcMonitor.left) - width) / 2;
-            int y = mi.rcMonitor.top + ((mi.rcMonitor.bottom - mi.rcMonitor.top) - height) / 2;
+            const int monitorWidth = static_cast<int>(mi.rcMonitor.right - mi.rcMonitor.left);
+            const int monitorHeight = static_cast<int>(mi.rcMonitor.bottom - mi.rcMonitor.top);
+            int width = std::max<int>(900, monitorWidth - 80);
+            int height = std::max<int>(600, monitorHeight - 80);
+            int x = mi.rcMonitor.left + (monitorWidth - width) / 2;
+            int y = mi.rcMonitor.top + (monitorHeight - height) / 2;
             SetWindowPos(hwnd, HWND_TOP, x, y, width, height,
                          SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_SHOWWINDOW);
             return;
@@ -1956,8 +1958,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
     int height = screenHeight;
 
     if (startMode == WindowMode::Normal) {
-        width = std::max(900, screenWidth - 80);
-        height = std::max(600, screenHeight - 80);
+        width = std::max<int>(900, screenWidth - 80);
+        height = std::max<int>(600, screenHeight - 80);
         x = (screenWidth - width) / 2;
         y = (screenHeight - height) / 2;
     } else if (startMode == WindowMode::Maximized) {
