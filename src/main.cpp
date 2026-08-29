@@ -1,6 +1,13 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include "../include/stb_image.h"
+#ifndef UNICODE
+#define UNICODE
+#endif
+#ifndef _UNICODE
+#define _UNICODE
+#endif
 #include <windows.h>
+#include <windowsx.h>
 #include <gdiplus.h>
 #include <string>
 #include <vector>

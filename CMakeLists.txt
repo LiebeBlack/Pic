@@ -25,6 +25,7 @@ target_include_directories(artpicst PRIVATE
 )
 
 if(WIN32)
+    target_compile_definitions(artpicst PRIVATE UNICODE _UNICODE)
     target_link_libraries(artpicst PRIVATE gdiplus user32 kernel32 shell32)
     target_link_options(artpicst PRIVATE "/SUBSYSTEM:WINDOWS" "/ENTRY:WinMain")
 endif()
