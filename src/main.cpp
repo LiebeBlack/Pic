@@ -196,11 +196,17 @@ bool LoadImage(const std::wstring& filepath);
 bool LoadImageByIndex(size_t index);
 void RequestPrefetch(size_t targetIndex);
 void StartPrefetchThread();
+void ConvertRGBAtoBGRA(unsigned char* pixels, int width, int height);
+void EnsureImageVisible();
+void UpdateViewportLayout(bool forceFit = false);
+void FitImageToWindow(int windowWidth, int windowHeight);
 void RotateImage();
 void ToggleFullscreen();
+void RenderOSD(HDC hdc);
+void CreateDoubleBuffer(int width, int height);
+void RenderImage();
 bool CopyPathToClipboard();
 bool CopyImageToClipboard();
-void FitImageToWindow(int windowWidth, int windowHeight);
 
 // Inicializar GDI+
 bool InitGDIPlus() {
