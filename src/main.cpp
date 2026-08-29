@@ -198,7 +198,7 @@ void RequestPrefetch(size_t targetIndex);
 void StartPrefetchThread();
 void ConvertRGBAtoBGRA(unsigned char* pixels, int width, int height);
 void EnsureImageVisible();
-void UpdateViewportLayout(bool forceFit = false);
+void UpdateViewportLayout(bool forceFit);
 void FitImageToWindow(int windowWidth, int windowHeight);
 void RotateImage();
 void ToggleFullscreen();
@@ -853,7 +853,7 @@ void RotateImage() {
 }
 
 // Ajustar la imagen a la ventana y mantenerla centrada cuando cambia el tamaño
-void UpdateViewportLayout(bool forceFit = false) {
+void UpdateViewportLayout(bool forceFit) {
     if (!g_state.hwnd || !g_state.imageData) {
         return;
     }
