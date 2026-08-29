@@ -19,33 +19,28 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Configure MSVC environment
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: amd64
 
       - name: Configure CMake
         shell: powershell
-        run: |
-          cmake -S . -B build -G "Ninja" -DCMAKE_BUILD_TYPE=Release -DCMAKE_MAKE_PROGRAM=ninja
+        run: cmake -S . -B build -A x64
 
       - name: Build application
         shell: powershell
-        run: |
-          $env:CMAKE_BUILD_PARALLEL_LEVEL = 4
-          cmake --build build --config Release --parallel 4
+        run: cmake --build build --config Release --parallel
 
       - name: Validate executable exists
         shell: powershell
         run: |
-          $exe = Join-Path $env:GITHUB_WORKSPACE "build\bin\artpicst.exe"
-          if (-not (Test-Path $exe)) {
-            throw "Executable not found: $exe"
+          $candidates = @(
+            Join-Path $env:GITHUB_WORKSPACE "build\bin\artpicst.exe"
+            Join-Path $env:GITHUB_WORKSPACE "build\Release\artpicst.exe"
+          )
+          $exe = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $exe) {
+            throw "Executable not found"
           }
           Write-Host "Found: $exe"
+          echo "ARTPICST_EXE=$exe" >> $env:GITHUB_ENV
 
       - name: Prepare release folder
         shell: powershell
@@ -53,17 +48,12 @@ jobs:
           $root = $env:GITHUB_WORKSPACE
           $dist = Join-Path $root "dist"
           New-Item -ItemType Directory -Force -Path $dist | Out-Null
-
-          $exeSource = Join-Path $root "build\bin\artpicst.exe"
-          $exeDest = Join-Path $dist "artpicst.exe"
-          Copy-Item $exeSource $exeDest -Force
-
+          Copy-Item $env:ARTPICST_EXE (Join-Path $dist "artpicst.exe") -Force
           Copy-Item (Join-Path $root "README.md") (Join-Path $dist "README.md") -Force
 
       - name: Install NSIS
         shell: powershell
-        run: |
-          choco install nsis -y --no-progress
+        run: choco install nsis -y --no-progress
 
       - name: Generate installer
         shell: powershell
@@ -72,12 +62,9 @@ jobs:
           $dist = Join-Path $root "dist"
           $out = Join-Path $root "artpicst-installer.exe"
           $nsis = "C:\Program Files (x86)\NSIS\Bin\makensis.exe"
-
-          if (-not (Test-Path $nsis)) {
-            throw "NSIS not found at $nsis"
-          }
-
+          if (-not (Test-Path $nsis)) { throw "NSIS not found at $nsis" }
           & $nsis "/DOutFile=$out" "/DSourceDir=$dist" (Join-Path $root "scripts\artpicst-installer.nsi")
+          if ($LASTEXITCODE -ne 0) { throw "NSIS failed" }
 
       - name: Create portable ZIP
         shell: powershell

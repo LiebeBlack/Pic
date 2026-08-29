@@ -1,5 +1,6 @@
 #define STB_IMAGE_IMPLEMENTATION
-#include "../include/stb_image.h"
+#include "stb_image.h"
+
 #ifndef UNICODE
 #define UNICODE
 #endif
@@ -9,75 +10,105 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+
 #include <windows.h>
 #include <windowsx.h>
-#include <VersionHelpers.h>
+#include <shellapi.h>
 #include <shlobj.h>
+#include <shobjidl.h>
+#include <commdlg.h>
+#include <dwmapi.h>
+#include <wincodec.h>
 #include <gdiplus.h>
-#include <string>
-#include <vector>
+
 #include <algorithm>
-#include <cmath>
-#include <thread>
-#include <mutex>
-#include <condition_variable>
-#include <map>
-#include <list>
-#include <chrono>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <cwctype>
-#include <cstdio>
 #include <fstream>
+#include <iterator>
+#include <list>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <unordered_map>
+#include <vector>
 
 #pragma comment(lib, "gdiplus.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "msimg32.lib")
 #pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "oleaut32.lib")
+#pragma comment(lib, "uuid.lib")
+#pragma comment(lib, "gdi32.lib")
+#pragma comment(lib, "user32.lib")
+#pragma comment(lib, "dwmapi.lib")
+#pragma comment(lib, "windowscodecs.lib")
+#pragma comment(lib, "comdlg32.lib")
 
 using namespace Gdiplus;
 
-// Configuración de la ventana
 const wchar_t CLASS_NAME[] = L"ARTPICSTWindow";
-const int BG_COLOR = 0x121212; // #121212
+const COLORREF BG_COLOR = RGB(18, 18, 18);
+const COLORREF BAR_COLOR = RGB(28, 28, 30);
+const COLORREF ACCENT_COLOR = RGB(90, 160, 255);
 const float MIN_ZOOM = 0.05f;
-const float MAX_ZOOM = 100.0f;
+const float MAX_ZOOM = 64.0f;
 const float ZOOM_STEP = 1.15f;
-const size_t CACHE_SIZE = 5; // Caché LRU de 5 imágenes
+const size_t CACHE_SIZE = 5;
+const int MAX_DIMENSION = 20000;
+const LONGLONG MAX_FILE_BYTES = 500LL * 1024LL * 1024LL;
+const UINT OSD_MS = 4000;
+const int HUD_HEIGHT = 52;
 
-// Estructura para datos de imagen en caché
+template <typename T>
+struct ComPtr {
+    T* p = nullptr;
+    ~ComPtr() { reset(); }
+    void reset() {
+        if (p) {
+            p->Release();
+            p = nullptr;
+        }
+    }
+    T** operator&() { return &p; }
+    T* operator->() const { return p; }
+    T* get() const { return p; }
+    explicit operator bool() const { return p != nullptr; }
+};
+
 struct CachedImage {
-    unsigned char* data;
-    int width;
-    int height;
-    int channels;
+    unsigned char* data = nullptr;
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+    int rotation = 0;
     std::wstring filepath;
-    std::chrono::steady_clock::time_point lastAccess;
-    int rotation; // 0, 90, 180, 270 grados
-    
-    CachedImage() : data(nullptr), width(0), height(0), channels(0), rotation(0) {}
-    
+    std::wstring decoder;
+
+    CachedImage() = default;
     ~CachedImage() {
         if (data) {
             stbi_image_free(data);
             data = nullptr;
         }
     }
-    
-    // Prohibir copia para evitar duplicación de punteros
     CachedImage(const CachedImage&) = delete;
     CachedImage& operator=(const CachedImage&) = delete;
-    
-    // Permitir movimiento
-    CachedImage(CachedImage&& other) noexcept 
-        : data(other.data), width(other.width), height(other.height), 
-          channels(other.channels), filepath(std::move(other.filepath)),
-          lastAccess(other.lastAccess), rotation(other.rotation) {
+    CachedImage(CachedImage&& other) noexcept
+        : data(other.data), width(other.width), height(other.height),
+          channels(other.channels), rotation(other.rotation),
+          filepath(std::move(other.filepath)), decoder(std::move(other.decoder)) {
         other.data = nullptr;
-        other.width = 0;
-        other.height = 0;
-        other.channels = 0;
+        other.width = other.height = other.channels = other.rotation = 0;
     }
-    
     CachedImage& operator=(CachedImage&& other) noexcept {
         if (this != &other) {
             if (data) stbi_image_free(data);
@@ -85,100 +116,103 @@ struct CachedImage {
             width = other.width;
             height = other.height;
             channels = other.channels;
-            filepath = std::move(other.filepath);
-            lastAccess = other.lastAccess;
             rotation = other.rotation;
+            filepath = std::move(other.filepath);
+            decoder = std::move(other.decoder);
             other.data = nullptr;
-            other.width = 0;
-            other.height = 0;
-            other.channels = 0;
+            other.width = other.height = other.channels = other.rotation = 0;
         }
         return *this;
     }
 };
 
-enum class WindowMode {
-    Normal,
-    Maximized,
-    Fullscreen
+enum class WindowMode { Normal, Maximized, Fullscreen };
+
+enum HudId {
+    HUD_NONE = 0,
+    HUD_PREV,
+    HUD_NEXT,
+    HUD_FIT,
+    HUD_ONE,
+    HUD_ROT,
+    HUD_FULL,
+    HUD_OPEN
 };
 
-// Estado de la aplicación
+struct HudItem {
+    HudId id = HUD_NONE;
+    RECT rc{};
+    const wchar_t* label = L"";
+};
+
 struct AppState {
-    HWND hwnd;
-    HDC hdcMem;
-    HBITMAP hbmMem;
-    HBITMAP hbmOld;
-    
-    // Datos de imagen actual
-    unsigned char* imageData;
-    int imageWidth;
-    int imageHeight;
-    int imageChannels;
-    int currentRotation; // 0, 90, 180, 270 grados
-    
-    // Navegación
+    HWND hwnd = nullptr;
+    HINSTANCE hInstance = nullptr;
+    HDC hdcMem = nullptr;
+    HBITMAP hbmMem = nullptr;
+    HBITMAP hbmOld = nullptr;
+
+    unsigned char* imageData = nullptr;
+    int imageWidth = 0;
+    int imageHeight = 0;
+    int imageChannels = 0;
+    int currentRotation = 0;
+    std::wstring currentFilePath;
+    std::wstring decoderName;
+
     std::vector<std::wstring> imageFiles;
-    size_t currentImageIndex;
+    size_t currentImageIndex = 0;
     std::wstring currentFolder;
     std::wstring startupFilePath;
-    
-    // Transformación
-    float zoom;
-    float offsetX;
-    float offsetY;
-    
-    // Estado del ratón
-    bool isDragging;
-    int dragStartX;
-    int dragStartY;
-    float dragStartOffsetX;
-    float dragStartOffsetY;
-    
-    // Caché LRU
-    std::map<std::wstring, std::list<CachedImage>::iterator> cacheIndex;
+    std::mutex filesMutex;
+
+    float zoom = 1.0f;
+    float offsetX = 0.0f;
+    float offsetY = 0.0f;
+
+    bool isDragging = false;
+    int dragStartX = 0;
+    int dragStartY = 0;
+    float dragStartOffsetX = 0.0f;
+    float dragStartOffsetY = 0.0f;
+
+    std::unordered_map<std::wstring, std::list<CachedImage>::iterator> cacheIndex;
     std::list<CachedImage> imageCache;
     std::mutex cacheMutex;
-    
-    // Pre-carga en segundo plano
+
     std::thread prefetchThread;
-    std::atomic<bool> prefetchRunning;
-    std::atomic<bool> prefetchRequested;
+    std::atomic<bool> prefetchRunning{false};
+    std::atomic<bool> prefetchRequested{false};
     std::condition_variable prefetchCV;
     std::mutex prefetchMutex;
-    size_t prefetchTargetIndex;
-    
-    // OSD (On-Screen Display)
-    bool showOSD;
-    DWORD osdDisplayTime;
-    
-    // Fullscreen / ventana
-    bool isFullscreen;
-    WindowMode windowMode;
-    bool hasPreviousWindowRect;
-    RECT previousWindowRect;
-    
-    // Manejo de errores
+    size_t prefetchTargetIndex = 0;
+
+    bool showOSD = true;
+    bool osdPinned = true;
+    DWORD osdDisplayTime = 0;
+    std::wstring statusMessage;
+
+    bool isFullscreen = false;
+    WindowMode windowMode = WindowMode::Normal;
+    WINDOWPLACEMENT windowedPlacement{};
+    LONG windowedStyle = 0;
+    LONG windowedExStyle = 0;
+
+    HudItem hud[8]{};
+    int hudCount = 0;
+    HudId hudHot = HUD_NONE;
+
     std::wstring lastError;
-    int errorCount;
-    
-    // GDI+
+    ULONG_PTR gdiplusToken = 0;
     GdiplusStartupInput gdiplusStartupInput;
-    ULONG_PTR gdiplusToken;
-    
-    AppState() : hwnd(nullptr), hdcMem(nullptr), hbmMem(nullptr), hbmOld(nullptr),
-                 imageData(nullptr), imageWidth(0), imageHeight(0), imageChannels(0), currentRotation(0),
-                 currentImageIndex(0), zoom(1.0f), offsetX(0.0f), offsetY(0.0f),
-                 isDragging(false), dragStartX(0), dragStartY(0), 
-                 dragStartOffsetX(0.0f), dragStartOffsetY(0.0f),
-                 prefetchRunning(false), prefetchRequested(false), prefetchTargetIndex(0),
-                 showOSD(true), osdDisplayTime(0), isFullscreen(false), windowMode(WindowMode::Maximized),
-                 hasPreviousWindowRect(false), previousWindowRect{0,0,0,0}, errorCount(0), gdiplusToken(0) {
+    bool comInitialized = false;
+
+    AppState() {
         gdiplusStartupInput.GdiplusVersion = 1;
+        windowedPlacement.length = sizeof(WINDOWPLACEMENT);
     }
-    
+
     ~AppState() {
-        // Limpieza automática en caso de destrucción
         if (imageData) {
             stbi_image_free(imageData);
             imageData = nullptr;
@@ -188,173 +222,228 @@ struct AppState {
 
 AppState g_state;
 
-// Declaraciones adelantadas para evitar errores de compilación por uso antes de definición
 std::wstring GetFileName(const std::wstring& filepath);
 std::wstring GetFileSizeString(const std::wstring& filepath);
 bool PathsEqualCaseInsensitive(const std::wstring& a, const std::wstring& b);
 void FreeCurrentImage();
 void ScanFolderForImages(const std::wstring& folderPath);
-bool LoadImage(const std::wstring& filepath);
+bool LoadImageFromPath(const std::wstring& filepath);
 bool LoadImageByIndex(size_t index);
 void RequestPrefetch(size_t targetIndex);
 void StartPrefetchThread();
+void StopPrefetchThread();
 void ConvertRGBAtoBGRA(unsigned char* pixels, int width, int height);
 void EnsureImageVisible();
-void UpdateViewportLayout(bool forceFit);
 void FitImageToWindow(int windowWidth, int windowHeight);
 void RotateImage();
 void ToggleFullscreen();
-void RenderOSD(HDC hdc);
+void ActualSize();
 void CreateDoubleBuffer(int width, int height);
 void RenderImage();
 void LoadInitialImageSafely();
-bool TryLoadStartupFile();
 bool CopyPathToClipboard();
 bool CopyImageToClipboard();
+void ShowOSD(const std::wstring& status = L"");
+void NextImage();
+void PreviousImage();
+void OpenPath(const std::wstring& path);
+void UpdateWindowTitle();
+void EnableDarkTitleBar(HWND hwnd);
+bool OpenImageFileDialog(HWND hwnd);
+bool OpenFolderDialog(HWND hwnd);
+void LayoutHud(const RECT& client);
+HudId HitTestHud(int x, int y);
+void InvokeHud(HudId id);
+std::wstring WideToLower(std::wstring value);
+std::string WideToUtf8(const std::wstring& value);
+void ApplyWindowMode(HWND hwnd, WindowMode mode);
 
-// Inicializar GDI+
-bool InitGDIPlus() {
-    return GdiplusStartup(&g_state.gdiplusToken, &g_state.gdiplusStartupInput, NULL) == Ok;
+static bool SafePixelBytes(int width, int height, size_t& outBytes) {
+    if (width <= 0 || height <= 0) return false;
+    if (width > MAX_DIMENSION || height > MAX_DIMENSION) return false;
+    const uint64_t bytes = static_cast<uint64_t>(width) * static_cast<uint64_t>(height) * 4ull;
+    if (bytes > static_cast<uint64_t>(SIZE_MAX)) return false;
+    outBytes = static_cast<size_t>(bytes);
+    return true;
 }
 
-// Limpiar GDI+
-void CleanupGDIPlus() {
-    // Detener hilo de pre-carga de forma segura
+static int ViewHeight(int clientHeight) {
+    return std::max(1, clientHeight - HUD_HEIGHT);
+}
+
+static std::wstring LogPath() {
+    wchar_t temp[MAX_PATH] = {};
+    DWORD n = GetTempPathW(MAX_PATH, temp);
+    if (n == 0 || n >= MAX_PATH) return L"artpicst.log";
+    return std::wstring(temp) + L"artpicst.log";
+}
+
+void LogMessage(const std::wstring& message) {
+    try {
+        std::wofstream logFile(LogPath(), std::ios::app);
+        if (!logFile.is_open()) return;
+        SYSTEMTIME st{};
+        GetLocalTime(&st);
+        wchar_t stamp[64];
+        swprintf_s(stamp, L"%04u-%02u-%02u %02u:%02u:%02u",
+                   st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+        logFile << L"[" << stamp << L"] " << message << L"\n";
+    } catch (...) {
+    }
+}
+
+std::string WideToUtf8(const std::wstring& value) {
+    if (value.empty()) return {};
+    int needed = WideCharToMultiByte(CP_UTF8, 0, value.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (needed <= 0) return {};
+    std::string out(static_cast<size_t>(needed), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, value.c_str(), -1, out.data(), needed, nullptr, nullptr);
+    if (!out.empty() && out.back() == '\0') out.pop_back();
+    return out;
+}
+
+std::wstring Utf8ToWide(const char* value) {
+    if (!value || !*value) return {};
+    int needed = MultiByteToWideChar(CP_UTF8, 0, value, -1, nullptr, 0);
+    if (needed <= 0) return {};
+    std::wstring out(static_cast<size_t>(needed), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, value, -1, out.data(), needed);
+    if (!out.empty() && out.back() == L'\0') out.pop_back();
+    return out;
+}
+
+std::wstring WideToLower(std::wstring value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](wchar_t c) {
+        return static_cast<wchar_t>(std::towlower(c));
+    });
+    return value;
+}
+
+bool PathsEqualCaseInsensitive(const std::wstring& a, const std::wstring& b) {
+    return WideToLower(a) == WideToLower(b);
+}
+
+bool InitGDIPlus() {
+    return GdiplusStartup(&g_state.gdiplusToken, &g_state.gdiplusStartupInput, nullptr) == Ok;
+}
+
+void EnableDarkTitleBar(HWND hwnd) {
+    if (!hwnd) return;
+    BOOL dark = TRUE;
+    DwmSetWindowAttribute(hwnd, 20, &dark, sizeof(dark));
+    DwmSetWindowAttribute(hwnd, 19, &dark, sizeof(dark));
+}
+
+void FreeDoubleBuffer() {
+    if (!g_state.hdcMem) return;
+    if (g_state.hbmOld) {
+        SelectObject(g_state.hdcMem, g_state.hbmOld);
+        g_state.hbmOld = nullptr;
+    }
+    if (g_state.hbmMem) {
+        DeleteObject(g_state.hbmMem);
+        g_state.hbmMem = nullptr;
+    }
+    DeleteDC(g_state.hdcMem);
+    g_state.hdcMem = nullptr;
+}
+
+void StopPrefetchThread() {
     g_state.prefetchRunning = false;
     g_state.prefetchRequested = true;
     g_state.prefetchCV.notify_all();
-    
-    // Esperar al hilo con timeout para evitar deadlock
     if (g_state.prefetchThread.joinable()) {
-        auto start = std::chrono::steady_clock::now();
-        while (g_state.prefetchThread.joinable()) {
-            if (std::chrono::steady_clock::now() - start > std::chrono::seconds(5)) {
-                // Timeout: forzar terminación
-                g_state.prefetchThread.detach();
-                break;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            if (g_state.prefetchThread.joinable()) {
-                g_state.prefetchThread.join();
-                break;
-            }
-        }
+        g_state.prefetchThread.join();
     }
-    
-    // Limpiar caché de forma segura
+}
+
+void CleanupGDIPlus() {
+    StopPrefetchThread();
     {
         std::lock_guard<std::mutex> lock(g_state.cacheMutex);
         g_state.imageCache.clear();
         g_state.cacheIndex.clear();
     }
-    
-    // Liberar imagen actual
     FreeCurrentImage();
-    
-    // Liberar recursos GDI+
-    if (g_state.hdcMem) {
-        SelectObject(g_state.hdcMem, g_state.hbmOld);
-        DeleteObject(g_state.hbmMem);
-        DeleteDC(g_state.hdcMem);
-        g_state.hdcMem = nullptr;
-        g_state.hbmMem = nullptr;
-        g_state.hbmOld = nullptr;
-    }
-    
+    FreeDoubleBuffer();
     if (g_state.gdiplusToken) {
         GdiplusShutdown(g_state.gdiplusToken);
         g_state.gdiplusToken = 0;
     }
 }
 
-// Obtener imagen de caché con sincronización mejorada
-CachedImage* GetFromCache(const std::wstring& filepath) {
-    std::lock_guard<std::mutex> lock(g_state.cacheMutex);
-    
-    try {
-        auto it = g_state.cacheIndex.find(filepath);
-        if (it != g_state.cacheIndex.end()) {
-            // Validar que el iterador sigue siendo válido
-            if (it->second == g_state.imageCache.end()) {
-                g_state.cacheIndex.erase(it);
-                return nullptr;
-            }
-            
-            // Mover al final (más reciente) de forma segura
-            g_state.imageCache.splice(g_state.imageCache.end(), g_state.imageCache, it->second);
-            it->second = std::prev(g_state.imageCache.end());
-            it->second->lastAccess = std::chrono::steady_clock::now();
-            
-            return &(*it->second);
-        }
-    } catch (...) {
-        // Si hay algún error en la caché, limpiarla y retornar nullptr
-        g_state.imageCache.clear();
-        g_state.cacheIndex.clear();
-    }
-    
-    return nullptr;
+bool CopyCachedPixels(const CachedImage& src, unsigned char*& dest) {
+    size_t bytes = 0;
+    if (!src.data || !SafePixelBytes(src.width, src.height, bytes)) return false;
+    dest = static_cast<unsigned char*>(malloc(bytes));
+    if (!dest) return false;
+    memcpy(dest, src.data, bytes);
+    return true;
 }
 
-// Agregar imagen a caché con sincronización mejorada
-void AddToCache(const std::wstring& filepath, unsigned char* data, int width, int height, int channels) {
-    if (!data || width <= 0 || height <= 0 || channels <= 0) {
-        if (data) stbi_image_free(data);
+bool TryCopyFromCache(const std::wstring& filepath, CachedImage& outCopy) {
+    std::lock_guard<std::mutex> lock(g_state.cacheMutex);
+    auto it = g_state.cacheIndex.find(filepath);
+    if (it == g_state.cacheIndex.end() || it->second == g_state.imageCache.end()) {
+        return false;
+    }
+    g_state.imageCache.splice(g_state.imageCache.end(), g_state.imageCache, it->second);
+    it->second = std::prev(g_state.imageCache.end());
+    const CachedImage& src = *it->second;
+    unsigned char* pixels = nullptr;
+    if (!CopyCachedPixels(src, pixels)) return false;
+    outCopy.data = pixels;
+    outCopy.width = src.width;
+    outCopy.height = src.height;
+    outCopy.channels = src.channels;
+    outCopy.rotation = src.rotation;
+    outCopy.filepath = src.filepath;
+    outCopy.decoder = src.decoder;
+    return true;
+}
+
+void AddToCache(const std::wstring& filepath, unsigned char* data, int width, int height,
+                int channels, int rotation, const std::wstring& decoder) {
+    if (!data) return;
+    size_t bytes = 0;
+    if (!SafePixelBytes(width, height, bytes)) {
+        stbi_image_free(data);
         return;
     }
-    
     std::lock_guard<std::mutex> lock(g_state.cacheMutex);
-    
-    try {
-        // Si ya existe, actualizar de forma segura
-        auto it = g_state.cacheIndex.find(filepath);
-        if (it != g_state.cacheIndex.end()) {
-            if (it->second != g_state.imageCache.end()) {
-                g_state.imageCache.erase(it->second);
-            }
-            g_state.cacheIndex.erase(it);
-        }
-        
-        // Crear entrada de caché
-        CachedImage cached;
-        cached.data = data;
-        cached.width = width;
-        cached.height = height;
-        cached.channels = channels;
-        cached.filepath = filepath;
-        cached.lastAccess = std::chrono::steady_clock::now();
-        cached.rotation = 0;
-        
-        g_state.imageCache.push_back(std::move(cached));
-        g_state.cacheIndex[filepath] = std::prev(g_state.imageCache.end());
-        
-        // Aplicar LRU si excede el tamaño con validación
-        while (g_state.imageCache.size() > CACHE_SIZE) {
-            if (g_state.imageCache.empty()) break;
-            
-            auto oldest = g_state.imageCache.begin();
-            auto indexIt = g_state.cacheIndex.find(oldest->filepath);
-            if (indexIt != g_state.cacheIndex.end()) {
-                g_state.cacheIndex.erase(indexIt);
-            }
-            g_state.imageCache.pop_front();
-        }
-    } catch (...) {
-        // Si falla, liberar memoria y limpiar caché corrupta
-        if (data) stbi_image_free(data);
-        g_state.imageCache.clear();
-        g_state.cacheIndex.clear();
+    auto it = g_state.cacheIndex.find(filepath);
+    if (it != g_state.cacheIndex.end()) {
+        if (it->second != g_state.imageCache.end()) g_state.imageCache.erase(it->second);
+        g_state.cacheIndex.erase(it);
+    }
+    CachedImage cached;
+    cached.data = data;
+    cached.width = width;
+    cached.height = height;
+    cached.channels = channels;
+    cached.rotation = rotation;
+    cached.filepath = filepath;
+    cached.decoder = decoder;
+    g_state.imageCache.push_back(std::move(cached));
+    g_state.cacheIndex[filepath] = std::prev(g_state.imageCache.end());
+    while (g_state.imageCache.size() > CACHE_SIZE) {
+        auto oldest = g_state.imageCache.begin();
+        g_state.cacheIndex.erase(oldest->filepath);
+        g_state.imageCache.pop_front();
     }
 }
 
-// Limpiar caché
+bool IsInCache(const std::wstring& filepath) {
+    std::lock_guard<std::mutex> lock(g_state.cacheMutex);
+    return g_state.cacheIndex.find(filepath) != g_state.cacheIndex.end();
+}
+
 void ClearCache() {
     std::lock_guard<std::mutex> lock(g_state.cacheMutex);
     g_state.imageCache.clear();
     g_state.cacheIndex.clear();
 }
 
-// Liberar imagen actual de forma segura
 void FreeCurrentImage() {
     if (g_state.imageData) {
         stbi_image_free(g_state.imageData);
@@ -364,1143 +453,1046 @@ void FreeCurrentImage() {
     g_state.imageHeight = 0;
     g_state.imageChannels = 0;
     g_state.currentRotation = 0;
+    g_state.currentFilePath.clear();
+    g_state.decoderName.clear();
 }
 
-// Validar integridad de archivo
 bool ValidateFileIntegrity(const std::wstring& filepath) {
-    WIN32_FILE_ATTRIBUTE_DATA fileData;
-    if (!GetFileAttributesEx(filepath.c_str(), GetFileExInfoStandard, &fileData)) {
-        return false;
-    }
-    
-    // Verificar que no sea un directorio
-    if (fileData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-        return false;
-    }
-    
-    // Verificar tamaño razonable (máximo 500MB para evitar DOS)
-    LARGE_INTEGER size;
+    WIN32_FILE_ATTRIBUTE_DATA fileData{};
+    if (!GetFileAttributesExW(filepath.c_str(), GetFileExInfoStandard, &fileData)) return false;
+    if (fileData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) return false;
+    LARGE_INTEGER size{};
     size.HighPart = fileData.nFileSizeHigh;
     size.LowPart = fileData.nFileSizeLow;
-    
-    if (size.QuadPart > 500LL * 1024LL * 1024LL) { // 500MB
-        return false;
-    }
-    
-    // Verificar que el archivo sea accesible
-    HANDLE hFile = CreateFile(filepath.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (hFile == INVALID_HANDLE_VALUE) {
-        return false;
-    }
+    if (size.QuadPart <= 0 || size.QuadPart > MAX_FILE_BYTES) return false;
+    HANDLE hFile = CreateFileW(filepath.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                               nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hFile == INVALID_HANDLE_VALUE) return false;
     CloseHandle(hFile);
-    
     return true;
 }
 
-// Registro simple de diagnóstico para ver qué ocurre al arrancar o cerrar la app.
-void LogMessage(const std::wstring& message) {
-    try {
-        std::wofstream logFile(L"artpicst.log", std::ios::app);
-        if (logFile.is_open()) {
-            logFile << L"[" << std::chrono::system_clock::now().time_since_epoch().count() << L"] " << message << L"\n";
-            logFile.close();
-        }
-    } catch (...) {
-        // Silencio intencional: no romper la app al escribir log.
-    }
+void ShowOSD(const std::wstring& status) {
+    g_state.showOSD = true;
+    g_state.osdDisplayTime = GetTickCount();
+    if (!status.empty()) g_state.statusMessage = status;
 }
 
-// Manejo de errores robusto con graceful degradation
-void HandleError(const std::wstring& errorMsg, bool showUser = true) {
+void HandleError(const std::wstring& errorMsg, bool showUser) {
     g_state.lastError = errorMsg;
-    g_state.errorCount++;
     LogMessage(errorMsg);
-    
-    // Logging de errores para depuración
-    #ifdef _DEBUG
-    {
-        // En modo debug, escribir a archivo de log
-        static FILE* logFile = nullptr;
-        if (!logFile) {
-            logFile = fopen("artpicst_debug.log", "a");
+    ShowOSD(errorMsg);
+    if (showUser && g_state.hwnd) {
+        static DWORD lastErrorTime = 0;
+        DWORD now = GetTickCount();
+        if (now - lastErrorTime > 2500) {
+            lastErrorTime = now;
+            MessageBoxW(g_state.hwnd, errorMsg.c_str(), L"ARTPICST", MB_OK | MB_ICONWARNING);
         }
-        if (logFile) {
-            int size_needed = WideCharToMultiByte(CP_UTF8, 0, errorMsg.c_str(), -1, NULL, 0, NULL, NULL);
-            if (size_needed > 0) {
-                std::string errorMsgUtf8(size_needed, 0);
-                WideCharToMultiByte(CP_UTF8, 0, errorMsg.c_str(), -1, &errorMsgUtf8[0], size_needed, NULL, NULL);
-                fprintf(logFile, "[ERROR] %s\n", errorMsgUtf8.c_str());
-                fflush(logFile);
-            }
-        }
-    }
-    #endif
-    
-    // Limitar frecuencia de mensajes de error al usuario
-    static DWORD lastErrorTime = 0;
-    DWORD currentTime = GetTickCount();
-    
-    if (showUser && (currentTime - lastErrorTime > 3000 || g_state.errorCount <= 3)) {
-        // Solo mostrar errores críticos al usuario
-        if (g_state.errorCount > 5) {
-            // Graceful degradation: demasiados errores, mostrar mensaje una sola vez
-            MessageBox(g_state.hwnd, 
-                      L"Se han producido varios errores. La aplicación continuará funcionando con funcionalidad reducida.",
-                      L"ARTPICST - Modo Degradado", MB_OK | MB_ICONINFORMATION);
-            g_state.errorCount = 0; // Resetear para evitar spam
-        } else {
-            MessageBox(g_state.hwnd, errorMsg.c_str(), L"ARTPICST Error", MB_OK | MB_ICONWARNING);
-        }
-        lastErrorTime = currentTime;
-    }
-    
-    // Graceful degradation: Si hay demasiados errores, reducir funcionalidad
-    if (g_state.errorCount > 8) {
-        // Desactivar pre-carga para reducir carga
-        g_state.prefetchRunning = false;
-        
-        // Reducir tamaño de caché
-        const size_t REDUCED_CACHE_SIZE = 2;
-        std::lock_guard<std::mutex> lock(g_state.cacheMutex);
-        while (g_state.imageCache.size() > REDUCED_CACHE_SIZE) {
-            auto oldest = g_state.imageCache.begin();
-            g_state.cacheIndex.erase(oldest->filepath);
-            g_state.imageCache.pop_front();
-        }
-    }
-    
-    // Resetear contador después de muchos errores para recuperación
-    if (g_state.errorCount > 15) {
-        g_state.errorCount = 0;
-        // Reactivar funcionalidad gradualmente
-        g_state.prefetchRunning = true;
     }
 }
 
-// Comprueba si la extensión es compatible con los formatos que stb puede decodificar.
-bool IsSupportedImageExtension(const std::wstring& ext) {
-    static const std::wstring supported[] = {
-        L"jpg", L"jpeg", L"jpe", L"jfif",
-        L"png",
-        L"bmp",
+bool IsSupportedImageExtension(const std::wstring& extLower) {
+    static const wchar_t* supported[] = {
+        L"jpg", L"jpeg", L"jpe", L"jfif", L"jif",
+        L"png", L"apng",
+        L"bmp", L"dib", L"rle",
         L"gif",
-        L"webp",
-        L"tga",
         L"tif", L"tiff",
-        L"ico", L"cur",
+        L"webp",
+        L"heic", L"heif", L"hif",
+        L"avif",
+        L"jxl", L"jxr", L"wdp", L"hdp",
+        L"ico", L"cur", L"icon",
+        L"tga", L"tpic",
         L"psd",
-        L"hdr",
-        L"pic",
-        L"pnm", L"ppm", L"pgm",
-        L"avif", L"heic", L"heif",
-        L"jxl", L"jxr"
+        L"hdr", L"pic",
+        L"pnm", L"ppm", L"pgm", L"pbm",
+        L"jp2", L"j2k", L"jpx",
+        L"emf", L"wmf", L"exif",
+        L"dng", L"cr2", L"cr3", L"nef", L"arw", L"orf", L"rw2", L"raf", L"sr2", L"kdc", L"raw"
     };
+    for (const wchar_t* item : supported) {
+        if (extLower == item) return true;
+    }
+    return false;
+}
 
-    for (const auto& item : supported) {
-        if (ext == item) {
+std::wstring GetExtensionLower(const std::wstring& filename) {
+    const size_t dot = filename.find_last_of(L'.');
+    if (dot == std::wstring::npos || dot + 1 >= filename.size()) return {};
+    return WideToLower(filename.substr(dot + 1));
+}
+
+void ScanFolderForImages(const std::wstring& folderPath) {
+    std::vector<std::wstring> found;
+    WIN32_FIND_DATAW findData{};
+    const std::wstring searchPath = folderPath + L"\\*";
+    HANDLE hFind = FindFirstFileW(searchPath.c_str(), &findData);
+    if (hFind != INVALID_HANDLE_VALUE) {
+        do {
+            if (findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+            const std::wstring filename = findData.cFileName;
+            const std::wstring ext = GetExtensionLower(filename);
+            if (ext.empty() || !IsSupportedImageExtension(ext)) continue;
+            found.push_back(folderPath + L"\\" + filename);
+        } while (FindNextFileW(hFind, &findData));
+        FindClose(hFind);
+    }
+    std::sort(found.begin(), found.end(), [](const std::wstring& a, const std::wstring& b) {
+        return WideToLower(a) < WideToLower(b);
+    });
+    {
+        std::lock_guard<std::mutex> lock(g_state.filesMutex);
+        g_state.imageFiles = std::move(found);
+        g_state.currentFolder = folderPath;
+        g_state.currentImageIndex = 0;
+    }
+    ClearCache();
+}
+
+size_t ImageCount() {
+    std::lock_guard<std::mutex> lock(g_state.filesMutex);
+    return g_state.imageFiles.size();
+}
+
+std::wstring ImagePathAt(size_t index) {
+    std::lock_guard<std::mutex> lock(g_state.filesMutex);
+    if (index >= g_state.imageFiles.size()) return {};
+    return g_state.imageFiles[index];
+}
+
+bool FindImageIndex(const std::wstring& path, size_t& outIndex) {
+    std::lock_guard<std::mutex> lock(g_state.filesMutex);
+    for (size_t i = 0; i < g_state.imageFiles.size(); ++i) {
+        if (PathsEqualCaseInsensitive(g_state.imageFiles[i], path)) {
+            outIndex = i;
             return true;
         }
     }
     return false;
 }
 
-// Intenta validar si un archivo realmente es una imagen decodificable con stb.
-bool CanDecodeImageFile(const std::wstring& filePath) {
-    int w = 0, h = 0, c = 0;
-    int size_needed = WideCharToMultiByte(CP_UTF8, 0, filePath.c_str(), -1, NULL, 0, NULL, NULL);
-    if (size_needed <= 0) {
-        return false;
-    }
-
-    std::string utf8Path(size_needed, 0);
-    WideCharToMultiByte(CP_UTF8, 0, filePath.c_str(), -1, &utf8Path[0], size_needed, NULL, NULL);
-
-    unsigned char* probe = stbi_load(utf8Path.c_str(), &w, &h, &c, 4);
-    if (probe) {
-        stbi_image_free(probe);
-        return w > 0 && h > 0;
-    }
-
-    return false;
+void EnsureFileInList(const std::wstring& path) {
+    size_t dummy = 0;
+    if (FindImageIndex(path, dummy)) return;
+    std::lock_guard<std::mutex> lock(g_state.filesMutex);
+    g_state.imageFiles.push_back(path);
+    g_state.currentImageIndex = g_state.imageFiles.size() - 1;
 }
 
-// Obtener archivos de imagen en una carpeta
-void ScanFolderForImages(const std::wstring& folderPath) {
-    g_state.imageFiles.clear();
-    g_state.currentFolder = folderPath;
-    ClearCache();
-    
-    WIN32_FIND_DATA findData;
-    std::wstring searchPath = folderPath + L"\\*";
-    HANDLE hFind = FindFirstFile(searchPath.c_str(), &findData);
-    
-    if (hFind != INVALID_HANDLE_VALUE) {
-        do {
-            if (!(findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
-                std::wstring filename = findData.cFileName;
-                const size_t dotPos = filename.find_last_of(L'.');
-                std::wstring ext;
-                if (dotPos != std::wstring::npos) {
-                    ext = filename.substr(dotPos + 1);
-                    std::transform(ext.begin(), ext.end(), ext.begin(), ::towlower);
-                }
-
-                if (!ext.empty() && IsSupportedImageExtension(ext)) {
-                    g_state.imageFiles.push_back(folderPath + L"\\" + filename);
-                    continue;
-                }
-
-                // Si tiene extensión rara o no tiene extensión, intentamos validar con stb.
-                if (ext.empty() || !ext.empty()) {
-                    const std::wstring fullPath = folderPath + L"\\" + filename;
-                    if (CanDecodeImageFile(fullPath)) {
-                        g_state.imageFiles.push_back(fullPath);
-                    }
-                }
-            }
-        } while (FindNextFile(hFind, &findData));
-        FindClose(hFind);
+unsigned char* DecodeWithStb(const std::wstring& filepath, int& width, int& height, int& channels) {
+    width = height = channels = 0;
+    const std::string utf8 = WideToUtf8(filepath);
+    if (utf8.empty()) return nullptr;
+    unsigned char* pixels = stbi_load(utf8.c_str(), &width, &height, &channels, 4);
+    if (!pixels) return nullptr;
+    size_t bytes = 0;
+    if (!SafePixelBytes(width, height, bytes)) {
+        stbi_image_free(pixels);
+        width = height = channels = 0;
+        return nullptr;
     }
-    
-    // Ordenar archivos alfabéticamente
-    std::sort(g_state.imageFiles.begin(), g_state.imageFiles.end());
+    ConvertRGBAtoBGRA(pixels, width, height);
+    return pixels;
 }
 
-// Cargar imagen con manejo robusto de errores
-bool LoadImage(const std::wstring& filepath) {
-    // Validar integridad del archivo primero
-    if (!ValidateFileIntegrity(filepath)) {
-        HandleError(L"Archivo inválido o inaccesible: " + GetFileName(filepath));
-        return false;
+unsigned char* DecodeWithWic(const std::wstring& filepath, int& width, int& height, int& channels) {
+    width = height = channels = 0;
+    ComPtr<IWICImagingFactory> factory;
+    HRESULT hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+                                  IID_PPV_ARGS(&factory.p));
+    if (FAILED(hr) || !factory) return nullptr;
+
+    ComPtr<IWICBitmapDecoder> decoder;
+    hr = factory->CreateDecoderFromFilename(filepath.c_str(), nullptr, GENERIC_READ,
+                                            WICDecodeMetadataCacheOnDemand, &decoder);
+    if (FAILED(hr) || !decoder) return nullptr;
+
+    ComPtr<IWICBitmapFrameDecode> frame;
+    hr = decoder->GetFrame(0, &frame);
+    if (FAILED(hr) || !frame) return nullptr;
+
+    ComPtr<IWICFormatConverter> converter;
+    hr = factory->CreateFormatConverter(&converter);
+    if (FAILED(hr) || !converter) return nullptr;
+
+    hr = converter->Initialize(frame.get(), GUID_WICPixelFormat32bppBGRA,
+                               WICBitmapDitherTypeNone, nullptr, 0.0,
+                               WICBitmapPaletteTypeCustom);
+    if (FAILED(hr)) return nullptr;
+
+    UINT w = 0, h = 0;
+    hr = converter->GetSize(&w, &h);
+    if (FAILED(hr)) return nullptr;
+
+    size_t bytes = 0;
+    if (!SafePixelBytes(static_cast<int>(w), static_cast<int>(h), bytes)) return nullptr;
+
+    unsigned char* pixels = static_cast<unsigned char*>(malloc(bytes));
+    if (!pixels) return nullptr;
+    const UINT stride = w * 4;
+    hr = converter->CopyPixels(nullptr, stride, static_cast<UINT>(bytes), pixels);
+    if (FAILED(hr)) {
+        free(pixels);
+        return nullptr;
     }
-    
+    width = static_cast<int>(w);
+    height = static_cast<int>(h);
+    channels = 4;
+    return pixels;
+}
+
+unsigned char* DecodeWithGdiplus(const std::wstring& filepath, int& width, int& height, int& channels) {
+    width = height = channels = 0;
+    Bitmap bmp(filepath.c_str());
+    if (bmp.GetLastStatus() != Ok) return nullptr;
+    const int w = static_cast<int>(bmp.GetWidth());
+    const int h = static_cast<int>(bmp.GetHeight());
+    size_t bytes = 0;
+    if (!SafePixelBytes(w, h, bytes)) return nullptr;
+
+    Rect rect(0, 0, w, h);
+    BitmapData data{};
+    if (bmp.LockBits(&rect, ImageLockModeRead, PixelFormat32bppARGB, &data) != Ok) return nullptr;
+
+    unsigned char* pixels = static_cast<unsigned char*>(malloc(bytes));
+    if (!pixels) {
+        bmp.UnlockBits(&data);
+        return nullptr;
+    }
+    const UINT dstStride = static_cast<UINT>(w * 4);
+    auto* src = static_cast<const unsigned char*>(data.Scan0);
+    for (int y = 0; y < h; ++y) {
+        memcpy(pixels + static_cast<size_t>(y) * dstStride,
+               src + static_cast<size_t>(y) * static_cast<size_t>(std::abs(data.Stride)),
+               dstStride);
+    }
+    bmp.UnlockBits(&data);
+    width = w;
+    height = h;
+    channels = 4;
+    return pixels;
+}
+
+unsigned char* DecodeImageFile(const std::wstring& filepath, int& width, int& height, int& channels, std::wstring& decoder) {
+    decoder.clear();
+    unsigned char* pixels = DecodeWithStb(filepath, width, height, channels);
+    if (pixels) {
+        decoder = L"stb";
+        return pixels;
+    }
+    pixels = DecodeWithWic(filepath, width, height, channels);
+    if (pixels) {
+        decoder = L"WIC";
+        return pixels;
+    }
+    pixels = DecodeWithGdiplus(filepath, width, height, channels);
+    if (pixels) {
+        decoder = L"GDI+";
+        return pixels;
+    }
+    return nullptr;
+}
+
+void StoreCurrentInCache() {
+    if (g_state.currentFilePath.empty() || !g_state.imageData) return;
+    size_t bytes = 0;
+    if (!SafePixelBytes(g_state.imageWidth, g_state.imageHeight, bytes)) return;
+    unsigned char* copy = static_cast<unsigned char*>(malloc(bytes));
+    if (!copy) return;
+    memcpy(copy, g_state.imageData, bytes);
+    AddToCache(g_state.currentFilePath, copy, g_state.imageWidth, g_state.imageHeight,
+               g_state.imageChannels, g_state.currentRotation, g_state.decoderName);
+}
+
+void UpdateWindowTitle() {
+    if (!g_state.hwnd) return;
+    std::wstring title = L"ARTPICST";
+    if (!g_state.currentFilePath.empty()) {
+        title += L" — ";
+        title += GetFileName(g_state.currentFilePath);
+        const size_t count = ImageCount();
+        if (count > 0) {
+            wchar_t extra[64];
+            swprintf_s(extra, L"  (%zu/%zu)", g_state.currentImageIndex + 1, count);
+            title += extra;
+        }
+    }
+    SetWindowTextW(g_state.hwnd, title.c_str());
+}
+
+bool ApplyLoadedImage(unsigned char* pixels, int width, int height, int channels, int rotation,
+                      const std::wstring& filepath, const std::wstring& decoder) {
     FreeCurrentImage();
-    
-    try {
-        // Verificar caché primero con try-catch para seguridad
-        CachedImage* cached = nullptr;
-        try {
-            cached = GetFromCache(filepath);
-        } catch (...) {
-            // Si falla la caché, continuar con carga desde disco
-            cached = nullptr;
-        }
-        
-        if (cached) {
-            // Copiar datos de caché con validación
-            size_t dataSize = cached->width * cached->height * 4;
-            if (dataSize == 0 || cached->width <= 0 || cached->height <= 0) {
-                HandleError(L"Datos de caché corruptos: " + GetFileName(filepath));
-                return false;
-            }
-            
-            g_state.imageData = (unsigned char*)malloc(dataSize);
-            if (!g_state.imageData) {
-                HandleError(L"Error de memoria al cargar desde caché");
-                return false;
-            }
-            
-            memcpy(g_state.imageData, cached->data, dataSize);
-            g_state.imageWidth = cached->width;
-            g_state.imageHeight = cached->height;
-            g_state.imageChannels = cached->channels;
-            g_state.currentRotation = cached->rotation;
-            ConvertRGBAtoBGRA(g_state.imageData, g_state.imageWidth, g_state.imageHeight);
-        } else {
-            // Cargar desde disco con manejo de errores
-            int size_needed = WideCharToMultiByte(CP_UTF8, 0, filepath.c_str(), -1, NULL, 0, NULL, NULL);
-            if (size_needed <= 0) {
-                HandleError(L"Error al convertir ruta de archivo");
-                return false;
-            }
-            
-            std::string utf8Path(size_needed, 0);
-            WideCharToMultiByte(CP_UTF8, 0, filepath.c_str(), -1, &utf8Path[0], size_needed, NULL, NULL);
-            
-            // Cargar con stb_image
-            g_state.imageData = stbi_load(utf8Path.c_str(), &g_state.imageWidth, &g_state.imageHeight, &g_state.imageChannels, 4);
-            
-            if (!g_state.imageData) {
-                const char* stbError = stbi_failure_reason();
-                std::wstring errorMsg = L"Error al cargar imagen: " + GetFileName(filepath);
-                if (stbError) {
-                    int errSize_needed = MultiByteToWideChar(CP_UTF8, 0, stbError, -1, NULL, 0);
-                    if (errSize_needed > 0) {
-                        std::wstring stbErrorWide(errSize_needed, 0);
-                        MultiByteToWideChar(CP_UTF8, 0, stbError, -1, &stbErrorWide[0], errSize_needed);
-                        errorMsg += L"\nDetalles: " + stbErrorWide;
-                    }
-                }
-                HandleError(errorMsg);
-                return false;
-            }
-
-            ConvertRGBAtoBGRA(g_state.imageData, g_state.imageWidth, g_state.imageHeight);
-            
-            // Validar dimensiones
-            if (g_state.imageWidth <= 0 || g_state.imageHeight <= 0 || g_state.imageChannels <= 0) {
-                HandleError(L"Dimensiones de imagen inválidas: " + GetFileName(filepath));
-                FreeCurrentImage();
-                return false;
-            }
-            
-            // Limitar dimensiones máximas para evitar DOS
-            const int MAX_DIMENSION = 20000; // 20K pixels
-            if (g_state.imageWidth > MAX_DIMENSION || g_state.imageHeight > MAX_DIMENSION) {
-                HandleError(L"Imagen demasiado grande: " + GetFileName(filepath));
-                FreeCurrentImage();
-                return false;
-            }
-            
-            // Agregar a caché de forma segura
-            try {
-                size_t dataSize = g_state.imageWidth * g_state.imageHeight * 4;
-                unsigned char* cacheData = (unsigned char*)malloc(dataSize);
-                if (cacheData) {
-                    memcpy(cacheData, g_state.imageData, dataSize);
-                    AddToCache(filepath, cacheData, g_state.imageWidth, g_state.imageHeight, g_state.imageChannels);
-                }
-            } catch (...) {
-                // Si falla la caché, continuar sin ella
-            }
-        }
-        
-        // Resetear transformación
-        g_state.zoom = 1.0f;
-        g_state.offsetX = 0.0f;
-        g_state.offsetY = 0.0f;
-
-        if (g_state.hwnd) {
-            RECT clientRect;
-            GetClientRect(g_state.hwnd, &clientRect);
-            FitImageToWindow(clientRect.right, clientRect.bottom);
-            EnsureImageVisible();
-        }
-        
-        // Mostrar OSD
-        g_state.showOSD = true;
-        g_state.osdDisplayTime = GetTickCount();
-        
-        return true;
-        
-    } catch (const std::exception& e) {
-        std::string errorMsg = "Excepción al cargar imagen: " + std::string(e.what());
-        int size_needed = MultiByteToWideChar(CP_UTF8, 0, errorMsg.c_str(), -1, NULL, 0);
-        if (size_needed > 0) {
-            std::wstring errorMsgWide(size_needed, 0);
-            MultiByteToWideChar(CP_UTF8, 0, errorMsg.c_str(), -1, &errorMsgWide[0], size_needed);
-            HandleError(errorMsgWide);
-        }
-        FreeCurrentImage();
-        return false;
-    } catch (...) {
-        HandleError(L"Error desconocido al cargar imagen: " + GetFileName(filepath));
-        FreeCurrentImage();
-        return false;
+    g_state.imageData = pixels;
+    g_state.imageWidth = width;
+    g_state.imageHeight = height;
+    g_state.imageChannels = channels;
+    g_state.currentRotation = rotation;
+    g_state.currentFilePath = filepath;
+    g_state.decoderName = decoder;
+    if (g_state.hwnd) {
+        RECT client{};
+        GetClientRect(g_state.hwnd, &client);
+        FitImageToWindow(client.right - client.left, client.bottom - client.top);
     }
-}
-
-// Cargar imagen por índice
-bool LoadImageByIndex(size_t index) {
-    if (index >= g_state.imageFiles.size()) {
-        return false;
-    }
-    
-    g_state.currentImageIndex = index;
-    return LoadImage(g_state.imageFiles[index]);
-}
-
-bool PathsEqualCaseInsensitive(const std::wstring& a, const std::wstring& b) {
-    if (a.size() != b.size()) {
-        return false;
-    }
-
-    for (size_t i = 0; i < a.size(); ++i) {
-        if (std::towlower(static_cast<wchar_t>(a[i])) != std::towlower(static_cast<wchar_t>(b[i]))) {
-            return false;
-        }
-    }
-
+    UpdateWindowTitle();
+    ShowOSD();
     return true;
 }
 
-bool TryLoadStartupFile() {
-    if (g_state.startupFilePath.empty()) {
+bool LoadImageFromPath(const std::wstring& filepath) {
+    if (!ValidateFileIntegrity(filepath)) {
+        HandleError(L"Archivo inválido o inaccesible: " + GetFileName(filepath), false);
         return false;
     }
 
-    if (ValidateFileIntegrity(g_state.startupFilePath) && CanDecodeImageFile(g_state.startupFilePath)) {
-        return LoadImage(g_state.startupFilePath);
+    CachedImage cached;
+    if (TryCopyFromCache(filepath, cached) && cached.data) {
+        ApplyLoadedImage(cached.data, cached.width, cached.height, cached.channels, cached.rotation,
+                         filepath, cached.decoder);
+        cached.data = nullptr;
+        return true;
     }
 
-    for (size_t i = 0; i < g_state.imageFiles.size(); ++i) {
-        if (PathsEqualCaseInsensitive(g_state.imageFiles[i], g_state.startupFilePath)) {
-            return LoadImageByIndex(i);
-        }
+    int width = 0, height = 0, channels = 0;
+    std::wstring decoder;
+    unsigned char* pixels = DecodeImageFile(filepath, width, height, channels, decoder);
+    if (!pixels) {
+        std::wstring msg = L"No se pudo cargar: " + GetFileName(filepath);
+        std::wstring detail = Utf8ToWide(stbi_failure_reason());
+        if (!detail.empty()) msg += L" (" + detail + L")";
+        HandleError(msg, false);
+        return false;
     }
 
-    return false;
+    ApplyLoadedImage(pixels, width, height, channels, 0, filepath, decoder);
+    StoreCurrentInCache();
+    return true;
+}
+
+bool LoadImageByIndex(size_t index) {
+    const std::wstring path = ImagePathAt(index);
+    if (path.empty()) return false;
+    {
+        std::lock_guard<std::mutex> lock(g_state.filesMutex);
+        g_state.currentImageIndex = index;
+    }
+    return LoadImageFromPath(path);
 }
 
 void LoadInitialImageSafely() {
-    if (g_state.imageFiles.empty()) {
-        return;
+    if (!g_state.startupFilePath.empty()) {
+        size_t idx = 0;
+        if (FindImageIndex(g_state.startupFilePath, idx)) {
+            LoadImageByIndex(idx);
+            RequestPrefetch(idx);
+            return;
+        }
+        if (LoadImageFromPath(g_state.startupFilePath)) {
+            EnsureFileInList(g_state.startupFilePath);
+            return;
+        }
     }
-
-    if (!g_state.startupFilePath.empty() && TryLoadStartupFile()) {
-        return;
+    if (ImageCount() > 0) {
+        LoadImageByIndex(0);
+        RequestPrefetch(0);
+    } else {
+        UpdateWindowTitle();
     }
-
-    LoadImageByIndex(0);
 }
 
-// Solicitar pre-carga de imágenes
 void RequestPrefetch(size_t targetIndex) {
+    if (!g_state.prefetchRunning) return;
     std::lock_guard<std::mutex> lock(g_state.prefetchMutex);
     g_state.prefetchTargetIndex = targetIndex;
     g_state.prefetchRequested = true;
     g_state.prefetchCV.notify_one();
 }
 
-// Hilo de pre-carga en segundo plano con sincronización robusta
 void PrefetchThreadFunc() {
+    const HRESULT comHr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     while (g_state.prefetchRunning) {
         std::unique_lock<std::mutex> lock(g_state.prefetchMutex);
-        
-        // Esperar con timeout para evitar deadlock
-        if (!g_state.prefetchCV.wait_for(lock, std::chrono::seconds(1), 
-                                         []{ return g_state.prefetchRequested || !g_state.prefetchRunning; })) {
-            continue; // Timeout, continuar para verificar running state
-        }
-        
+        g_state.prefetchCV.wait_for(lock, std::chrono::milliseconds(400), [] {
+            return g_state.prefetchRequested.load() || !g_state.prefetchRunning.load();
+        });
         if (!g_state.prefetchRunning) break;
-        
+        if (!g_state.prefetchRequested) continue;
         g_state.prefetchRequested = false;
-        size_t targetIndex = g_state.prefetchTargetIndex;
+        const size_t targetIndex = g_state.prefetchTargetIndex;
         lock.unlock();
-        
-        try {
-            // Pre-cargar siguiente y anterior imagen con validación
-            std::vector<size_t> indicesToPrefetch;
-            
-            // Acceso seguro a imageFiles
-            {
-                std::lock_guard<std::mutex> cacheLock(g_state.cacheMutex);
-                if (!g_state.imageFiles.empty()) {
-                    // Siguiente imagen
-                    size_t nextIndex = (targetIndex + 1) % g_state.imageFiles.size();
-                    indicesToPrefetch.push_back(nextIndex);
-                    
-                    // Imagen anterior
-                    size_t prevIndex = (targetIndex == 0) ? g_state.imageFiles.size() - 1 : targetIndex - 1;
-                    indicesToPrefetch.push_back(prevIndex);
-                    
-                    // Siguiente 2 imágenes
-                    size_t next2Index = (targetIndex + 2) % g_state.imageFiles.size();
-                    indicesToPrefetch.push_back(next2Index);
-                    
-                    // Anterior 2 imágenes
-                    size_t prev2Index = (targetIndex == 0 || targetIndex == 1) ? 
-                                       g_state.imageFiles.size() - (2 - targetIndex) : targetIndex - 2;
-                    indicesToPrefetch.push_back(prev2Index);
-                }
-            }
-            
-            // Cargar imágenes en segundo plano con manejo de errores
-            for (size_t idx : indicesToPrefetch) {
-                if (!g_state.prefetchRunning) break;
-                
-                // Acceso seguro a imageFiles
-                std::wstring filepath;
-                {
-                    std::lock_guard<std::mutex> cacheLock(g_state.cacheMutex);
-                    if (idx < g_state.imageFiles.size()) {
-                        filepath = g_state.imageFiles[idx];
-                    } else {
-                        continue;
-                    }
-                }
-                
-                // Verificar si ya está en caché
-                if (GetFromCache(filepath) == nullptr) {
-                    // Validar archivo antes de cargar
-                    if (!ValidateFileIntegrity(filepath)) {
-                        continue;
-                    }
-                    
-                    try {
-                        // Cargar en segundo plano
-                        int size_needed = WideCharToMultiByte(CP_UTF8, 0, filepath.c_str(), -1, NULL, 0, NULL, NULL);
-                        if (size_needed <= 0) continue;
-                        
-                        std::string utf8Path(size_needed, 0);
-                        WideCharToMultiByte(CP_UTF8, 0, filepath.c_str(), -1, &utf8Path[0], size_needed, NULL, NULL);
-                        
-                        int width, height, channels;
-                        unsigned char* data = stbi_load(utf8Path.c_str(), &width, &height, &channels, 4);
-                        
-                        if (data && width > 0 && height > 0 && channels > 0) {
-                            // Validar dimensiones
-                            const int MAX_DIMENSION = 20000;
-                            if (width <= MAX_DIMENSION && height <= MAX_DIMENSION) {
-                                size_t dataSize = width * height * 4;
-                                unsigned char* cacheData = (unsigned char*)malloc(dataSize);
-                                if (cacheData) {
-                                    memcpy(cacheData, data, dataSize);
-                                    AddToCache(filepath, cacheData, width, height, channels);
-                                }
-                            }
-                            stbi_image_free(data);
-                        }
-                    } catch (...) {
-                        // Ignorar errores en pre-carga, no afectar al hilo principal
-                    }
-                }
-                
-                // Pequeña pausa para no saturar CPU
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            }
-        } catch (...) {
-            // Cualquier excepción en el hilo de pre-carga no debe terminar el programa
-            continue;
+
+        const size_t count = ImageCount();
+        if (count == 0) continue;
+        const size_t indices[4] = {
+            (targetIndex + 1) % count,
+            (targetIndex == 0) ? count - 1 : targetIndex - 1,
+            (targetIndex + 2) % count,
+            (targetIndex < 2) ? count - (2 - targetIndex) : targetIndex - 2
+        };
+        for (size_t idx : indices) {
+            if (!g_state.prefetchRunning) break;
+            const std::wstring filepath = ImagePathAt(idx);
+            if (filepath.empty() || IsInCache(filepath)) continue;
+            if (!ValidateFileIntegrity(filepath)) continue;
+            int width = 0, height = 0, channels = 0;
+            std::wstring decoder;
+            unsigned char* pixels = DecodeImageFile(filepath, width, height, channels, decoder);
+            if (!pixels) continue;
+            AddToCache(filepath, pixels, width, height, channels, 0, decoder);
         }
     }
+    if (comHr == S_OK) CoUninitialize();
 }
 
-// Iniciar hilo de pre-carga
 void StartPrefetchThread() {
+    if (g_state.prefetchThread.joinable()) return;
     g_state.prefetchRunning = true;
     g_state.prefetchThread = std::thread(PrefetchThreadFunc);
 }
 
-// Rotar imagen 90 grados
+void DisplaySize(int& w, int& h) {
+    w = g_state.imageWidth;
+    h = g_state.imageHeight;
+    if (g_state.currentRotation == 90 || g_state.currentRotation == 270) std::swap(w, h);
+}
+
 void RotateImage() {
-    if (!g_state.imageData || g_state.imageWidth == 0 || g_state.imageHeight == 0) {
-        return;
-    }
-    
+    if (!g_state.imageData) return;
     g_state.currentRotation = (g_state.currentRotation + 90) % 360;
-    
     if (g_state.hwnd) {
-        RECT clientRect;
-        GetClientRect(g_state.hwnd, &clientRect);
-        FitImageToWindow(clientRect.right, clientRect.bottom);
-        EnsureImageVisible();
+        RECT client{};
+        GetClientRect(g_state.hwnd, &client);
+        FitImageToWindow(client.right - client.left, client.bottom - client.top);
     }
-    
-    if (g_state.currentImageIndex < g_state.imageFiles.size()) {
-        const std::wstring& filepath = g_state.imageFiles[g_state.currentImageIndex];
-        std::lock_guard<std::mutex> lock(g_state.cacheMutex);
-        auto it = g_state.cacheIndex.find(filepath);
-        if (it != g_state.cacheIndex.end() && it->second != g_state.imageCache.end()) {
-            it->second->rotation = g_state.currentRotation;
-        }
-    }
-    
-    InvalidateRect(g_state.hwnd, NULL, FALSE);
+    StoreCurrentInCache();
+    ShowOSD(L"Rotada");
+    InvalidateRect(g_state.hwnd, nullptr, FALSE);
 }
 
-// Ajustar la imagen a la ventana y mantenerla centrada cuando cambia el tamaño
-void UpdateViewportLayout(bool forceFit) {
-    if (!g_state.hwnd || !g_state.imageData) {
-        return;
-    }
-
-    RECT rect;
-    GetClientRect(g_state.hwnd, &rect);
-    if (rect.right <= 0 || rect.bottom <= 0) {
-        return;
-    }
-
-    if (forceFit || g_state.zoom <= 0.0f) {
-        FitImageToWindow(rect.right, rect.bottom);
-    } else {
-        EnsureImageVisible();
-    }
-}
-
-// Alternar modo fullscreen
-void ToggleFullscreen() {
-    if (!g_state.hwnd) return;
-
-    if (!g_state.isFullscreen) {
-        if (!g_state.hasPreviousWindowRect) {
-            GetWindowRect(g_state.hwnd, &g_state.previousWindowRect);
-            g_state.hasPreviousWindowRect = true;
-        }
-
-        HMONITOR hMonitor = MonitorFromWindow(g_state.hwnd, MONITOR_DEFAULTTONEAREST);
-        MONITORINFO mi = {sizeof(mi)};
-        GetMonitorInfo(hMonitor, &mi);
-
-        SetWindowPos(g_state.hwnd, HWND_TOP,
-                     mi.rcMonitor.left, mi.rcMonitor.top,
-                     mi.rcMonitor.right - mi.rcMonitor.left,
-                     mi.rcMonitor.bottom - mi.rcMonitor.top,
-                     SWP_FRAMECHANGED | SWP_SHOWWINDOW);
-        g_state.isFullscreen = true;
-    } else {
-        if (g_state.hasPreviousWindowRect) {
-            SetWindowPos(g_state.hwnd, HWND_TOP,
-                         g_state.previousWindowRect.left,
-                         g_state.previousWindowRect.top,
-                         g_state.previousWindowRect.right - g_state.previousWindowRect.left,
-                         g_state.previousWindowRect.bottom - g_state.previousWindowRect.top,
-                         SWP_FRAMECHANGED | SWP_SHOWWINDOW);
-        }
-        g_state.isFullscreen = false;
-    }
-
-    UpdateViewportLayout(true);
-    InvalidateRect(g_state.hwnd, NULL, FALSE);
-}
-
-// Copiar ruta al portapapeles
-bool CopyPathToClipboard() {
-    if (g_state.imageFiles.empty() || g_state.currentImageIndex >= g_state.imageFiles.size()) {
-        return false;
-    }
-    
-    const std::wstring& filepath = g_state.imageFiles[g_state.currentImageIndex];
-    
-    if (!OpenClipboard(g_state.hwnd)) {
-        return false;
-    }
-    
-    EmptyClipboard();
-    
-    // Asignar memoria para el texto
-    size_t size = (filepath.length() + 1) * sizeof(wchar_t);
-    HGLOBAL hClipboardData = GlobalAlloc(GMEM_MOVEABLE, size);
-    if (hClipboardData) {
-        wchar_t* pchData = (wchar_t*)GlobalLock(hClipboardData);
-        if (pchData) {
-            wcscpy_s(pchData, filepath.length() + 1, filepath.c_str());
-            GlobalUnlock(hClipboardData);
-            SetClipboardData(CF_UNICODETEXT, hClipboardData);
-        }
-    }
-    
-    CloseClipboard();
-    
-    // Mostrar confirmación en OSD
-    g_state.showOSD = true;
-    g_state.osdDisplayTime = GetTickCount();
-    
-    return true;
-}
-
-// Copiar imagen al portapapeles
-bool CopyImageToClipboard() {
-    if (!g_state.imageData || g_state.imageWidth == 0 || g_state.imageHeight == 0) {
-        return false;
-    }
-    
-    // Crear bitmap desde datos de imagen
-    Bitmap* bitmap = new Bitmap(g_state.imageWidth, g_state.imageHeight, 
-                                 g_state.imageWidth * 4, PixelFormat32bppARGB, 
-                                 g_state.imageData);
-    
-    if (!bitmap) {
-        return false;
-    }
-    
-    // Convertir a HBITMAP para el portapapeles
-    HBITMAP hBitmap = NULL;
-    bitmap->GetHBITMAP(Color(0, 0, 0, 0), &hBitmap);
-    delete bitmap;
-    
-    if (!hBitmap) {
-        return false;
-    }
-    
-    if (!OpenClipboard(g_state.hwnd)) {
-        DeleteObject(hBitmap);
-        return false;
-    }
-    
-    EmptyClipboard();
-    SetClipboardData(CF_BITMAP, hBitmap);
-    CloseClipboard();
-    
-    // No borrar hBitmap, el portapapeles se encarga
-    
-    // Mostrar confirmación en OSD
-    g_state.showOSD = true;
-    g_state.osdDisplayTime = GetTickCount();
-    
-    return true;
-}
-
-// Siguiente imagen
-void NextImage() {
-    if (g_state.imageFiles.empty()) return;
-    
-    size_t nextIndex = (g_state.currentImageIndex + 1) % g_state.imageFiles.size();
-    LoadImageByIndex(nextIndex);
-    RequestPrefetch(nextIndex);
-    InvalidateRect(g_state.hwnd, NULL, FALSE);
-}
-
-// Imagen anterior
-void PreviousImage() {
-    if (g_state.imageFiles.empty()) return;
-    
-    size_t prevIndex = (g_state.currentImageIndex == 0) ? g_state.imageFiles.size() - 1 : g_state.currentImageIndex - 1;
-    LoadImageByIndex(prevIndex);
-    RequestPrefetch(prevIndex);
-    InvalidateRect(g_state.hwnd, NULL, FALSE);
-}
-
-// Normalizar los píxeles de RGBA de stb a BGRA para GDI+
 void ConvertRGBAtoBGRA(unsigned char* pixels, int width, int height) {
-    if (!pixels || width <= 0 || height <= 0) {
-        return;
-    }
-
-    const size_t pixelCount = static_cast<size_t>(width) * static_cast<size_t>(height);
-    for (size_t i = 0; i < pixelCount; ++i) {
+    if (!pixels || width <= 0 || height <= 0) return;
+    const size_t count = static_cast<size_t>(width) * static_cast<size_t>(height);
+    for (size_t i = 0; i < count; ++i) {
         unsigned char* p = pixels + (i * 4);
         std::swap(p[0], p[2]);
     }
 }
 
-// Mantener la imagen visible dentro de la ventana aunque se haga zoom o pan
 void EnsureImageVisible() {
-    if (!g_state.imageData || g_state.imageWidth <= 0 || g_state.imageHeight <= 0 || !g_state.hwnd) {
-        return;
-    }
-
-    RECT clientRect;
-    GetClientRect(g_state.hwnd, &clientRect);
-    int windowWidth = clientRect.right - clientRect.left;
-    int windowHeight = clientRect.bottom - clientRect.top;
-    if (windowWidth <= 0 || windowHeight <= 0) {
-        return;
-    }
-
-    int imageWidth = g_state.imageWidth;
-    int imageHeight = g_state.imageHeight;
-    if (g_state.currentRotation == 90 || g_state.currentRotation == 270) {
-        std::swap(imageWidth, imageHeight);
-    }
-
-    float imageDrawWidth = imageWidth * g_state.zoom;
-    float imageDrawHeight = imageHeight * g_state.zoom;
-
-    if (imageDrawWidth < windowWidth) {
-        g_state.offsetX = (windowWidth - imageDrawWidth) * 0.5f;
-    } else {
-        float maxOffsetX = 0.0f;
-        float minOffsetX = windowWidth - imageDrawWidth;
-        if (g_state.offsetX > maxOffsetX) {
-            g_state.offsetX = maxOffsetX;
-        }
-        if (g_state.offsetX < minOffsetX) {
-            g_state.offsetX = minOffsetX;
-        }
-    }
-
-    if (imageDrawHeight < windowHeight) {
-        g_state.offsetY = (windowHeight - imageDrawHeight) * 0.5f;
-    } else {
-        float maxOffsetY = 0.0f;
-        float minOffsetY = windowHeight - imageDrawHeight;
-        if (g_state.offsetY > maxOffsetY) {
-            g_state.offsetY = maxOffsetY;
-        }
-        if (g_state.offsetY < minOffsetY) {
-            g_state.offsetY = minOffsetY;
-        }
-    }
+    if (!g_state.imageData || !g_state.hwnd) return;
+    RECT client{};
+    GetClientRect(g_state.hwnd, &client);
+    const int windowWidth = client.right - client.left;
+    const int windowHeight = ViewHeight(client.bottom - client.top);
+    if (windowWidth <= 0 || windowHeight <= 0) return;
+    int imageWidth = 0, imageHeight = 0;
+    DisplaySize(imageWidth, imageHeight);
+    const float drawW = imageWidth * g_state.zoom;
+    const float drawH = imageHeight * g_state.zoom;
+    if (drawW <= windowWidth) g_state.offsetX = (windowWidth - drawW) * 0.5f;
+    else g_state.offsetX = std::min(0.0f, std::max(windowWidth - drawW, g_state.offsetX));
+    if (drawH <= windowHeight) g_state.offsetY = (windowHeight - drawH) * 0.5f;
+    else g_state.offsetY = std::min(0.0f, std::max(windowHeight - drawH, g_state.offsetY));
 }
 
-// Ajustar zoom para ajustar imagen a ventana y dejarla centrada
 void FitImageToWindow(int windowWidth, int windowHeight) {
-    if (!g_state.imageData || g_state.imageWidth == 0 || g_state.imageHeight == 0) {
-        return;
-    }
-    if (windowWidth <= 0 || windowHeight <= 0) {
-        return;
-    }
-
-    int imageWidth = g_state.imageWidth;
-    int imageHeight = g_state.imageHeight;
-    if (g_state.currentRotation == 90 || g_state.currentRotation == 270) {
-        std::swap(imageWidth, imageHeight);
-    }
-
-    float scaleX = static_cast<float>(windowWidth) / static_cast<float>(imageWidth);
-    float scaleY = static_cast<float>(windowHeight) / static_cast<float>(imageHeight);
-    float fitZoom = std::min(scaleX, scaleY) * 0.92f;
-    fitZoom = std::max(MIN_ZOOM, std::min(MAX_ZOOM, fitZoom));
-
-    g_state.zoom = fitZoom;
+    if (!g_state.imageData || windowWidth <= 0 || windowHeight <= 0) return;
+    windowHeight = ViewHeight(windowHeight);
+    int imageWidth = 0, imageHeight = 0;
+    DisplaySize(imageWidth, imageHeight);
+    const float scaleX = static_cast<float>(windowWidth) / static_cast<float>(imageWidth);
+    const float scaleY = static_cast<float>(windowHeight) / static_cast<float>(imageHeight);
+    g_state.zoom = std::max(MIN_ZOOM, std::min(MAX_ZOOM, std::min(scaleX, scaleY)));
     g_state.offsetX = (windowWidth - imageWidth * g_state.zoom) * 0.5f;
     g_state.offsetY = (windowHeight - imageHeight * g_state.zoom) * 0.5f;
     EnsureImageVisible();
 }
 
-// Obtener tamaño de archivo en formato legible
+void ActualSize() {
+    if (!g_state.imageData || !g_state.hwnd) return;
+    RECT client{};
+    GetClientRect(g_state.hwnd, &client);
+    g_state.zoom = 1.0f;
+    int imageWidth = 0, imageHeight = 0;
+    DisplaySize(imageWidth, imageHeight);
+    g_state.offsetX = (client.right - imageWidth) * 0.5f;
+    g_state.offsetY = (ViewHeight(client.bottom) - imageHeight) * 0.5f;
+    EnsureImageVisible();
+    ShowOSD(L"100%");
+    InvalidateRect(g_state.hwnd, nullptr, FALSE);
+}
+
 std::wstring GetFileSizeString(const std::wstring& filepath) {
-    WIN32_FILE_ATTRIBUTE_DATA fileData;
-    if (GetFileAttributesEx(filepath.c_str(), GetFileExInfoStandard, &fileData)) {
-        LARGE_INTEGER size;
-        size.HighPart = fileData.nFileSizeHigh;
-        size.LowPart = fileData.nFileSizeLow;
-        
-        const wchar_t* units[] = { L"B", L"KB", L"MB", L"GB" };
-        int unitIndex = 0;
-        double fileSize = (double)size.QuadPart;
-        
-        while (fileSize >= 1024.0 && unitIndex < 3) {
-            fileSize /= 1024.0;
-            unitIndex++;
-        }
-        
-        wchar_t buffer[32];
-        swprintf_s(buffer, L"%.1f %s", fileSize, units[unitIndex]);
-        return std::wstring(buffer);
+    WIN32_FILE_ATTRIBUTE_DATA fileData{};
+    if (!GetFileAttributesExW(filepath.c_str(), GetFileExInfoStandard, &fileData)) return L"?";
+    LARGE_INTEGER size{};
+    size.HighPart = fileData.nFileSizeHigh;
+    size.LowPart = fileData.nFileSizeLow;
+    const wchar_t* units[] = { L"B", L"KB", L"MB", L"GB" };
+    int unit = 0;
+    double value = static_cast<double>(size.QuadPart);
+    while (value >= 1024.0 && unit < 3) {
+        value /= 1024.0;
+        ++unit;
     }
-    return L"Unknown";
+    wchar_t buffer[32];
+    swprintf_s(buffer, L"%.1f %s", value, units[unit]);
+    return buffer;
 }
 
-// Obtener nombre de archivo sin ruta
 std::wstring GetFileName(const std::wstring& filepath) {
-    if (filepath.empty()) {
-        return L"";
-    }
-
-    size_t pos = filepath.find_last_of(L'\\');
-    if (pos != std::wstring::npos) {
-        return filepath.substr(pos + 1);
-    }
-    return filepath;
+    const size_t pos = filepath.find_last_of(L"\\/");
+    if (pos == std::wstring::npos) return filepath;
+    return filepath.substr(pos + 1);
 }
 
-// Renderizar OSD (On-Screen Display) con información mejorada
-void RenderOSD(HDC hdc) {
-    if (!hdc || !g_state.hwnd || !g_state.showOSD || g_state.imageFiles.empty() ||
-        g_state.currentImageIndex >= g_state.imageFiles.size()) {
-        return;
-    }
+void LayoutHud(const RECT& client) {
+    const int y = client.bottom - HUD_HEIGHT + 10;
+    const int h = HUD_HEIGHT - 18;
+    const int gap = 8;
+    int x = 12;
+    auto add = [&](HudId id, const wchar_t* label, int w) {
+        if (g_state.hudCount >= 8) return;
+        HudItem& item = g_state.hud[g_state.hudCount++];
+        item.id = id;
+        item.label = label;
+        item.rc = { x, y, x + w, y + h };
+        x += w + gap;
+    };
+    g_state.hudCount = 0;
+    add(HUD_PREV, L"◀", 44);
+    add(HUD_NEXT, L"▶", 44);
+    add(HUD_FIT, L"Ajustar", 78);
+    add(HUD_ONE, L"100%", 58);
+    add(HUD_ROT, L"Rotar", 64);
+    add(HUD_FULL, g_state.isFullscreen ? L"Ventana" : L"Pantalla", 88);
+    add(HUD_OPEN, L"Abrir", 64);
+}
 
-    if (GetTickCount() - g_state.osdDisplayTime > 3000) {
-        g_state.showOSD = false;
-        return;
+HudId HitTestHud(int x, int y) {
+    for (int i = 0; i < g_state.hudCount; ++i) {
+        if (PtInRect(&g_state.hud[i].rc, POINT{ x, y })) return g_state.hud[i].id;
     }
+    return HUD_NONE;
+}
 
-    RECT clientRect;
-    GetClientRect(g_state.hwnd, &clientRect);
-    if (clientRect.right <= clientRect.left || clientRect.bottom <= clientRect.top) {
-        return;
-    }
+void DrawRoundish(HDC hdc, const RECT& rc, COLORREF fill, COLORREF border) {
+    HPEN pen = CreatePen(PS_SOLID, 1, border);
+    HBRUSH brush = CreateSolidBrush(fill);
+    HPEN oldPen = static_cast<HPEN>(SelectObject(hdc, pen));
+    HBRUSH oldBrush = static_cast<HBRUSH>(SelectObject(hdc, brush));
+    RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, 8, 8);
+    SelectObject(hdc, oldPen);
+    SelectObject(hdc, oldBrush);
+    DeleteObject(pen);
+    DeleteObject(brush);
+}
 
-    HFONT hFont = CreateFont(16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                             CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
-    if (!hFont) {
-        return;
-    }
+void RenderHud(HDC hdc, const RECT& client) {
+    LayoutHud(client);
+    RECT bar = { 0, client.bottom - HUD_HEIGHT, client.right, client.bottom };
+    HBRUSH barBrush = CreateSolidBrush(BAR_COLOR);
+    FillRect(hdc, &bar, barBrush);
+    DeleteObject(barBrush);
 
-    HFONT hOldFont = (HFONT)SelectObject(hdc, hFont);
+    HPEN line = CreatePen(PS_SOLID, 1, RGB(48, 48, 52));
+    HPEN oldPen = static_cast<HPEN>(SelectObject(hdc, line));
+    MoveToEx(hdc, 0, bar.top, nullptr);
+    LineTo(hdc, client.right, bar.top);
+    SelectObject(hdc, oldPen);
+    DeleteObject(line);
+
+    HFONT hFont = CreateFontW(15, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+                              DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                              CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    HFONT hOld = static_cast<HFONT>(SelectObject(hdc, hFont));
     SetBkMode(hdc, TRANSPARENT);
-    SetTextColor(hdc, RGB(200, 200, 200));
 
-    const std::wstring& currentFile = g_state.imageFiles[g_state.currentImageIndex];
-    std::wstring filename = GetFileName(currentFile);
-    std::wstring fileSize = GetFileSizeString(currentFile);
-
-    int displayWidth = g_state.imageWidth;
-    int displayHeight = g_state.imageHeight;
-    if (g_state.currentRotation == 90 || g_state.currentRotation == 270) {
-        std::swap(displayWidth, displayHeight);
+    for (int i = 0; i < g_state.hudCount; ++i) {
+        const bool hot = g_state.hud[i].id == g_state.hudHot;
+        DrawRoundish(hdc, g_state.hud[i].rc,
+                     hot ? RGB(50, 80, 120) : RGB(42, 42, 46),
+                     hot ? ACCENT_COLOR : RGB(64, 64, 70));
+        SetTextColor(hdc, hot ? RGB(255, 255, 255) : RGB(230, 230, 230));
+        DrawTextW(hdc, g_state.hud[i].label, -1, &g_state.hud[i].rc,
+                  DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
 
-    wchar_t rotationText[16] = L"";
-    if (g_state.currentRotation > 0) {
-        swprintf_s(rotationText, L" | %d°", g_state.currentRotation);
+    RECT info = { 12, bar.top, client.right - 12, bar.bottom };
+    if (g_state.hudCount > 0) {
+        info.left = g_state.hud[g_state.hudCount - 1].rc.right + 16;
     }
-
-    wchar_t zoomText[16];
-    swprintf_s(zoomText, L" | %.0f%%", g_state.zoom * 100);
-
-    wchar_t infoText[512];
-    swprintf_s(infoText, L"%s | %dx%d%s | %s%s | %zu/%zu",
-               filename.c_str(), displayWidth, displayHeight, rotationText,
-               fileSize.c_str(), zoomText, g_state.currentImageIndex + 1, g_state.imageFiles.size());
-
-    RECT osdRect = {10, clientRect.bottom - 40, clientRect.right - 10, clientRect.bottom - 10};
-    if (osdRect.right <= osdRect.left || osdRect.bottom <= osdRect.top) {
-        SelectObject(hdc, hOldFont);
-        DeleteObject(hFont);
-        return;
-    }
-
-    HDC hdcLayer = CreateCompatibleDC(hdc);
-    HBITMAP hbmLayer = CreateCompatibleBitmap(hdc, clientRect.right, clientRect.bottom);
-    if (hdcLayer && hbmLayer) {
-        HBITMAP hbmOldLayer = (HBITMAP)SelectObject(hdcLayer, hbmLayer);
-        if (hbmOldLayer) {
-            BitBlt(hdcLayer, 0, 0, clientRect.right, clientRect.bottom, hdc, 0, 0, SRCCOPY);
-            BLENDFUNCTION blend = {AC_SRC_OVER, 0, 128, 0};
-            HBRUSH hBrush = CreateSolidBrush(RGB(18, 18, 18));
-            if (hBrush) {
-                FillRect(hdcLayer, &osdRect, hBrush);
-                DeleteObject(hBrush);
+    if (info.left < info.right - 20) {
+        SetTextColor(hdc, RGB(180, 180, 185));
+        std::wstring text;
+        if (g_state.imageData && !g_state.currentFilePath.empty()) {
+            int dw = 0, dh = 0;
+            DisplaySize(dw, dh);
+            wchar_t extra[192];
+            swprintf_s(extra, L"%s   %dx%d   %s   %.0f%%   %zu/%zu   %s",
+                       GetFileName(g_state.currentFilePath).c_str(), dw, dh,
+                       GetFileSizeString(g_state.currentFilePath).c_str(),
+                       g_state.zoom * 100.0f,
+                       g_state.currentImageIndex + 1, ImageCount(),
+                       g_state.decoderName.c_str());
+            text = extra;
+            if (g_state.currentRotation) {
+                wchar_t rot[24];
+                swprintf_s(rot, L"   %d°", g_state.currentRotation);
+                text += rot;
             }
-            AlphaBlend(hdc, osdRect.left, osdRect.top,
-                       osdRect.right - osdRect.left, osdRect.bottom - osdRect.top,
-                       hdcLayer, osdRect.left, osdRect.top,
-                       osdRect.right - osdRect.left, osdRect.bottom - osdRect.top, blend);
-            DrawText(hdc, infoText, -1, &osdRect, DT_BOTTOM | DT_LEFT | DT_SINGLELINE);
-            SelectObject(hdcLayer, hbmOldLayer);
+        } else {
+            text = L"Arrastra una imagen  ·  Ctrl+O abrir  ·  F11 pantalla completa";
         }
-        DeleteObject(hbmLayer);
-        DeleteDC(hdcLayer);
+        if (!g_state.statusMessage.empty() &&
+            (g_state.osdPinned || GetTickCount() - g_state.osdDisplayTime < OSD_MS)) {
+            text += L"   ·   ";
+            text += g_state.statusMessage;
+        }
+        DrawTextW(hdc, text.c_str(), -1, &info, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     }
 
-    SelectObject(hdc, hOldFont);
+    SelectObject(hdc, hOld);
     DeleteObject(hFont);
 }
 
-// Crear buffer de doble búfer optimizado con graceful degradation
 void CreateDoubleBuffer(int width, int height) {
-    if (width <= 0 || height <= 0) {
-        return;
-    }
-    
-    // Liberar recursos existentes de forma segura
-    if (g_state.hdcMem) {
-        if (g_state.hbmOld) {
-            SelectObject(g_state.hdcMem, g_state.hbmOld);
-            g_state.hbmOld = nullptr;
-        }
-        if (g_state.hbmMem) {
-            DeleteObject(g_state.hbmMem);
-            g_state.hbmMem = nullptr;
-        }
-        DeleteDC(g_state.hdcMem);
-        g_state.hdcMem = nullptr;
-    }
-    
+    FreeDoubleBuffer();
+    if (width <= 0 || height <= 0 || !g_state.hwnd) return;
     HDC hdc = GetDC(g_state.hwnd);
-    if (!hdc) {
-        HandleError(L"Error al obtener DC de ventana");
-        return;
-    }
-    
-    // Crear DC compatible con manejo de errores
+    if (!hdc) return;
     g_state.hdcMem = CreateCompatibleDC(hdc);
     if (!g_state.hdcMem) {
         ReleaseDC(g_state.hwnd, hdc);
-        HandleError(L"Error al crear DC compatible");
         return;
     }
-    
-    // Crear bitmap con máxima calidad y manejo de errores
     g_state.hbmMem = CreateCompatibleBitmap(hdc, width, height);
     if (!g_state.hbmMem) {
         DeleteDC(g_state.hdcMem);
         g_state.hdcMem = nullptr;
         ReleaseDC(g_state.hwnd, hdc);
-        HandleError(L"Error al crear bitmap compatible - posible memoria insuficiente");
         return;
     }
-    
-    // Seleccionar bitmap con validación
-    g_state.hbmOld = (HBITMAP)SelectObject(g_state.hdcMem, g_state.hbmMem);
-    if (!g_state.hbmOld) {
-        DeleteObject(g_state.hbmMem);
-        DeleteDC(g_state.hdcMem);
-        g_state.hdcMem = nullptr;
-        g_state.hbmMem = nullptr;
-        ReleaseDC(g_state.hwnd, hdc);
-        HandleError(L"Error al seleccionar bitmap en DC");
-        return;
-    }
-    
+    g_state.hbmOld = static_cast<HBITMAP>(SelectObject(g_state.hdcMem, g_state.hbmMem));
     ReleaseDC(g_state.hwnd, hdc);
 }
 
-// Renderizar el fondo de la ventana cuando no hay imagen cargada
 void RenderEmptyState(HDC hdc, const RECT& clientRect) {
-    if (!hdc) {
-        return;
-    }
-
+    RECT view = clientRect;
+    view.bottom = std::max(view.top, view.bottom - HUD_HEIGHT);
     HBRUSH hBrush = CreateSolidBrush(BG_COLOR);
-    if (hBrush) {
-        FillRect(hdc, &clientRect, hBrush);
-        DeleteObject(hBrush);
-    }
-
-    if (g_state.imageFiles.empty()) {
-        SetBkMode(hdc, TRANSPARENT);
-        SetTextColor(hdc, RGB(220, 220, 220));
-
-        HFONT hFont = CreateFont(22, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                 CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
-        if (hFont) {
-            HFONT hOldFont = (HFONT)SelectObject(hdc, hFont);
-            RECT txt = clientRect;
-            DrawText(hdc, L"Arrastra una imagen o una carpeta aquí", -1, &txt,
-                     DT_SINGLELINE | DT_CENTER | DT_VCENTER);
-            SelectObject(hdc, hOldFont);
-            DeleteObject(hFont);
-        }
-    }
+    FillRect(hdc, &view, hBrush);
+    DeleteObject(hBrush);
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, RGB(220, 220, 220));
+    HFONT hTitle = CreateFontW(26, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+                               DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                               CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    HFONT hHint = CreateFontW(16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                              DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                              CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    HFONT old = static_cast<HFONT>(SelectObject(hdc, hTitle));
+    RECT title = view;
+    title.bottom = view.top + (view.bottom - view.top) / 2 + 10;
+    DrawTextW(hdc, L"ARTPICST", -1, &title, DT_SINGLELINE | DT_CENTER | DT_BOTTOM);
+    SelectObject(hdc, hHint);
+    SetTextColor(hdc, RGB(160, 160, 165));
+    RECT hint = view;
+    hint.top = title.bottom + 8;
+    DrawTextW(hdc, L"Arrastra una imagen o carpeta  ·  Ctrl+O abrir archivo  ·  Ctrl+Shift+O carpeta",
+              -1, &hint, DT_SINGLELINE | DT_CENTER | DT_TOP);
+    SelectObject(hdc, old);
+    DeleteObject(hTitle);
+    DeleteObject(hHint);
 }
 
-// Renderizar imagen con soporte de rotación
 void RenderImage() {
-    if (!g_state.hdcMem || !g_state.hwnd) {
-        return;
-    }
-
-    RECT rect;
+    if (!g_state.hdcMem || !g_state.hwnd) return;
+    RECT rect{};
     GetClientRect(g_state.hwnd, &rect);
-
-    // Limpiar con fondo oscuro
     HBRUSH hBrush = CreateSolidBrush(BG_COLOR);
     FillRect(g_state.hdcMem, &rect, hBrush);
     DeleteObject(hBrush);
 
     if (!g_state.imageData) {
         RenderEmptyState(g_state.hdcMem, rect);
+        RenderHud(g_state.hdcMem, rect);
         return;
     }
 
-    // Crear Bitmap desde datos de imagen
-    Bitmap* bitmap = new Bitmap(g_state.imageWidth, g_state.imageHeight,
-                                 g_state.imageWidth * 4, PixelFormat32bppARGB,
-                                 g_state.imageData);
+    Bitmap bitmap(g_state.imageWidth, g_state.imageHeight,
+                  g_state.imageWidth * 4, PixelFormat32bppARGB, g_state.imageData);
+    Graphics graphics(g_state.hdcMem);
+    graphics.SetClip(Rect(0, 0, rect.right, ViewHeight(rect.bottom)));
+    graphics.SetInterpolationMode(g_state.zoom >= 1.0f
+                                      ? InterpolationModeNearestNeighbor
+                                      : InterpolationModeHighQualityBicubic);
+    graphics.SetPixelOffsetMode(PixelOffsetModeHalf);
+    graphics.SetSmoothingMode(SmoothingModeNone);
 
-    if (bitmap) {
-        Graphics graphics(g_state.hdcMem);
-        graphics.SetInterpolationMode(InterpolationModeHighQualityBicubic);
-        graphics.SetSmoothingMode(SmoothingModeHighQuality);
-        graphics.SetPixelOffsetMode(PixelOffsetModeHighQuality);
+    int boxW = 0, boxH = 0;
+    DisplaySize(boxW, boxH);
+    const float destW = boxW * g_state.zoom;
+    const float destH = boxH * g_state.zoom;
+    const float centerX = g_state.offsetX + destW * 0.5f;
+    const float centerY = g_state.offsetY + destH * 0.5f;
 
-        int imgWidth = g_state.imageWidth;
-        int imgHeight = g_state.imageHeight;
-
-        if (g_state.currentRotation == 90 || g_state.currentRotation == 270) {
-            std::swap(imgWidth, imgHeight);
-        }
-
-        int drawX = (int)g_state.offsetX;
-        int drawY = (int)g_state.offsetY;
-        int drawWidth = (int)(imgWidth * g_state.zoom);
-        int drawHeight = (int)(imgHeight * g_state.zoom);
-
-        if (g_state.currentRotation != 0) {
-            GraphicsState state = graphics.Save();
-            float centerX = drawX + drawWidth / 2.0f;
-            float centerY = drawY + drawHeight / 2.0f;
-            graphics.TranslateTransform(centerX, centerY);
-            graphics.RotateTransform((float)g_state.currentRotation);
-            graphics.TranslateTransform(-centerX, -centerY);
-            graphics.DrawImage(bitmap, drawX, drawY, drawWidth, drawHeight);
-            graphics.Restore(state);
-        } else {
-            graphics.DrawImage(bitmap, drawX, drawY, drawWidth, drawHeight);
-        }
-
-        delete bitmap;
-    }
-
-    // Renderizar OSD
-    RenderOSD(g_state.hdcMem);
+    GraphicsState state = graphics.Save();
+    graphics.TranslateTransform(centerX, centerY);
+    graphics.RotateTransform(static_cast<REAL>(g_state.currentRotation));
+    graphics.TranslateTransform(-g_state.imageWidth * g_state.zoom * 0.5f,
+                                -g_state.imageHeight * g_state.zoom * 0.5f);
+    graphics.DrawImage(&bitmap, 0.0f, 0.0f,
+                       g_state.imageWidth * g_state.zoom,
+                       g_state.imageHeight * g_state.zoom);
+    graphics.Restore(state);
+    RenderHud(g_state.hdcMem, rect);
 }
 
-// Procedimiento de ventana
+bool CopyPathToClipboard() {
+    if (g_state.currentFilePath.empty()) return false;
+    if (!OpenClipboard(g_state.hwnd)) return false;
+    EmptyClipboard();
+    const size_t bytes = (g_state.currentFilePath.size() + 1) * sizeof(wchar_t);
+    HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, bytes);
+    if (!mem) {
+        CloseClipboard();
+        return false;
+    }
+    wchar_t* dest = static_cast<wchar_t*>(GlobalLock(mem));
+    if (!dest) {
+        GlobalFree(mem);
+        CloseClipboard();
+        return false;
+    }
+    wcscpy_s(dest, g_state.currentFilePath.size() + 1, g_state.currentFilePath.c_str());
+    GlobalUnlock(mem);
+    SetClipboardData(CF_UNICODETEXT, mem);
+    CloseClipboard();
+    ShowOSD(L"Ruta copiada");
+    InvalidateRect(g_state.hwnd, nullptr, FALSE);
+    return true;
+}
+
+bool CopyImageToClipboard() {
+    if (!g_state.imageData) return false;
+    Bitmap bitmap(g_state.imageWidth, g_state.imageHeight,
+                  g_state.imageWidth * 4, PixelFormat32bppARGB, g_state.imageData);
+    HBITMAP hBitmap = nullptr;
+    if (bitmap.GetHBITMAP(Color(0, 0, 0, 0), &hBitmap) != Ok || !hBitmap) return false;
+    if (!OpenClipboard(g_state.hwnd)) {
+        DeleteObject(hBitmap);
+        return false;
+    }
+    EmptyClipboard();
+    SetClipboardData(CF_BITMAP, hBitmap);
+    CloseClipboard();
+    ShowOSD(L"Imagen copiada");
+    InvalidateRect(g_state.hwnd, nullptr, FALSE);
+    return true;
+}
+
+void ApplyWindowMode(HWND hwnd, WindowMode mode) {
+    if (!hwnd) return;
+    HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi{ sizeof(mi) };
+    GetMonitorInfoW(monitor, &mi);
+
+    if (mode == WindowMode::Fullscreen) {
+        if (!g_state.isFullscreen) {
+            g_state.windowedStyle = GetWindowLongW(hwnd, GWL_STYLE);
+            g_state.windowedExStyle = GetWindowLongW(hwnd, GWL_EXSTYLE);
+            g_state.windowedPlacement.length = sizeof(WINDOWPLACEMENT);
+            GetWindowPlacement(hwnd, &g_state.windowedPlacement);
+        }
+        SetWindowLongW(hwnd, GWL_STYLE, WS_POPUP | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS);
+        SetWindowPos(hwnd, HWND_TOP,
+                     mi.rcMonitor.left, mi.rcMonitor.top,
+                     mi.rcMonitor.right - mi.rcMonitor.left,
+                     mi.rcMonitor.bottom - mi.rcMonitor.top,
+                     SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+        g_state.isFullscreen = true;
+        g_state.windowMode = WindowMode::Fullscreen;
+        return;
+    }
+
+    LONG style = WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS;
+    if (g_state.windowedStyle) style = g_state.windowedStyle | WS_VISIBLE;
+    style |= WS_OVERLAPPEDWINDOW;
+    style &= ~WS_POPUP;
+    SetWindowLongW(hwnd, GWL_STYLE, style);
+    EnableDarkTitleBar(hwnd);
+    g_state.isFullscreen = false;
+    g_state.windowMode = mode;
+
+    if (g_state.windowedPlacement.length &&
+        (g_state.windowedPlacement.rcNormalPosition.right > g_state.windowedPlacement.rcNormalPosition.left)) {
+        SetWindowPlacement(hwnd, &g_state.windowedPlacement);
+        if (mode == WindowMode::Maximized) ShowWindow(hwnd, SW_MAXIMIZE);
+        else ShowWindow(hwnd, SW_RESTORE);
+        SetWindowPos(hwnd, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+        return;
+    }
+
+    const int monitorW = mi.rcWork.right - mi.rcWork.left;
+    const int monitorH = mi.rcWork.bottom - mi.rcWork.top;
+    if (mode == WindowMode::Maximized) {
+        ShowWindow(hwnd, SW_SHOWMAXIMIZED);
+        SetWindowPos(hwnd, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+        return;
+    }
+    int width = std::min(std::max(1100, monitorW - 160), monitorW);
+    int height = std::min(std::max(720, monitorH - 140), monitorH);
+    const int x = mi.rcWork.left + (monitorW - width) / 2;
+    const int y = mi.rcWork.top + (monitorH - height) / 2;
+    SetWindowPos(hwnd, HWND_TOP, x, y, width, height, SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+}
+
+void ToggleFullscreen() {
+    if (!g_state.hwnd) return;
+    if (!g_state.isFullscreen) ApplyWindowMode(g_state.hwnd, WindowMode::Fullscreen);
+    else ApplyWindowMode(g_state.hwnd, WindowMode::Normal);
+    ShowOSD(g_state.isFullscreen ? L"Pantalla completa" : L"Ventana");
+    InvalidateRect(g_state.hwnd, nullptr, FALSE);
+}
+
+void NextImage() {
+    const size_t count = ImageCount();
+    if (count == 0) return;
+    const size_t start = g_state.currentImageIndex;
+    for (size_t step = 1; step <= count; ++step) {
+        const size_t idx = (start + step) % count;
+        if (LoadImageByIndex(idx)) {
+            RequestPrefetch(idx);
+            InvalidateRect(g_state.hwnd, nullptr, FALSE);
+            return;
+        }
+    }
+}
+
+void PreviousImage() {
+    const size_t count = ImageCount();
+    if (count == 0) return;
+    const size_t start = g_state.currentImageIndex;
+    for (size_t step = 1; step <= count; ++step) {
+        const size_t idx = (start + count - step) % count;
+        if (LoadImageByIndex(idx)) {
+            RequestPrefetch(idx);
+            InvalidateRect(g_state.hwnd, nullptr, FALSE);
+            return;
+        }
+    }
+}
+
+void JumpTo(size_t index) {
+    if (LoadImageByIndex(index)) {
+        RequestPrefetch(index);
+        InvalidateRect(g_state.hwnd, nullptr, FALSE);
+    }
+}
+
+void OpenPath(const std::wstring& path) {
+    DWORD attrs = GetFileAttributesW(path.c_str());
+    if (attrs == INVALID_FILE_ATTRIBUTES) {
+        HandleError(L"No se pudo abrir la ruta.", false);
+        return;
+    }
+    if (attrs & FILE_ATTRIBUTE_DIRECTORY) {
+        ScanFolderForImages(path);
+        if (ImageCount() == 0) {
+            ShowOSD(L"No hay imágenes en la carpeta");
+            UpdateWindowTitle();
+            InvalidateRect(g_state.hwnd, nullptr, FALSE);
+            return;
+        }
+        LoadImageByIndex(0);
+        RequestPrefetch(0);
+        InvalidateRect(g_state.hwnd, nullptr, FALSE);
+        return;
+    }
+    size_t slash = path.find_last_of(L"\\/");
+    std::wstring folder = (slash == std::wstring::npos) ? L"." : path.substr(0, slash);
+    ScanFolderForImages(folder);
+    size_t idx = 0;
+    if (FindImageIndex(path, idx)) {
+        LoadImageByIndex(idx);
+        RequestPrefetch(idx);
+    } else if (LoadImageFromPath(path)) {
+        EnsureFileInList(path);
+    } else if (ImageCount() > 0) {
+        LoadImageByIndex(0);
+        RequestPrefetch(0);
+    }
+    InvalidateRect(g_state.hwnd, nullptr, FALSE);
+}
+
+bool OpenImageFileDialog(HWND hwnd) {
+    ComPtr<IFileOpenDialog> dialog;
+    HRESULT hr = CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
+                                  IID_PPV_ARGS(&dialog.p));
+    if (FAILED(hr) || !dialog) return false;
+    COMDLG_FILTERSPEC filters[] = {
+        { L"Imágenes", L"*.jpg;*.jpeg;*.jpe;*.jfif;*.png;*.bmp;*.gif;*.tif;*.tiff;*.webp;*.heic;*.heif;*.avif;*.jxl;*.jxr;*.wdp;*.ico;*.cur;*.tga;*.psd;*.hdr;*.jp2;*.dng;*.cr2;*.nef;*.arw;*.raw;*.emf;*.wmf" },
+        { L"Todos los archivos", L"*.*" }
+    };
+    dialog->SetFileTypes(2, filters);
+    dialog->SetTitle(L"Abrir imagen");
+    FILEOPENDIALOGOPTIONS opts = 0;
+    dialog->GetOptions(&opts);
+    dialog->SetOptions(opts | FOS_FILEMUSTEXIST | FOS_FORCEFILESYSTEM);
+    hr = dialog->Show(hwnd);
+    if (FAILED(hr)) return false;
+    ComPtr<IShellItem> item;
+    hr = dialog->GetResult(&item);
+    if (FAILED(hr) || !item) return false;
+    PWSTR path = nullptr;
+    hr = item->GetDisplayName(SIGDN_FILESYSPATH, &path);
+    if (FAILED(hr) || !path) return false;
+    OpenPath(path);
+    CoTaskMemFree(path);
+    return true;
+}
+
+bool OpenFolderDialog(HWND hwnd) {
+    ComPtr<IFileOpenDialog> dialog;
+    HRESULT hr = CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
+                                  IID_PPV_ARGS(&dialog.p));
+    if (FAILED(hr) || !dialog) return false;
+    dialog->SetTitle(L"Abrir carpeta");
+    FILEOPENDIALOGOPTIONS opts = 0;
+    dialog->GetOptions(&opts);
+    dialog->SetOptions(opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
+    hr = dialog->Show(hwnd);
+    if (FAILED(hr)) return false;
+    ComPtr<IShellItem> item;
+    hr = dialog->GetResult(&item);
+    if (FAILED(hr) || !item) return false;
+    PWSTR path = nullptr;
+    hr = item->GetDisplayName(SIGDN_FILESYSPATH, &path);
+    if (FAILED(hr) || !path) return false;
+    OpenPath(path);
+    CoTaskMemFree(path);
+    return true;
+}
+
+void InvokeHud(HudId id) {
+    switch (id) {
+        case HUD_PREV: PreviousImage(); break;
+        case HUD_NEXT: NextImage(); break;
+        case HUD_FIT:
+            if (g_state.hwnd && g_state.imageData) {
+                RECT rect{};
+                GetClientRect(g_state.hwnd, &rect);
+                FitImageToWindow(rect.right, rect.bottom);
+                ShowOSD(L"Ajuste");
+                InvalidateRect(g_state.hwnd, nullptr, FALSE);
+            }
+            break;
+        case HUD_ONE: ActualSize(); break;
+        case HUD_ROT: RotateImage(); break;
+        case HUD_FULL: ToggleFullscreen(); break;
+        case HUD_OPEN: OpenImageFileDialog(g_state.hwnd); break;
+        default: break;
+    }
+}
+
+void ShowContextMenu(HWND hwnd, int x, int y) {
+    HMENU menu = CreatePopupMenu();
+    AppendMenuW(menu, MF_STRING, 1, L"Abrir imagen\tCtrl+O");
+    AppendMenuW(menu, MF_STRING, 2, L"Abrir carpeta\tCtrl+Shift+O");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, 3, L"Copiar imagen\tCtrl+C");
+    AppendMenuW(menu, MF_STRING, 4, L"Copiar ruta\tCtrl+Shift+C");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, 5, L"Ajustar a ventana\tF");
+    AppendMenuW(menu, MF_STRING, 6, L"Tamaño real\t1");
+    AppendMenuW(menu, MF_STRING, 7, L"Rotar\tR");
+    AppendMenuW(menu, MF_STRING, 8, L"Pantalla completa\tF11");
+    const int cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, x, y, 0, hwnd, nullptr);
+    DestroyMenu(menu);
+    switch (cmd) {
+        case 1: OpenImageFileDialog(hwnd); break;
+        case 2: OpenFolderDialog(hwnd); break;
+        case 3: CopyImageToClipboard(); break;
+        case 4: CopyPathToClipboard(); break;
+        case 5: InvokeHud(HUD_FIT); break;
+        case 6: ActualSize(); break;
+        case 7: RotateImage(); break;
+        case 8: ToggleFullscreen(); break;
+        default: break;
+    }
+}
+
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_CREATE: {
             g_state.hwnd = hwnd;
-
-            // Crear ventana frameless
-            LONG style = GetWindowLong(hwnd, GWL_STYLE);
-            style &= ~(WS_CAPTION | WS_THICKFRAME | WS_MINIMIZE | WS_MAXIMIZE | WS_SYSMENU);
-            SetWindowLong(hwnd, GWL_STYLE, style);
-
-            // Establecer fondo
-            HBRUSH hBrush = CreateSolidBrush(BG_COLOR);
-            SetClassLongPtr(hwnd, GCLP_HBRBACKGROUND, (LONG_PTR)hBrush);
-
-            // Habilitar drag & drop
             DragAcceptFiles(hwnd, TRUE);
-
-            RECT clientRect = {0};
-            GetClientRect(hwnd, &clientRect);
-            CreateDoubleBuffer(clientRect.right - clientRect.left, clientRect.bottom - clientRect.top);
-
-            // Iniciar hilo de pre-carga
+            EnableDarkTitleBar(hwnd);
+            RECT client{};
+            GetClientRect(hwnd, &client);
+            CreateDoubleBuffer(client.right, client.bottom);
             StartPrefetchThread();
-
+            ShowOSD();
             return 0;
         }
-        
+        case WM_NCCALCSIZE:
+            if (wParam && g_state.isFullscreen) return 0;
+            break;
         case WM_SIZE: {
-            int width = LOWORD(lParam);
-            int height = HIWORD(lParam);
+            if (wParam == SIZE_MINIMIZED) return 0;
+            const int width = LOWORD(lParam);
+            const int height = HIWORD(lParam);
             CreateDoubleBuffer(width, height);
-
             if (g_state.imageData && width > 0 && height > 0) {
                 FitImageToWindow(width, height);
-                EnsureImageVisible();
             }
-            
-            InvalidateRect(hwnd, NULL, FALSE);
+            InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
-
+        case WM_DPICHANGED: {
+            auto* suggested = reinterpret_cast<RECT*>(lParam);
+            SetWindowPos(hwnd, nullptr, suggested->left, suggested->top,
+                         suggested->right - suggested->left, suggested->bottom - suggested->top,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+            return 0;
+        }
         case WM_GETMINMAXINFO: {
-            LPMINMAXINFO minMaxInfo = (LPMINMAXINFO)lParam;
-            minMaxInfo->ptMinTrackSize.x = 320;
-            minMaxInfo->ptMinTrackSize.y = 220;
+            auto* info = reinterpret_cast<LPMINMAXINFO>(lParam);
+            info->ptMinTrackSize.x = 520;
+            info->ptMinTrackSize.y = 360;
             return 0;
         }
-        
-        case WM_ERASEBKGND: {
-            // Evitar parpadeo retornando TRUE sin hacer nada
+        case WM_ERASEBKGND:
             return TRUE;
-        }
-        
         case WM_PAINT: {
-            PAINTSTRUCT ps;
+            PAINTSTRUCT ps{};
             HDC hdc = BeginPaint(hwnd, &ps);
-
             if (!g_state.hdcMem) {
-                RECT clientRect;
-                GetClientRect(hwnd, &clientRect);
-                CreateDoubleBuffer(clientRect.right - clientRect.left, clientRect.bottom - clientRect.top);
+                RECT client{};
+                GetClientRect(hwnd, &client);
+                CreateDoubleBuffer(client.right, client.bottom);
             }
-
             if (g_state.hdcMem) {
                 RenderImage();
-                BitBlt(hdc, 0, 0, ps.rcPaint.right, ps.rcPaint.bottom,
-                       g_state.hdcMem, 0, 0, SRCCOPY);
-            } else {
-                RECT clientRect = ps.rcPaint;
-                HBRUSH hBrush = CreateSolidBrush(BG_COLOR);
-                FillRect(hdc, &clientRect, hBrush);
-                DeleteObject(hBrush);
+                BitBlt(hdc, ps.rcPaint.left, ps.rcPaint.top,
+                       ps.rcPaint.right - ps.rcPaint.left,
+                       ps.rcPaint.bottom - ps.rcPaint.top,
+                       g_state.hdcMem, ps.rcPaint.left, ps.rcPaint.top, SRCCOPY);
             }
-
             EndPaint(hwnd, &ps);
             return 0;
         }
-        
         case WM_KEYDOWN: {
-            // Verificar teclas de control
-            bool ctrlPressed = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
-            
+            const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+            const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
             switch (wParam) {
                 case VK_LEFT:
                 case VK_UP:
+                case VK_BACK:
                     PreviousImage();
                     break;
                 case VK_RIGHT:
@@ -1508,317 +1500,187 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 case VK_SPACE:
                     NextImage();
                     break;
+                case VK_HOME:
+                    JumpTo(0);
+                    break;
+                case VK_END:
+                    if (ImageCount() > 0) JumpTo(ImageCount() - 1);
+                    break;
                 case VK_ESCAPE:
-                    PostQuitMessage(0);
-                    break;
-                case 'I':
-                case 'i':
-                    // Mostrar/ocultar OSD manualmente
-                    g_state.showOSD = true;
-                    g_state.osdDisplayTime = GetTickCount();
-                    InvalidateRect(hwnd, NULL, FALSE);
-                    break;
-                case 'F':
-                case 'f':
-                    // Ajustar imagen a ventana
-                    RECT rect;
-                    GetClientRect(hwnd, &rect);
-                    FitImageToWindow(rect.right, rect.bottom);
-                    InvalidateRect(hwnd, NULL, FALSE);
-                    break;
-                case 'R':
-                case 'r':
-                    // Rotar imagen 90 grados
-                    RotateImage();
+                    if (g_state.isFullscreen) ToggleFullscreen();
+                    else PostMessageW(hwnd, WM_CLOSE, 0, 0);
                     break;
                 case VK_F11:
-                    // Alternar fullscreen
                     ToggleFullscreen();
                     break;
-                case 'C':
-                case 'c':
-                    if (ctrlPressed) {
-                        // Ctrl+C: Copiar imagen al portapapeles
-                        CopyImageToClipboard();
-                    }
+                case 'I':
+                    g_state.osdPinned = !g_state.osdPinned;
+                    ShowOSD(g_state.osdPinned ? L"Info fija" : L"Info auto");
+                    InvalidateRect(hwnd, nullptr, FALSE);
                     break;
-                case 'V':
-                case 'v':
-                    if (ctrlPressed) {
-                        // Ctrl+V: Copiar ruta al portapapeles
-                        CopyPathToClipboard();
-                    }
+                case 'F':
+                    InvokeHud(HUD_FIT);
+                    break;
+                case 'R':
+                    RotateImage();
+                    break;
+                case '0':
+                case VK_NUMPAD0:
+                case '1':
+                    if (!ctrl) ActualSize();
+                    break;
+                case 'C':
+                    if (ctrl && shift) CopyPathToClipboard();
+                    else if (ctrl) CopyImageToClipboard();
+                    break;
+                case 'O':
+                    if (ctrl && shift) OpenFolderDialog(hwnd);
+                    else if (ctrl) OpenImageFileDialog(hwnd);
+                    break;
+                default:
                     break;
             }
             return 0;
         }
-        
         case WM_MOUSEWHEEL: {
             if (!g_state.imageData) return 0;
-            
-            int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+            const int delta = GET_WHEEL_DELTA_WPARAM(wParam);
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             ScreenToClient(hwnd, &pt);
-            
-            float oldZoom = g_state.zoom;
-            float zoomFactor = (delta > 0) ? ZOOM_STEP : (1.0f / ZOOM_STEP);
-            float newZoom = std::max(MIN_ZOOM, std::min(MAX_ZOOM, g_state.zoom * zoomFactor));
-
-            if (newZoom == oldZoom) {
-                return 0;
-            }
-
-            float imageX = (pt.x - g_state.offsetX) / oldZoom;
-            float imageY = (pt.y - g_state.offsetY) / oldZoom;
+            RECT client{};
+            GetClientRect(hwnd, &client);
+            if (pt.y >= client.bottom - HUD_HEIGHT) return 0;
+            const float oldZoom = g_state.zoom;
+            const float factor = (delta > 0) ? ZOOM_STEP : (1.0f / ZOOM_STEP);
+            const float newZoom = std::max(MIN_ZOOM, std::min(MAX_ZOOM, oldZoom * factor));
+            if (newZoom == oldZoom) return 0;
+            const float imageX = (pt.x - g_state.offsetX) / oldZoom;
+            const float imageY = (pt.y - g_state.offsetY) / oldZoom;
             g_state.zoom = newZoom;
             g_state.offsetX = pt.x - imageX * g_state.zoom;
             g_state.offsetY = pt.y - imageY * g_state.zoom;
             EnsureImageVisible();
-            
-            InvalidateRect(hwnd, NULL, FALSE);
+            ShowOSD();
+            InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
-        
+        case WM_LBUTTONDBLCLK: {
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            RECT client{};
+            GetClientRect(hwnd, &client);
+            if (pt.y < client.bottom - HUD_HEIGHT) ToggleFullscreen();
+            return 0;
+        }
         case WM_LBUTTONDOWN: {
+            const int x = GET_X_LPARAM(lParam);
+            const int y = GET_Y_LPARAM(lParam);
+            const HudId hit = HitTestHud(x, y);
+            if (hit != HUD_NONE) {
+                InvokeHud(hit);
+                return 0;
+            }
+            RECT client{};
+            GetClientRect(hwnd, &client);
+            if (y >= client.bottom - HUD_HEIGHT) return 0;
             g_state.isDragging = true;
-            g_state.dragStartX = GET_X_LPARAM(lParam);
-            g_state.dragStartY = GET_Y_LPARAM(lParam);
+            g_state.dragStartX = x;
+            g_state.dragStartY = y;
             g_state.dragStartOffsetX = g_state.offsetX;
             g_state.dragStartOffsetY = g_state.offsetY;
             SetCapture(hwnd);
             return 0;
         }
-        
-        case WM_LBUTTONUP: {
+        case WM_LBUTTONUP:
             g_state.isDragging = false;
             ReleaseCapture();
             return 0;
+        case WM_RBUTTONUP: {
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            ClientToScreen(hwnd, &pt);
+            ShowContextMenu(hwnd, pt.x, pt.y);
+            return 0;
         }
-        
         case WM_MOUSEMOVE: {
+            const int x = GET_X_LPARAM(lParam);
+            const int y = GET_Y_LPARAM(lParam);
+            TRACKMOUSEEVENT tme{};
+            tme.cbSize = sizeof(tme);
+            tme.dwFlags = TME_LEAVE;
+            tme.hwndTrack = hwnd;
+            TrackMouseEvent(&tme);
+            const HudId hot = HitTestHud(x, y);
+            if (hot != g_state.hudHot) {
+                g_state.hudHot = hot;
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
             if (g_state.isDragging) {
-                int x = GET_X_LPARAM(lParam);
-                int y = GET_Y_LPARAM(lParam);
-                
-                g_state.offsetX = g_state.dragStartOffsetX + (x - g_state.dragStartX);
-                g_state.offsetY = g_state.dragStartOffsetY + (y - g_state.dragStartY);
+                g_state.offsetX = g_state.dragStartOffsetX + static_cast<float>(x - g_state.dragStartX);
+                g_state.offsetY = g_state.dragStartOffsetY + static_cast<float>(y - g_state.dragStartY);
                 EnsureImageVisible();
-                
-                InvalidateRect(hwnd, NULL, FALSE);
+                InvalidateRect(hwnd, nullptr, FALSE);
             }
             return 0;
         }
-        
-        case WM_DROPFILES: {
-            HDROP hDrop = (HDROP)wParam;
-            
-            // Obtener número de archivos arrastrados
-            UINT fileCount = DragQueryFile(hDrop, 0xFFFFFFFF, NULL, 0);
-            
-            if (fileCount > 0) {
-                // Obtener el primer archivo
-                wchar_t filePath[MAX_PATH];
-                DragQueryFile(hDrop, 0, filePath, MAX_PATH);
-                
-                // Verificar si es archivo o carpeta
-                DWORD attrs = GetFileAttributes(filePath);
-                if (attrs != INVALID_FILE_ATTRIBUTES) {
-                    std::wstring newPath(filePath);
-                    
-                    if (attrs & FILE_ATTRIBUTE_DIRECTORY) {
-                        // Es una carpeta, escanearla
-                        ScanFolderForImages(newPath);
-                    } else {
-                        // Es un archivo, obtener su carpeta
-                        size_t pos = newPath.find_last_of(L'\\');
-                        if (pos != std::wstring::npos) {
-                            std::wstring folder = newPath.substr(0, pos);
-                            ScanFolderForImages(folder);
-
-                            // Encontrar el índice del archivo arrastrado con comparación sensible a mayúsculas
-                            size_t selectedIndex = SIZE_MAX;
-                            for (size_t i = 0; i < g_state.imageFiles.size(); ++i) {
-                                if (PathsEqualCaseInsensitive(g_state.imageFiles[i], newPath)) {
-                                    selectedIndex = i;
-                                    break;
-                                }
-                            }
-
-                            if (selectedIndex != SIZE_MAX) {
-                                LoadImageByIndex(selectedIndex);
-                                RequestPrefetch(selectedIndex);
-                            } else if (!g_state.imageFiles.empty()) {
-                                LoadImageByIndex(0);
-                            }
-                        }
-                    }
-                    
-                    if (!g_state.imageFiles.empty()) {
-                        InvalidateRect(hwnd, NULL, FALSE);
-                    }
-                }
+        case WM_MOUSELEAVE:
+            if (g_state.hudHot != HUD_NONE) {
+                g_state.hudHot = HUD_NONE;
+                InvalidateRect(hwnd, nullptr, FALSE);
             }
-            
+            return 0;
+        case WM_DROPFILES: {
+            HDROP hDrop = reinterpret_cast<HDROP>(wParam);
+            const UINT fileCount = DragQueryFileW(hDrop, 0xFFFFFFFF, nullptr, 0);
+            if (fileCount > 0) {
+                wchar_t filePath[MAX_PATH] = {};
+                DragQueryFileW(hDrop, 0, filePath, MAX_PATH);
+                OpenPath(filePath);
+            }
             DragFinish(hDrop);
             return 0;
         }
-        
-        case WM_DESTROY: {
-            g_state.prefetchRunning = false;
-            if (g_state.prefetchThread.joinable()) {
-                g_state.prefetchCV.notify_all();
-                g_state.prefetchThread.join();
-            }
-
+        case WM_DESTROY:
+            StopPrefetchThread();
             FreeCurrentImage();
-
-            if (g_state.hdcMem) {
-                if (g_state.hbmOld) {
-                    SelectObject(g_state.hdcMem, g_state.hbmOld);
-                    g_state.hbmOld = nullptr;
-                }
-                if (g_state.hbmMem) {
-                    DeleteObject(g_state.hbmMem);
-                    g_state.hbmMem = nullptr;
-                }
-                DeleteDC(g_state.hdcMem);
-                g_state.hdcMem = nullptr;
-            }
-
+            FreeDoubleBuffer();
             PostQuitMessage(0);
             return 0;
-        }
-        
         default:
-            return DefWindowProc(hwnd, msg, wParam, lParam);
+            return DefWindowProcW(hwnd, msg, wParam, lParam);
     }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
-// Obtener ruta del ejecutable
-std::wstring GetExecutablePath() {
-    wchar_t path[MAX_PATH] = {0};
-    DWORD len = GetModuleFileName(NULL, path, MAX_PATH);
-    if (len == 0 || len >= MAX_PATH) {
-        return L"";
-    }
-    std::wstring fullPath(path);
-    size_t pos = fullPath.find_last_of(L'\\');
-    if (pos == std::wstring::npos) {
-        return L"";
-    }
-    return fullPath.substr(0, pos);
+std::wstring GetExecutableFolder() {
+    wchar_t path[MAX_PATH] = {};
+    DWORD len = GetModuleFileNameW(nullptr, path, MAX_PATH);
+    if (len == 0 || len >= MAX_PATH) return {};
+    std::wstring full(path);
+    size_t pos = full.find_last_of(L'\\');
+    if (pos == std::wstring::npos) return {};
+    return full.substr(0, pos);
 }
 
-// Ruta válida por defecto para arrancar aunque no haya imágenes en la carpeta del ejecutable.
 std::wstring GetDefaultImageFolder() {
-    wchar_t userProfile[MAX_PATH] = {0};
-    if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_MYPICTURES, NULL, SHGFP_TYPE_CURRENT, userProfile)) && userProfile[0] != 0) {
-        DWORD attrs = GetFileAttributesW(userProfile);
-        if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY)) {
-            return userProfile;
-        }
+    wchar_t pictures[MAX_PATH] = {};
+    if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_MYPICTURES, nullptr, SHGFP_TYPE_CURRENT, pictures)) && pictures[0]) {
+        DWORD attrs = GetFileAttributesW(pictures);
+        if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY)) return pictures;
     }
-
-    std::wstring exeFolder = GetExecutablePath();
-    if (!exeFolder.empty()) {
-        DWORD attrs = GetFileAttributesW(exeFolder.c_str());
-        if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY)) {
-            return exeFolder;
-        }
-    }
-
-    wchar_t documents[MAX_PATH] = {0};
-    if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_PERSONAL, NULL, SHGFP_TYPE_CURRENT, documents)) && documents[0] != 0) {
-        DWORD attrs = GetFileAttributesW(documents);
-        if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY)) {
-            return documents;
-        }
-    }
-
+    std::wstring exeFolder = GetExecutableFolder();
+    if (!exeFolder.empty()) return exeFolder;
     return L".";
 }
 
-// Solicitar al usuario una carpeta de imágenes cuando la app se inicia sin carpeta válida
-bool SelectFolderDialog(HWND hwnd, std::wstring& outFolder) {
-    HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-    bool success = false;
-
-    BROWSEINFO bi = {};
-    wchar_t buffer[MAX_PATH] = {0};
-
-    bi.hwndOwner = hwnd;
-    bi.pidlRoot = nullptr;
-    bi.pszDisplayName = buffer;
-    bi.lpszTitle = L"Selecciona una carpeta con imágenes";
-    bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_USENEWUI;
-
-    LPITEMIDLIST pidl = SHBrowseForFolder(&bi);
-    if (pidl) {
-        if (SHGetPathFromIDList(pidl, buffer)) {
-            outFolder = buffer;
-            success = true;
-        }
-        CoTaskMemFree(pidl);
-    }
-
-    if (SUCCEEDED(hr)) {
-        CoUninitialize();
-    }
-
-    return success;
-}
-
-// Aplicar el tamaño correcto de la ventana según el monitor real y el modo solicitado.
-void ApplyWindowMode(HWND hwnd, WindowMode mode) {
-    if (!hwnd) {
-        return;
-    }
-
-    HMONITOR hMonitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
-    MONITORINFO mi = { sizeof(mi) };
-    if (GetMonitorInfo(hMonitor, &mi)) {
-        if (mode == WindowMode::Fullscreen) {
-            SetWindowPos(hwnd, HWND_TOP,
-                         mi.rcMonitor.left, mi.rcMonitor.top,
-                         mi.rcMonitor.right - mi.rcMonitor.left,
-                         mi.rcMonitor.bottom - mi.rcMonitor.top,
-                         SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_SHOWWINDOW);
-            return;
-        }
-
-        if (mode == WindowMode::Normal) {
-            const int monitorWidth = static_cast<int>(mi.rcMonitor.right - mi.rcMonitor.left);
-            const int monitorHeight = static_cast<int>(mi.rcMonitor.bottom - mi.rcMonitor.top);
-            int width = std::max<int>(900, monitorWidth - 80);
-            int height = std::max<int>(600, monitorHeight - 80);
-            int x = mi.rcMonitor.left + (monitorWidth - width) / 2;
-            int y = mi.rcMonitor.top + (monitorHeight - height) / 2;
-            SetWindowPos(hwnd, HWND_TOP, x, y, width, height,
-                         SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_SHOWWINDOW);
-            return;
-        }
-    }
-
-    if (mode == WindowMode::Fullscreen) {
-        ShowWindow(hwnd, SW_SHOWMAXIMIZED);
-    } else {
-        ShowWindow(hwnd, SW_SHOWNORMAL);
-    }
-}
-
-// Parsear argumentos de línea de comandos para carpeta y modo de ventana
-void ParseStartupOptions(LPWSTR lpCmdLine, std::wstring& outFolder, WindowMode& outMode) {
-    outFolder = GetDefaultImageFolder();
-    outMode = WindowMode::Fullscreen;
+void ParseStartupOptions(std::wstring& outFolder, WindowMode& outMode) {
+    outFolder.clear();
+    outMode = WindowMode::Normal;
 
     int argc = 0;
-    LPWSTR* argv = CommandLineToArgvW(lpCmdLine, &argc);
-    if (!argv) {
-        return;
-    }
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (!argv) return;
 
     std::wstring firstPath;
-    for (int i = 0; i < argc; ++i) {
+    for (int i = 1; i < argc; ++i) {
         std::wstring arg = argv[i];
         if (arg == L"--fullscreen" || arg == L"-f") {
             outMode = WindowMode::Fullscreen;
@@ -1832,185 +1694,117 @@ void ParseStartupOptions(LPWSTR lpCmdLine, std::wstring& outFolder, WindowMode& 
             outMode = WindowMode::Maximized;
             continue;
         }
-
-        if (arg.empty() || arg[0] == L'-') {
-            continue;
-        }
-
-        if (firstPath.empty()) {
-            firstPath = arg;
-        }
+        if (arg.empty() || arg[0] == L'-') continue;
+        if (firstPath.empty()) firstPath = arg;
     }
-
     LocalFree(argv);
 
-    if (!firstPath.empty()) {
-        if (firstPath.front() == L'"' && firstPath.back() == L'"') {
-            firstPath = firstPath.substr(1, firstPath.size() - 2);
-        }
-
-        DWORD attrs = GetFileAttributes(firstPath.c_str());
-        if (attrs != INVALID_FILE_ATTRIBUTES) {
-            if (attrs & FILE_ATTRIBUTE_DIRECTORY) {
-                outFolder = firstPath;
-            } else {
-                g_state.startupFilePath = firstPath;
-                size_t pos = firstPath.find_last_of(L'\\');
-                if (pos != std::wstring::npos) {
-                    outFolder = firstPath.substr(0, pos);
-                }
-            }
-        } else if (!firstPath.empty()) {
-            // Si Windows pasa una ruta que aún no existe o la carpeta está temporalmente disponible,
-            // conservamos la ruta para intentar cargarla directamente más tarde.
-            g_state.startupFilePath = firstPath;
-        }
+    if (firstPath.empty()) return;
+    if (firstPath.size() >= 2 && firstPath.front() == L'"' && firstPath.back() == L'"') {
+        firstPath = firstPath.substr(1, firstPath.size() - 2);
+    }
+    DWORD attrs = GetFileAttributesW(firstPath.c_str());
+    if (attrs == INVALID_FILE_ATTRIBUTES) {
+        g_state.startupFilePath = firstPath;
+        return;
+    }
+    if (attrs & FILE_ATTRIBUTE_DIRECTORY) {
+        outFolder = firstPath;
+    } else {
+        g_state.startupFilePath = firstPath;
+        size_t pos = firstPath.find_last_of(L"\\/");
+        if (pos != std::wstring::npos) outFolder = firstPath.substr(0, pos);
     }
 }
 
-// wWinMain (Unicode entry point expected by the Microsoft CRT)
-int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLine, int nCmdShow) {
-    UNREFERENCED_PARAMETER(hPrevInstance);
-    UNREFERENCED_PARAMETER(nCmdShow);
-
-    // Activar DPI-aware para evitar que la ventana se cierre o se dibuje mal.
-    if (IsWindows10OrGreater()) {
-        SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-    } else if (IsWindowsVistaOrGreater()) {
-        SetProcessDPIAware();
+static void EnableDpiAwareness() {
+    HMODULE user32 = GetModuleHandleW(L"user32.dll");
+    if (user32) {
+        using SetCtxFn = BOOL (WINAPI*)(HANDLE);
+        auto setCtx = reinterpret_cast<SetCtxFn>(GetProcAddress(user32, "SetProcessDpiAwarenessContext"));
+        if (setCtx && setCtx(reinterpret_cast<HANDLE>(-4))) return;
     }
+    HMODULE shcore = LoadLibraryW(L"shcore.dll");
+    if (shcore) {
+        using SetAwarenessFn = HRESULT (WINAPI*)(int);
+        auto setAwareness = reinterpret_cast<SetAwarenessFn>(GetProcAddress(shcore, "SetProcessDpiAwareness"));
+        if (setAwareness && SUCCEEDED(setAwareness(2))) {
+            FreeLibrary(shcore);
+            return;
+        }
+        FreeLibrary(shcore);
+    }
+    SetProcessDPIAware();
+}
 
+int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
+    EnableDpiAwareness();
+    g_state.hInstance = hInstance;
+
+    HRESULT comHr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    g_state.comInitialized = SUCCEEDED(comHr);
     LogMessage(L"Iniciando ARTPICST");
 
-    // Inicializar GDI+
     if (!InitGDIPlus()) {
-        LogMessage(L"Error al inicializar GDI+");
-        MessageBox(NULL, L"Error al inicializar GDI+", L"Error", MB_OK | MB_ICONERROR);
+        MessageBoxW(nullptr, L"Error al inicializar GDI+.", L"ARTPICST", MB_OK | MB_ICONERROR);
+        if (g_state.comInitialized) CoUninitialize();
         return 1;
     }
-    
-    // Registrar clase de ventana
-    WNDCLASSEX wc = {0};
-    wc.cbSize = sizeof(WNDCLASSEX);
-    wc.style = CS_HREDRAW | CS_VREDRAW;
+
+    WNDCLASSEXW wc{};
+    wc.cbSize = sizeof(wc);
+    wc.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInstance;
-    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-    wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.hbrBackground = CreateSolidBrush(BG_COLOR);
     wc.lpszClassName = CLASS_NAME;
-    
-    if (!RegisterClassEx(&wc)) {
-        MessageBox(NULL, L"Error al registrar clase de ventana", L"Error", MB_OK | MB_ICONERROR);
+    wc.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
+    wc.hIconSm = wc.hIcon;
+
+    if (!RegisterClassExW(&wc)) {
+        MessageBoxW(nullptr, L"Error al registrar la ventana.", L"ARTPICST", MB_OK | MB_ICONERROR);
         CleanupGDIPlus();
+        if (g_state.comInitialized) CoUninitialize();
         return 1;
     }
-    
-    // Obtener carpeta de imágenes y modo de inicio
+
     std::wstring folderPath;
-    WindowMode startMode = WindowMode::Fullscreen;
-    ParseStartupOptions(lpCmdLine, folderPath, startMode);
+    WindowMode startMode = WindowMode::Normal;
+    ParseStartupOptions(folderPath, startMode);
     g_state.windowMode = startMode;
     g_state.isFullscreen = (startMode == WindowMode::Fullscreen);
-    LogMessage(L"Carpeta inicial: " + folderPath + L" | Modo: " + (startMode == WindowMode::Fullscreen ? L"fullscreen" : (startMode == WindowMode::Normal ? L"normal" : L"maximized")));
-    ScanFolderForImages(folderPath);
+    if (!folderPath.empty()) ScanFolderForImages(folderPath);
 
-    if (!g_state.startupFilePath.empty()) {
-        size_t startupIndex = SIZE_MAX;
-        for (size_t i = 0; i < g_state.imageFiles.size(); ++i) {
-            if (PathsEqualCaseInsensitive(g_state.imageFiles[i], g_state.startupFilePath)) {
-                startupIndex = i;
-                break;
-            }
-        }
-
-        if (startupIndex != SIZE_MAX) {
-            g_state.currentImageIndex = startupIndex;
-        }
-    }
-    
-    if (g_state.imageFiles.empty()) {
-        std::wstring selectedFolder;
-        if (SelectFolderDialog(NULL, selectedFolder)) {
-            ScanFolderForImages(selectedFolder);
-            LogMessage(L"Carpeta seleccionada manualmente: " + selectedFolder);
-        }
-    }
-
-    // Si la carpeta inicial no contiene imágenes compatibles, no cerrar la app:
-    // la ventana puede seguir abierta para que el usuario arrastre archivos o elija otra carpeta.
-    if (g_state.imageFiles.empty()) {
-        LogMessage(L"No se encontraron imágenes compatibles");
-        MessageBox(NULL,
-                   L"No se encontraron imágenes compatibles en la carpeta seleccionada. Puedes arrastrar archivos o carpetas aquí para abrirlos, o elegir otra carpeta.",
-                   L"ARTPICST",
-                   MB_OK | MB_ICONINFORMATION);
-    }
-
-    // Crear ventana en modo completo o normal según el arranque.
-    // Siempre trabajamos sobre el monitor real para evitar estados inválidos al iniciar sin imágenes.
-    int screenWidth = GetSystemMetrics(SM_CXSCREEN);
-    int screenHeight = GetSystemMetrics(SM_CYSCREEN);
-
-    DWORD windowStyle = WS_POPUP | WS_VISIBLE;
-    int x = 0;
-    int y = 0;
-    int width = screenWidth;
-    int height = screenHeight;
-
-    if (startMode == WindowMode::Normal) {
-        width = std::max<int>(900, screenWidth - 80);
-        height = std::max<int>(600, screenHeight - 80);
-        x = (screenWidth - width) / 2;
-        y = (screenHeight - height) / 2;
-    } else if (startMode == WindowMode::Maximized) {
-        width = screenWidth;
-        height = screenHeight;
-    }
-
-    HWND hwnd = CreateWindowEx(
-        0,
+    HWND hwnd = CreateWindowExW(
+        WS_EX_ACCEPTFILES | WS_EX_APPWINDOW,
         CLASS_NAME,
         L"ARTPICST",
-        windowStyle,
-        x, y, width, height,
-        NULL, NULL, hInstance, NULL
-    );
-    
+        WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
+        CW_USEDEFAULT, CW_USEDEFAULT, 1200, 800,
+        nullptr, nullptr, hInstance, nullptr);
+
     if (!hwnd) {
-        MessageBox(NULL, L"Error al crear ventana", L"Error", MB_OK | MB_ICONERROR);
+        MessageBoxW(nullptr, L"Error al crear la ventana.", L"ARTPICST", MB_OK | MB_ICONERROR);
         CleanupGDIPlus();
+        if (g_state.comInitialized) CoUninitialize();
         return 1;
     }
-    
-    // Cargar la imagen de inicio exacta si se abrió un archivo desde el Explorador;
-    // si no, cargar la primera imagen válida de la carpeta.
-    if (!g_state.imageFiles.empty()) {
-        LoadInitialImageSafely();
-    }
 
-    InvalidateRect(hwnd, NULL, FALSE);
-
-    // Mostrar ventana con un estado válido si no hay imágenes ni si se inicia en fullscreen.
-    if (startMode == WindowMode::Normal) {
-        ApplyWindowMode(hwnd, WindowMode::Normal);
-    } else if (startMode == WindowMode::Maximized) {
-        ApplyWindowMode(hwnd, WindowMode::Maximized);
-    } else {
-        g_state.isFullscreen = true;
-        ApplyWindowMode(hwnd, WindowMode::Fullscreen);
-    }
+    EnableDarkTitleBar(hwnd);
+    LoadInitialImageSafely();
+    ApplyWindowMode(hwnd, startMode);
+    ShowWindow(hwnd, g_state.isFullscreen ? SW_SHOW : (nCmdShow > 0 ? nCmdShow : SW_SHOWDEFAULT));
+    InvalidateRect(hwnd, nullptr, FALSE);
     UpdateWindow(hwnd);
-    
-    // Bucle de mensajes
-    MSG msg;
-    while (GetMessage(&msg, NULL, 0, 0)) {
+
+    MSG msg{};
+    while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
         TranslateMessage(&msg);
-        DispatchMessage(&msg);
+        DispatchMessageW(&msg);
     }
-    
-    // Limpieza
-    FreeCurrentImage();
+
     CleanupGDIPlus();
-    
-    return (int)msg.wParam;
+    if (g_state.comInitialized) CoUninitialize();
+    return static_cast<int>(msg.wParam);
 }

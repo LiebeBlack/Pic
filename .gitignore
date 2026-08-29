@@ -39,6 +39,12 @@ Makefile
 *.swo
 *~
 
+# Logs and dist
+*.log
+dist/
+artpicst-portable.zip
+artpicst-installer.exe
+
 # OS
 .DS_Store
 Thumbs.db
