@@ -54,7 +54,8 @@ jobs:
           $root = $env:GITHUB_WORKSPACE
           $dist = Join-Path $root "dist"
           $icon = Join-Path $root "resources\artpicst.ico"
-          $updaterExe = Join-Path $root "dist\auto_updater.exe"
+          $updaterExe = Join-Path $root "updater_build\auto_updater.exe"
+          $distUpdaterExe = Join-Path $dist "auto_updater.exe"
 
           New-Item -ItemType Directory -Force -Path $dist | Out-Null
 
@@ -67,7 +68,7 @@ jobs:
           }
 
           Copy-Item $env:ARTPICST_EXE (Join-Path $dist "artpicst.exe") -Force
-          Copy-Item $updaterExe (Join-Path $dist "auto_updater.exe") -Force
+          Copy-Item $updaterExe $distUpdaterExe -Force
           Copy-Item (Join-Path $root "README.md") (Join-Path $dist "README.md") -Force
           Copy-Item $icon (Join-Path $dist "artpicst.ico") -Force
 
