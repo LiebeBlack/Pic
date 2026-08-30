@@ -34,7 +34,7 @@ try:
 except ImportError:
     APP_NAME = "ARTPICST"
     AUTO_OPEN_AFTER_INSTALL = True
-    CURRENT_VERSION = "22"
+    CURRENT_VERSION = "auto-28"
     GITHUB_OWNER = "LiebeBlack"
     GITHUB_REPO = "Pic"
     INSTALLER_ARGS = "/S"
@@ -50,7 +50,7 @@ def log(msg: str) -> None:
 
 def normalize_version(ver_str: str) -> tuple:
     """
-    Convierte tags como 'auto-23', 'v1.2.3', '1.0.4', '22' en una tupla comparable de enteros.
+    Convierte tags como 'auto-28', 'v1.2.3', '1.0.4', '22' en una tupla comparable de enteros.
     """
     raw = str(ver_str or "0").strip().lower()
     raw = re.sub(r"^(auto|release|v)[-_]?", "", raw)
@@ -63,9 +63,54 @@ def normalize_version(ver_str: str) -> tuple:
     return tuple(parts[:4])
 
 
+def get_current_installed_version() -> str:
+    """
+    Detecta de forma inteligente la versión actualmente instalada en el equipo:
+    1. Lee version.json en la carpeta del ejecutable o en Program Files
+    2. Lee DisplayVersion del Registro de Windows (HKCU y HKLM)
+    3. Retorna CURRENT_VERSION de config.py como respaldo
+    """
+    app_dir = Path(__file__).resolve().parent.parent
+    candidate_json_paths = [
+        app_dir / "version.json",
+        app_dir / "dist" / "version.json",
+        Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / APP_NAME / "version.json",
+    ]
+    for p in candidate_json_paths:
+        if p.exists():
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    val = data.get("version") or data.get("tag") or data.get("tag_name")
+                    if val and str(val).strip():
+                        return str(val).strip()
+            except Exception:
+                pass
+
+    roots = [
+        (winreg.HKEY_LOCAL_MACHINE, "HKLM"),
+        (winreg.HKEY_CURRENT_USER, "HKCU"),
+    ]
+    flags = [winreg.KEY_READ | winreg.KEY_WOW64_64KEY, winreg.KEY_READ]
+
+    for hkey_root, _ in roots:
+        for access in flags:
+            try:
+                with winreg.OpenKey(hkey_root, INSTALL_REG_KEY, 0, access) as key:
+                    val, _ = winreg.QueryValueEx(key, "DisplayVersion")
+                    if val and str(val).strip():
+                        return str(val).strip()
+            except OSError:
+                continue
+
+    return str(CURRENT_VERSION).strip()
+
+
 def is_update_available(installed_ver: str, remote_tag: str) -> bool:
-    """Devuelve True si la versión remota es mayor a la instalada."""
-    return normalize_version(remote_tag) > normalize_version(installed_ver)
+    """Devuelve True si la versión remota es estrictamente mayor a la instalada."""
+    norm_inst = normalize_version(installed_ver)
+    norm_remote = normalize_version(remote_tag)
+    return norm_remote > norm_inst
 
 
 def fetch_latest_release():
@@ -77,7 +122,7 @@ def fetch_latest_release():
     req = urllib.request.Request(
         url,
         headers={
-            "User-Agent": f"{APP_NAME}-AutoUpdater/1.0",
+            "User-Agent": f"{APP_NAME}-AutoUpdater/1.1",
             "Accept": "application/vnd.github.v3+json",
         },
     )
@@ -106,51 +151,12 @@ def fetch_latest_release():
     return tag_name, installer_url, release_name, release_body
 
 
-def get_installed_uninstall_string() -> str:
-    """
-    Busca la cadena de desinstalación en el Registro de Windows (HKCU y HKLM, 64 y 32 bits).
-    """
-    roots = [
-        (winreg.HKEY_LOCAL_MACHINE, "HKLM"),
-        (winreg.HKEY_CURRENT_USER, "HKCU"),
-    ]
-    flags = [winreg.KEY_READ | winreg.KEY_WOW64_64KEY, winreg.KEY_READ]
-
-    for hkey_root, root_name in roots:
-        for access in flags:
-            try:
-                with winreg.OpenKey(hkey_root, INSTALL_REG_KEY, 0, access) as key:
-                    val, _ = winreg.QueryValueEx(key, "UninstallString")
-                    if val and str(val).strip():
-                        return str(val).strip()
-            except OSError:
-                continue
-    return ""
-
-
-def uninstall_existing() -> bool:
-    """Ejecuta el desinstalador de la versión previa si existe."""
-    cmd = get_installed_uninstall_string()
-    if not cmd:
-        return False
-    try:
-        log(f"Ejecutando desinstalación previa: {cmd}")
-        if cmd.lower().endswith("uninstall.exe"):
-            subprocess.run([cmd, "/S"], check=False, timeout=30)
-        else:
-            subprocess.run(cmd, shell=True, check=False, timeout=30)
-        return True
-    except Exception as exc:
-        log(f"Advertencia al desinstalar: {exc}")
-        return False
-
-
 def download_file(url: str, dest_path: Path) -> None:
     """Descarga el archivo desde url al path de destino en trozos de 16KB."""
     log(f"Descargando actualizador desde: {url}")
     req = urllib.request.Request(
         url,
-        headers={"User-Agent": f"{APP_NAME}-AutoUpdater/1.0"},
+        headers={"User-Agent": f"{APP_NAME}-AutoUpdater/1.1"},
     )
     with urllib.request.urlopen(req, timeout=90) as response:
         with open(dest_path, "wb") as f_out:
@@ -162,9 +168,48 @@ def download_file(url: str, dest_path: Path) -> None:
     log(f"Descarga completada con éxito en: {dest_path}")
 
 
-def run_installer(installer_path: Path) -> bool:
-    """Lanza el ejecutable instalador."""
+def close_running_instances():
+    """Cierra instancias abiertas de artpicst.exe para permitir sobrescritura."""
     try:
+        subprocess.run(["taskkill", "/IM", "artpicst.exe", "/T", "/F"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        time.sleep(1)
+    except Exception:
+        pass
+
+
+def update_installed_version_registry_and_file(version_tag: str):
+    """Actualiza la versión registrada en el Registro y en version.json."""
+    roots = [winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER]
+    flags = [winreg.KEY_SET_VALUE | winreg.KEY_WOW64_64KEY, winreg.KEY_SET_VALUE]
+    for r in roots:
+        for f in flags:
+            try:
+                with winreg.OpenKey(r, INSTALL_REG_KEY, 0, f) as k:
+                    winreg.SetValueEx(k, "DisplayVersion", 0, winreg.REG_SZ, version_tag)
+            except OSError:
+                continue
+
+    # Escribir en version.json si la carpeta existe
+    target_dirs = [
+        Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / APP_NAME,
+        Path(__file__).resolve().parent.parent,
+        Path(__file__).resolve().parent.parent / "dist",
+    ]
+    for d in target_dirs:
+        if d.exists() and d.is_dir():
+            try:
+                vfile = d / "version.json"
+                with open(vfile, "w", encoding="utf-8") as f:
+                    json.dump({"version": version_tag, "tag": version_tag, "updated_at": time.strftime("%Y-%m-%d %H:%M:%S")}, f, indent=2)
+            except Exception:
+                pass
+
+
+def run_installer(installer_path: Path, latest_tag: str) -> bool:
+    """Lanza el ejecutable instalador cerrando primero la aplicación."""
+    try:
+        close_running_instances()
         cmd = [str(installer_path)]
         if INSTALLER_ARGS:
             cmd.extend(shlex.split(INSTALLER_ARGS))
@@ -174,6 +219,8 @@ def run_installer(installer_path: Path) -> bool:
             subprocess.Popen(cmd, shell=False)
         else:
             subprocess.run(cmd, check=False)
+
+        update_installed_version_registry_and_file(latest_tag)
         return True
     except Exception as exc:
         log(f"Error al ejecutar instalador: {exc}")
@@ -183,14 +230,13 @@ def run_installer(installer_path: Path) -> bool:
 def show_message_box(title: str, text: str, style: int = 0) -> int:
     """Muestra un MessageBox nativo de Windows vía ctypes."""
     try:
-        # Habilitar DPI awareness para que la ventana se vea nítida
         ctypes.windll.user32.SetProcessDPIAware()
     except Exception:
         pass
     return ctypes.windll.user32.MessageBoxW(0, text, title, style)
 
 
-def show_update_prompt(latest_tag: str, release_name: str) -> bool:
+def show_update_prompt(current_ver: str, latest_tag: str, release_name: str) -> bool:
     """Muestra cuadro de diálogo preguntando al usuario si desea actualizar."""
     MB_YESNO = 0x00000004
     MB_ICONQUESTION = 0x00000020
@@ -199,7 +245,7 @@ def show_update_prompt(latest_tag: str, release_name: str) -> bool:
     display_name = release_name if release_name != latest_tag else latest_tag
     msg = (
         f"Hay una nueva versión disponible de {APP_NAME}:\n\n"
-        f"• Versión actual: {CURRENT_VERSION}\n"
+        f"• Versión instalada: {current_ver}\n"
         f"• Nueva versión: {display_name}\n\n"
         f"¿Desea descargar e instalar la actualización ahora?"
     )
@@ -214,9 +260,10 @@ def show_update_prompt(latest_tag: str, release_name: str) -> bool:
 def perform_update(silent: bool = False, force: bool = False) -> int:
     """
     Proceso principal de comprobación y actualización.
-    Retorna 0 si tuvo éxito / está al día, 1 si hubo error, 2 si hay actualización disponible (en modo solo comprobación).
+    Retorna 0 si tuvo éxito / está al día, 1 si hubo error, 2 si hay actualización disponible (en modo comprobación).
     """
-    log(f"Comprobando actualizaciones para {APP_NAME} (versión instalada: {CURRENT_VERSION})...")
+    current_ver = get_current_installed_version()
+    log(f"Comprobando actualizaciones para {APP_NAME} (versión instalada: {current_ver})...")
 
     try:
         latest_tag, installer_url, release_name, _ = fetch_latest_release()
@@ -241,14 +288,14 @@ def perform_update(silent: bool = False, force: bool = False) -> int:
         return 0
 
     log(f"Última versión en GitHub: {latest_tag} ({release_name})")
-    update_needed = force or is_update_available(CURRENT_VERSION, latest_tag)
+    update_needed = force or is_update_available(current_ver, latest_tag)
 
     if not update_needed:
-        log(f"La aplicación ya está en su última versión ({CURRENT_VERSION}).")
+        log(f"La aplicación ya está en su última versión ({current_ver}).")
         if not silent:
             show_message_box(
                 f"{APP_NAME} — Actualizaciones",
-                f"Ya tienes instalada la versión más reciente de {APP_NAME} ({CURRENT_VERSION}).",
+                f"Ya tienes instalada la versión más reciente de {APP_NAME} ({current_ver}).",
                 0x00000040,  # MB_ICONINFORMATION
             )
         return 0
@@ -258,13 +305,13 @@ def perform_update(silent: bool = False, force: bool = False) -> int:
         if not silent:
             show_message_box(
                 f"{APP_NAME} — Actualización",
-                f"Se encontró la versión {latest_tag}, pero el instalador no está listo todavía.",
+                f"Se encontró la versión {latest_tag}, pero el instalador no está disponible todavía.",
                 0x00000030,  # MB_ICONWARNING
             )
         return 0
 
     if not silent:
-        if not show_update_prompt(latest_tag, release_name):
+        if not show_update_prompt(current_ver, latest_tag, release_name):
             log("El usuario canceló la actualización.")
             return 0
 
@@ -283,12 +330,7 @@ def perform_update(silent: bool = False, force: bool = False) -> int:
             )
         return 1
 
-    if get_installed_uninstall_string():
-        log("Desinstalando versión anterior antes de aplicar la nueva...")
-        uninstall_existing()
-        time.sleep(2)
-
-    if run_installer(installer_file):
+    if run_installer(installer_file, latest_tag):
         log("Instalador iniciado con éxito.")
         return 0
     else:
@@ -323,11 +365,12 @@ def main():
 
     if args.check:
         try:
+            current_ver = get_current_installed_version()
             tag, url, name, _ = fetch_latest_release()
-            if tag and is_update_available(CURRENT_VERSION, tag):
-                log(f"Nueva versión disponible: {tag}")
+            if tag and is_update_available(current_ver, tag):
+                log(f"Nueva versión disponible: {tag} (instalada: {current_ver})")
                 return 2
-            log("La aplicación está al día.")
+            log(f"La aplicación está al día ({current_ver}).")
             return 0
         except Exception as exc:
             log(f"Error al comprobar: {exc}")

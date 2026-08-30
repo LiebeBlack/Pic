@@ -56,6 +56,7 @@ jobs:
           $icon = Join-Path $root "resources\artpicst.ico"
           $updaterExe = Join-Path $root "updater_build\auto_updater.exe"
           $distUpdaterExe = Join-Path $dist "auto_updater.exe"
+          $tag = if ($env:GITHUB_REF -like "refs/tags/*") { $env:GITHUB_REF_NAME } else { "auto-$env:GITHUB_RUN_NUMBER" }
 
           New-Item -ItemType Directory -Force -Path $dist | Out-Null
 
@@ -72,6 +73,14 @@ jobs:
           Copy-Item (Join-Path $root "README.md") (Join-Path $dist "README.md") -Force
           Copy-Item $icon (Join-Path $dist "artpicst.ico") -Force
 
+          $versionInfo = @{
+            version = $tag
+            tag = $tag
+            build = [int]$env:GITHUB_RUN_NUMBER
+            build_date = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+          } | ConvertTo-Json
+          Set-Content -Path (Join-Path $dist "version.json") -Value $versionInfo -Encoding UTF8
+
       - name: Install NSIS
         shell: powershell
         run: choco install nsis -y --no-progress
@@ -83,8 +92,9 @@ jobs:
           $dist = Join-Path $root "dist"
           $out = Join-Path $root "artpicst-installer.exe"
           $nsis = "C:\Program Files (x86)\NSIS\Bin\makensis.exe"
+          $tag = if ($env:GITHUB_REF -like "refs/tags/*") { $env:GITHUB_REF_NAME } else { "auto-$env:GITHUB_RUN_NUMBER" }
           if (-not (Test-Path $nsis)) { throw "NSIS not found at $nsis" }
-          & $nsis "/DOutFile=$out" "/DSourceDir=$dist" (Join-Path $root "scripts\artpicst-installer.nsi")
+          & $nsis "/DOutFile=$out" "/DSourceDir=$dist" "/DAPP_VERSION=$tag" (Join-Path $root "scripts\artpicst-installer.nsi")
           if ($LASTEXITCODE -ne 0) { throw "NSIS failed" }
 
       - name: Create portable ZIP

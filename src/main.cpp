@@ -177,7 +177,9 @@ enum HudId {
     HUD_FIT,
     HUD_ONE,
     HUD_ROT,
-    HUD_FLIP_H,
+    HUD_FLIP,
+    HUD_WALLPAPER,
+    HUD_SAVE,
     HUD_FULL,
     HUD_OPEN
 };
@@ -203,6 +205,8 @@ struct AppState {
     bool currentFlipH = false;
     bool currentFlipV = false;
     bool hasAlpha = false;
+    bool effectGrayscale = false;
+    bool effectInvert = false;
     std::wstring currentFilePath;
     std::wstring decoderName;
 
@@ -247,7 +251,7 @@ struct AppState {
     LONG windowedStyle = 0;
     LONG windowedExStyle = 0;
 
-    HudItem hud[9]{};
+    HudItem hud[11]{};
     int hudCount = 0;
     HudId hudHot = HUD_NONE;
 
@@ -289,6 +293,8 @@ void FitImageToWindow(int windowWidth, int windowHeight);
 void RotateImage(int degrees = 90);
 void FlipHorizontal();
 void FlipVertical();
+void ToggleGrayscale();
+void ToggleInvert();
 void ToggleFullscreen();
 void ToggleSlideshow();
 void ActualSize();
@@ -305,6 +311,9 @@ void UpdateWindowTitle();
 void EnableDarkTitleBar(HWND hwnd);
 bool OpenImageFileDialog(HWND hwnd);
 bool OpenFolderDialog(HWND hwnd);
+bool SaveImageDialog(HWND hwnd);
+void SetAsWallpaper();
+void ShowExifDialog(HWND hwnd);
 void LayoutHud(const RECT& client);
 HudId HitTestHud(int x, int y);
 void InvokeHud(HudId id);
@@ -538,6 +547,8 @@ void FreeCurrentImage() {
     g_state.currentFlipH = false;
     g_state.currentFlipV = false;
     g_state.hasAlpha = false;
+    g_state.effectGrayscale = false;
+    g_state.effectInvert = false;
     g_state.currentFilePath.clear();
     g_state.decoderName.clear();
 }
@@ -705,14 +716,14 @@ int GetExifOrientationFromJpeg(const std::wstring& filepath) {
     while (true) {
         unsigned char marker[2];
         if (fread(marker, 1, 2, f) != 2 || marker[0] != 0xFF) break;
-        if (marker[1] == 0xDA || marker[1] == 0xD9) break; // Start of Scan o End of Image
+        if (marker[1] == 0xDA || marker[1] == 0xD9) break;
 
         unsigned char lenBytes[2];
         if (fread(lenBytes, 1, 2, f) != 2) break;
         int len = (lenBytes[0] << 8) | lenBytes[1];
         if (len < 2) break;
 
-        if (marker[1] == 0xE1 && len >= 14) { // APP1 Exif Marker
+        if (marker[1] == 0xE1 && len >= 14) {
             std::vector<unsigned char> data(len - 2);
             if (fread(data.data(), 1, len - 2, f) == static_cast<size_t>(len - 2)) {
                 if (memcmp(data.data(), "Exif\0\0", 6) == 0) {
@@ -733,7 +744,7 @@ int GetExifOrientationFromJpeg(const std::wstring& filepath) {
                             const unsigned char* tagPtr = tiff + ifdOffset + 2;
                             for (uint16_t i = 0; i < tagCount && (tagPtr + 12 <= tiff + tiffLen); ++i, tagPtr += 12) {
                                 uint16_t tag = read16(tagPtr);
-                                if (tag == 0x0112) { // Orientation Tag
+                                if (tag == 0x0112) {
                                     orientation = read16(tagPtr + 8);
                                     break;
                                 }
@@ -780,7 +791,6 @@ unsigned char* DecodeWithStb(const std::wstring& filepath, int& width, int& heig
     }
     ConvertRGBAtoBGRA(pixels, width, height, outHasAlpha);
 
-    // Detección de auto-rotación EXIF
     int exif = GetExifOrientationFromJpeg(filepath);
     if (exif == 6) autoRotateDeg = 90;
     else if (exif == 3) autoRotateDeg = 180;
@@ -806,7 +816,6 @@ unsigned char* DecodeWithWic(const std::wstring& filepath, int& width, int& heig
     hr = decoder->GetFrame(0, &frame);
     if (FAILED(hr) || !frame) return nullptr;
 
-    // Auto-rotación WIC si existe metadato de orientación
     ComPtr<IWICBitmapSource> source;
     ComPtr<IWICBitmapFlipRotator> rotator;
     if (SUCCEEDED(factory->CreateBitmapFlipRotator(&rotator)) && rotator) {
@@ -848,7 +857,6 @@ unsigned char* DecodeWithWic(const std::wstring& filepath, int& width, int& heig
     height = static_cast<int>(h);
     channels = 4;
 
-    // Verificar si tiene canal alfa
     const size_t totalPixels = static_cast<size_t>(width) * static_cast<size_t>(height);
     for (size_t i = 0; i < totalPixels; ++i) {
         if (pixels[i * 4 + 3] < 255) {
@@ -866,7 +874,6 @@ unsigned char* DecodeWithGdiplus(const std::wstring& filepath, int& width, int& 
     Bitmap bmp(filepath.c_str());
     if (bmp.GetLastStatus() != Ok) return nullptr;
 
-    // Auto-rotación EXIF en GDI+
     UINT propSize = bmp.GetPropertyItemSize(PropertyTagOrientation);
     if (propSize > 0) {
         PropertyItem* prop = static_cast<PropertyItem*>(malloc(propSize));
@@ -1148,6 +1155,20 @@ void FlipVertical() {
     InvalidateRect(g_state.hwnd, nullptr, FALSE);
 }
 
+void ToggleGrayscale() {
+    if (!g_state.imageData) return;
+    g_state.effectGrayscale = !g_state.effectGrayscale;
+    ShowOSD(g_state.effectGrayscale ? L"Efecto: Escala de grises activado" : L"Efecto: Color normal");
+    InvalidateRect(g_state.hwnd, nullptr, FALSE);
+}
+
+void ToggleInvert() {
+    if (!g_state.imageData) return;
+    g_state.effectInvert = !g_state.effectInvert;
+    ShowOSD(g_state.effectInvert ? L"Efecto: Colores invertidos" : L"Efecto: Color normal");
+    InvalidateRect(g_state.hwnd, nullptr, FALSE);
+}
+
 void EnsureImageVisible() {
     if (!g_state.imageData || !g_state.hwnd) return;
     RECT client{};
@@ -1237,10 +1258,10 @@ std::wstring GetFileName(const std::wstring& filepath) {
 void LayoutHud(const RECT& client) {
     const int y = client.bottom - HUD_HEIGHT + 10;
     const int h = HUD_HEIGHT - 18;
-    const int gap = 8;
-    int x = 12;
+    const int gap = 6;
+    int x = 10;
     auto add = [&](HudId id, const wchar_t* label, int w) {
-        if (g_state.hudCount >= 9) return;
+        if (g_state.hudCount >= 11) return;
         HudItem& item = g_state.hud[g_state.hudCount++];
         item.id = id;
         item.label = label;
@@ -1248,14 +1269,16 @@ void LayoutHud(const RECT& client) {
         x += w + gap;
     };
     g_state.hudCount = 0;
-    add(HUD_PREV, L"◀", 44);
-    add(HUD_NEXT, L"▶", 44);
-    add(HUD_FIT, L"Ajustar", 78);
-    add(HUD_ONE, L"100%", 58);
-    add(HUD_ROT, L"Rotar", 64);
-    add(HUD_FLIP_H, L"Voltear", 68);
-    add(HUD_FULL, g_state.isFullscreen ? L"Ventana" : L"Pantalla", 88);
-    add(HUD_OPEN, L"Abrir", 64);
+    add(HUD_PREV, L"◀", 38);
+    add(HUD_NEXT, L"▶", 38);
+    add(HUD_FIT, L"Ajustar", 70);
+    add(HUD_ONE, L"100%", 52);
+    add(HUD_ROT, L"Rotar", 58);
+    add(HUD_FLIP, L"Voltear", 62);
+    add(HUD_WALLPAPER, L"Fondo", 56);
+    add(HUD_SAVE, L"Guardar", 66);
+    add(HUD_FULL, g_state.isFullscreen ? L"Ventana" : L"Pantalla", 80);
+    add(HUD_OPEN, L"Abrir", 56);
 }
 
 HudId HitTestHud(int x, int y) {
@@ -1275,7 +1298,7 @@ void DrawRoundish(HDC hdc, const RECT& rc, COLORREF fill, COLORREF border) {
     HBRUSH brush = CreateSolidBrush(fill);
     HPEN oldPen = static_cast<HPEN>(SelectObject(hdc, pen));
     HBRUSH oldBrush = static_cast<HBRUSH>(SelectObject(hdc, brush));
-    RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, 10, 10);
+    RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, 8, 8);
     SelectObject(hdc, oldPen);
     SelectObject(hdc, oldBrush);
     DeleteObject(pen);
@@ -1303,7 +1326,7 @@ void RenderHud(HDC hdc, const RECT& client) {
     SelectObject(hdc, oldPen);
     DeleteObject(line);
 
-    HFONT hFont = CreateFontW(15, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+    HFONT hFont = CreateFontW(14, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
                               DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                               CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
     HFONT hOld = static_cast<HFONT>(SelectObject(hdc, hFont));
@@ -1319,9 +1342,9 @@ void RenderHud(HDC hdc, const RECT& client) {
                   DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
 
-    RECT info = { 12, bar.top, client.right - 12, bar.bottom };
+    RECT info = { 10, bar.top, client.right - 10, bar.bottom };
     if (g_state.hudCount > 0) {
-        info.left = g_state.hud[g_state.hudCount - 1].rc.right + 16;
+        info.left = g_state.hud[g_state.hudCount - 1].rc.right + 14;
     }
     if (info.left < info.right - 20) {
         SetTextColor(hdc, TEXT_SOFT);
@@ -1345,8 +1368,10 @@ void RenderHud(HDC hdc, const RECT& client) {
             }
             if (g_state.currentFlipH) text += L"  ↔";
             if (g_state.currentFlipV) text += L"  ↕";
+            if (g_state.effectGrayscale) text += L" [B/N]";
+            if (g_state.effectInvert) text += L" [Inv]";
         } else {
-            text = L"Arrastra una imagen aquí  ·  Ctrl + O para abrir  ·  F11 pantalla completa  ·  Ctrl + U actualizar";
+            text = L"Arrastra una imagen aquí  ·  Ctrl + O abrir  ·  F11 pantalla completa  ·  F1 ayuda";
         }
         if (!g_state.statusMessage.empty() &&
             (g_state.osdPinned || GetTickCount() - g_state.osdDisplayTime < OSD_MS)) {
@@ -1417,7 +1442,6 @@ void RenderEmptyState(HDC hdc, const RECT& clientRect) {
     DeleteObject(hHint);
 }
 
-// Dibuja un fondo cuadriculado para imágenes con transparencia
 void DrawCheckerboard(Graphics& g, float x, float y, float w, float h) {
     const float tileSize = 16.0f;
     SolidBrush brushA(Color(255, GetRValue(CHECKER_A), GetGValue(CHECKER_A), GetBValue(CHECKER_A)));
@@ -1458,7 +1482,6 @@ void RenderImage() {
     Graphics graphics(g_state.hdcMem);
     graphics.SetClip(Rect(0, 0, rect.right, ViewHeight(rect.bottom)));
 
-    // Calidad de renderizado inteligente: alta definición bicúbica en escalas y píxel exacto en 1:1 o múltiplos enteros
     const bool pixelPerfectZoom = std::fabs(g_state.zoom - std::round(g_state.zoom)) < 0.01f && g_state.zoom >= 1.0f;
     graphics.SetCompositingMode(CompositingModeSourceOver);
     graphics.SetCompositingQuality(CompositingQualityHighQuality);
@@ -1475,7 +1498,6 @@ void RenderImage() {
     const float centerX = g_state.offsetX + destW * 0.5f;
     const float centerY = g_state.offsetY + destH * 0.5f;
 
-    // Si tiene transparencia, renderizar fondo ajedrezado detrás de los límites de la imagen
     if (g_state.hasAlpha) {
         GraphicsState bgState = graphics.Save();
         graphics.TranslateTransform(centerX, centerY);
@@ -1486,9 +1508,28 @@ void RenderImage() {
         graphics.Restore(bgState);
     }
 
-    // Clamping para evitar bordes borrosos en GDI+
     ImageAttributes imgAttr;
     imgAttr.SetWrapMode(WrapModeClamp);
+
+    if (g_state.effectGrayscale) {
+        ColorMatrix grayMatrix = {
+            0.299f, 0.299f, 0.299f, 0.0f, 0.0f,
+            0.587f, 0.587f, 0.587f, 0.0f, 0.0f,
+            0.114f, 0.114f, 0.114f, 0.0f, 0.0f,
+            0.0f,   0.0f,   0.0f,   1.0f, 0.0f,
+            0.0f,   0.0f,   0.0f,   0.0f, 1.0f
+        };
+        imgAttr.SetColorMatrix(&grayMatrix, ColorMatrixFlagsDefault, ColorAdjustTypeBitmap);
+    } else if (g_state.effectInvert) {
+        ColorMatrix invMatrix = {
+            -1.0f,  0.0f,  0.0f, 0.0f, 0.0f,
+             0.0f, -1.0f,  0.0f, 0.0f, 0.0f,
+             0.0f,  0.0f, -1.0f, 0.0f, 0.0f,
+             0.0f,  0.0f,  0.0f, 1.0f, 0.0f,
+             1.0f,  1.0f,  1.0f, 0.0f, 1.0f
+        };
+        imgAttr.SetColorMatrix(&invMatrix, ColorMatrixFlagsDefault, ColorAdjustTypeBitmap);
+    }
 
     GraphicsState state = graphics.Save();
     graphics.TranslateTransform(centerX, centerY);
@@ -1507,6 +1548,125 @@ void RenderImage() {
 
     graphics.Restore(state);
     RenderHud(g_state.hdcMem, rect);
+}
+
+int GetEncoderClsid(const WCHAR* format, CLSID* pClsid) {
+    UINT num = 0, size = 0;
+    GetImageEncodersSize(&num, &size);
+    if (size == 0) return -1;
+    auto* pCodec = static_cast<ImageCodecInfo*>(malloc(size));
+    if (!pCodec) return -1;
+    GetImageEncoders(num, size, pCodec);
+    for (UINT j = 0; j < num; ++j) {
+        if (wcscmp(pCodec[j].MimeType, format) == 0) {
+            *pClsid = pCodec[j].Clsid;
+            free(pCodec);
+            return j;
+        }
+    }
+    free(pCodec);
+    return -1;
+}
+
+bool SaveImageDialog(HWND hwnd) {
+    if (!g_state.imageData) return false;
+    ComPtr<IFileSaveDialog> dialog;
+    HRESULT hr = CoCreateInstance(CLSID_FileSaveDialog, nullptr, CLSCTX_INPROC_SERVER,
+                                  IID_PPV_ARGS(&dialog.p));
+    if (FAILED(hr) || !dialog) return false;
+
+    COMDLG_FILTERSPEC filters[] = {
+        { L"PNG Image (*.png)", L"*.png" },
+        { L"JPEG Image (*.jpg)", L"*.jpg;*.jpeg" },
+        { L"BMP Image (*.bmp)", L"*.bmp" }
+    };
+    dialog->SetFileTypes(3, filters);
+    dialog->SetDefaultExtension(L"png");
+    std::wstring defName = GetFileName(g_state.currentFilePath);
+    if (!defName.empty()) {
+        size_t dot = defName.find_last_of(L'.');
+        if (dot != std::wstring::npos) defName = defName.substr(0, dot);
+        defName += L"_export.png";
+        dialog->SetFileName(defName.c_str());
+    }
+    dialog->SetTitle(L"Guardar imagen como");
+    if (FAILED(dialog->Show(hwnd))) return false;
+
+    ComPtr<IShellItem> item;
+    if (FAILED(dialog->GetResult(&item)) || !item) return false;
+    PWSTR savePath = nullptr;
+    if (FAILED(item->GetDisplayName(SIGDN_FILESYSPATH, &savePath)) || !savePath) return false;
+
+    std::wstring outPath = savePath;
+    CoTaskMemFree(savePath);
+
+    int boxW = 0, boxH = 0;
+    DisplaySize(boxW, boxH);
+    Bitmap source(g_state.imageWidth, g_state.imageHeight,
+                  g_state.imageWidth * 4, PixelFormat32bppARGB, g_state.imageData);
+    Bitmap output(boxW, boxH, PixelFormat32bppARGB);
+    Graphics g(&output);
+    g.SetInterpolationMode(InterpolationModeHighQualityBicubic);
+    g.TranslateTransform(static_cast<REAL>(boxW) * 0.5f, static_cast<REAL>(boxH) * 0.5f);
+    g.RotateTransform(static_cast<REAL>(g_state.currentRotation));
+    if (g_state.currentFlipH || g_state.currentFlipV) {
+        g.ScaleTransform(g_state.currentFlipH ? -1.0f : 1.0f,
+                         g_state.currentFlipV ? -1.0f : 1.0f);
+    }
+    g.TranslateTransform(-static_cast<REAL>(g_state.imageWidth) * 0.5f,
+                         -static_cast<REAL>(g_state.imageHeight) * 0.5f);
+    g.DrawImage(&source, 0, 0, g_state.imageWidth, g_state.imageHeight);
+
+    std::wstring ext = GetExtensionLower(outPath);
+    CLSID encoderClsid{};
+    if (ext == L"jpg" || ext == L"jpeg") {
+        GetEncoderClsid(L"image/jpeg", &encoderClsid);
+    } else if (ext == L"bmp") {
+        GetEncoderClsid(L"image/bmp", &encoderClsid);
+    } else {
+        GetEncoderClsid(L"image/png", &encoderClsid);
+    }
+
+    if (output.Save(outPath.c_str(), &encoderClsid, nullptr) == Ok) {
+        ShowOSD(L"Imagen guardada con éxito");
+        return true;
+    } else {
+        ShowOSD(L"Error al guardar la imagen");
+        return false;
+    }
+}
+
+void SetAsWallpaper() {
+    if (g_state.currentFilePath.empty()) return;
+    BOOL res = SystemParametersInfoW(SPI_SETDESKWALLPAPER, 0, const_cast<wchar_t*>(g_state.currentFilePath.c_str()),
+                                     SPIF_UPDATEINIFILE | SPIF_SENDCHANGE);
+    if (res) {
+        ShowOSD(L"Fondo de pantalla actualizado");
+    } else {
+        ShowOSD(L"No se pudo establecer el fondo");
+    }
+}
+
+void ShowExifDialog(HWND hwnd) {
+    if (!g_state.imageData || g_state.currentFilePath.empty()) return;
+    int dw = 0, dh = 0;
+    DisplaySize(dw, dh);
+    double megapixels = (static_cast<double>(g_state.imageWidth) * g_state.imageHeight) / 1000000.0;
+    std::wstring info = L"Propiedades y Metadatos de la Imagen:\n\n";
+    info += L"• Archivo: " + GetFileName(g_state.currentFilePath) + L"\n";
+    info += L"• Ruta: " + g_state.currentFilePath + L"\n";
+    info += L"• Resolución nativa: " + std::to_wstring(g_state.imageWidth) + L" x " + std::to_wstring(g_state.imageHeight) + L" px\n";
+    wchar_t mpBuf[64];
+    swprintf_s(mpBuf, L"• Megapíxeles: %.2f MP\n", megapixels);
+    info += mpBuf;
+    info += L"• Tamaño en disco: " + GetFileSizeString(g_state.currentFilePath) + L"\n";
+    info += L"• Motor de carga: " + g_state.decoderName + (g_state.hasAlpha ? L" (con transparencia alfa)" : L" (opaca)") + L"\n";
+    info += L"• Rotación / Transformación: " + std::to_wstring(g_state.currentRotation) + L"°" +
+            (g_state.currentFlipH ? L" [Volteo H]" : L"") + (g_state.currentFlipV ? L" [Volteo V]" : L"") + L"\n";
+    wchar_t zoomBuf[64];
+    swprintf_s(zoomBuf, L"• Zoom actual en pantalla: %.1f%%\n", g_state.zoom * 100.0f);
+    info += zoomBuf;
+    MessageBoxW(hwnd, info.c_str(), L"Metadatos de Imagen — ARTPICST", MB_OK | MB_ICONINFORMATION);
 }
 
 bool CopyPathToClipboard() {
@@ -1736,7 +1896,6 @@ void DeleteCurrentImage() {
         return;
     }
 
-    // Doble null-terminated string requerido por SHFILEOPSTRUCTW
     std::vector<wchar_t> fromBuf(path.size() + 2, L'\0');
     memcpy(fromBuf.data(), path.c_str(), path.size() * sizeof(wchar_t));
 
@@ -1806,7 +1965,6 @@ void CheckForUpdates() {
     if (!updaterExe.empty()) {
         ShellExecuteW(g_state.hwnd, L"open", updaterExe.c_str(), L"--gui", nullptr, SW_SHOWNORMAL);
     } else {
-        // Fallback vía script Python si está en entorno de desarrollo
         std::wstring pyScript = exeDir + L"\\updater\\auto_updater.py";
         if (GetFileAttributesW(pyScript.c_str()) != INVALID_FILE_ATTRIBUTES) {
             ShellExecuteW(g_state.hwnd, L"open", L"python.exe", (L"\"" + pyScript + L"\" --gui").c_str(), nullptr, SW_SHOWNORMAL);
@@ -1880,7 +2038,9 @@ void InvokeHud(HudId id) {
             break;
         case HUD_ONE: ActualSize(); break;
         case HUD_ROT: RotateImage(90); break;
-        case HUD_FLIP_H: FlipHorizontal(); break;
+        case HUD_FLIP: FlipHorizontal(); break;
+        case HUD_WALLPAPER: SetAsWallpaper(); break;
+        case HUD_SAVE: SaveImageDialog(g_state.hwnd); break;
         case HUD_FULL: ToggleFullscreen(); break;
         case HUD_OPEN: OpenImageFileDialog(g_state.hwnd); break;
         default: break;
@@ -1891,21 +2051,27 @@ void ShowContextMenu(HWND hwnd, int x, int y) {
     HMENU menu = CreatePopupMenu();
     AppendMenuW(menu, MF_STRING, 1, L"Abrir imagen...\tCtrl + O");
     AppendMenuW(menu, MF_STRING, 2, L"Abrir carpeta...\tCtrl + Shift + O");
+    AppendMenuW(menu, MF_STRING, 18, L"Guardar imagen como...\tCtrl + S");
     AppendMenuW(menu, MF_STRING, 12, L"Mostrar en Explorador\tCtrl + E");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, 3, L"Copiar imagen\tCtrl + C");
     AppendMenuW(menu, MF_STRING, 4, L"Copiar ruta\tCtrl + Shift + C");
+    AppendMenuW(menu, MF_STRING, 19, L"Establecer como fondo de pantalla\tCtrl + W");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, 5, L"Ajustar a ventana\tF");
     AppendMenuW(menu, MF_STRING, 6, L"Tamaño real (100%)\t1");
     AppendMenuW(menu, MF_STRING, 9, L"Acercar (+)\t+");
     AppendMenuW(menu, MF_STRING, 10, L"Alejar (-)\t-");
-    AppendMenuW(menu, MF_STRING, 7, L"Rotar 90°\tR");
+    AppendMenuW(menu, MF_STRING, 7, L"Rotar 90° horario\tR");
     AppendMenuW(menu, MF_STRING, 13, L"Volteo horizontal\tH");
     AppendMenuW(menu, MF_STRING, 14, L"Volteo vertical\tV");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, 20, g_state.effectGrayscale ? L"Desactivar escala de grises\tG" : L"Escala de grises (B/N)\tG");
+    AppendMenuW(menu, MF_STRING, 21, g_state.effectInvert ? L"Desactivar invertir colores\tN" : L"Invertir colores (Negativo)\tN");
     AppendMenuW(menu, MF_STRING, 15, g_state.isSlideshowActive ? L"Detener presentación\tF5" : L"Iniciar presentación\tF5");
     AppendMenuW(menu, MF_STRING, 8, L"Pantalla completa\tF11");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, 22, L"Ver metadatos / EXIF...\tE");
     AppendMenuW(menu, MF_STRING, 16, L"Eliminar a papelera\tSupr");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, 17, L"Buscar actualizaciones...\tCtrl + U");
@@ -1941,6 +2107,11 @@ void ShowContextMenu(HWND hwnd, int x, int y) {
         case 15: ToggleSlideshow(); break;
         case 16: DeleteCurrentImage(); break;
         case 17: CheckForUpdates(); break;
+        case 18: SaveImageDialog(hwnd); break;
+        case 19: SetAsWallpaper(); break;
+        case 20: ToggleGrayscale(); break;
+        case 21: ToggleInvert(); break;
+        case 22: ShowExifDialog(hwnd); break;
         default: break;
     }
 }
@@ -2041,7 +2212,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     DeleteCurrentImage();
                     break;
                 case VK_F1:
-                    ShowOSD(L"◀ ▶ navegar · Rueda zoom · F ajustar · 1 100% · R rotar · H/V voltear · F5 pase · Supr borrar · F11 pantalla");
+                    ShowOSD(L"◀ ▶ navegar · Rueda zoom · F ajustar · 1 100% · R rotar · H/V voltear · G B/N · F5 diapositivas · Supr borrar");
                     InvalidateRect(hwnd, nullptr, FALSE);
                     break;
                 case 'A':
@@ -2051,9 +2222,22 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     break;
                 case 'E':
                     if (ctrl) OpenInExplorer();
+                    else ShowExifDialog(hwnd);
+                    break;
+                case 'S':
+                    if (ctrl) SaveImageDialog(hwnd);
+                    break;
+                case 'W':
+                    if (ctrl) SetAsWallpaper();
                     break;
                 case 'U':
                     if (ctrl) CheckForUpdates();
+                    break;
+                case 'G':
+                    ToggleGrayscale();
+                    break;
+                case 'N':
+                    ToggleInvert();
                     break;
                 case VK_OEM_PLUS:
                 case VK_ADD: {
@@ -2070,9 +2254,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     break;
                 }
                 case 'I':
-                    g_state.osdPinned = !g_state.osdPinned;
-                    ShowOSD(g_state.osdPinned ? L"Info fija" : L"Info auto");
-                    InvalidateRect(hwnd, nullptr, FALSE);
+                    if (ctrl) ShowExifDialog(hwnd);
+                    else {
+                        g_state.osdPinned = !g_state.osdPinned;
+                        ShowOSD(g_state.osdPinned ? L"Info fija" : L"Info auto");
+                        InvalidateRect(hwnd, nullptr, FALSE);
+                    }
                     break;
                 case 'F':
                     InvokeHud(HUD_FIT);
@@ -2113,6 +2300,22 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             GetClientRect(hwnd, &client);
             if (pt.y >= client.bottom - HUD_HEIGHT) return 0;
             ZoomAt((delta > 0) ? ZOOM_STEP : (1.0f / ZOOM_STEP), pt.x, pt.y);
+            return 0;
+        }
+        case WM_MBUTTONUP: {
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            RECT client{};
+            GetClientRect(hwnd, &client);
+            if (pt.y < client.bottom - HUD_HEIGHT) {
+                if (g_state.fitMode) ActualSize();
+                else InvokeHud(HUD_FIT);
+            }
+            return 0;
+        }
+        case WM_XBUTTONUP: {
+            WORD btn = GET_XBUTTON_WPARAM(wParam);
+            if (btn == XBUTTON1) PreviousImage();
+            else if (btn == XBUTTON2) NextImage();
             return 0;
         }
         case WM_LBUTTONDBLCLK: {
