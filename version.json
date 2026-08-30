@@ -1,6 +1,8 @@
 {
-  "version": "auto-28",
-  "tag": "auto-28",
+  "version": "1.1.0",
+  "tag": "v1.1.0",
   "name": "ARTPICST",
-  "build": 28
+  "build": 29,
+  "release_date": "2026-08-30",
+  "description": "ARTPICST Premium - Visor de imágenes con interfaz acrílica moderna"
 }

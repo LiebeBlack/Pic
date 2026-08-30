@@ -1,57 +1,101 @@
 @echo off
-setlocal EnableExtensions
+setlocal EnableExtensions DisableDelayedExpansion
 
 cd /d "%~dp0"
 
-if not exist resources mkdir resources
-if not exist resources mkdir resources
-if not exist "resources\artpicst.ico" (
-    if exist "scripts\generate_icon.py" (
-        python scripts\generate_icon.py
-    )
-)
+echo ========================================
+echo ARTPICST - Sistema de Compilacion Integrado
+echo ========================================
+echo.
 
-where cmake >nul 2>nul
-if %ERRORLEVEL% EQU 0 (
-    if not exist build mkdir build
-    cmake -S . -B build
-    if %ERRORLEVEL% NEQ 0 exit /b %ERRORLEVEL%
-
-    cmake --build build --config Release
-    if %ERRORLEVEL% NEQ 0 exit /b %ERRORLEVEL%
-
-    if not exist dist mkdir dist
-    cmake --install build --config Release --prefix "%CD%\dist"
-    if %ERRORLEVEL% NEQ 0 exit /b %ERRORLEVEL%
-
-    echo.
-    echo ARTPICST compilado y empaquetado correctamente con CMake.
-    echo Directorio de distribucion: %CD%\dist
-    if exist "%CD%\dist\artpicst.exe" (
-        echo Ejecutable: %CD%\dist\artpicst.exe
-    )
-    exit /b 0
-)
-
-where cl >nul 2>nul
+:: Configurar entorno de Visual Studio
+call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" >nul 2>&1
 if %ERRORLEVEL% NEQ 0 (
-    echo No se encontro CMake ni un compilador de Visual Studio en PATH.
-    echo Instala Visual Studio Build Tools con C++.
-    echo Tambien puedes compilar el updater con: python updater\build_exe.py
+    echo Error: No se encontro Visual Studio 2022
+    echo Intentando con versiones alternativas...
+    call "C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Auxiliary\Build\vcvars64.bat" >nul 2>&1
+    if %ERRORLEVEL% NEQ 0 (
+        echo Error: No se encontro Visual Studio
+        echo Por favor instala Visual Studio Build Tools con C++
+        exit /b 1
+    )
+)
+
+:: Crear directorios necesarios
+if not exist build mkdir build
+if not exist dist mkdir dist
+if not exist installer\build mkdir installer\build
+if not exist updater\build mkdir updater\build
+
+echo [1/4] Compilando programa principal...
+cl /nologo /EHsc /std:c++17 /O2 /utf-8 /W4 /I. /Iinclude /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /DSTBI_WINDOWS_UTF8 /D_WIN32_WINNT=0x0601 /Fe:"build\artpicst.exe" src\main.cpp artpicst.manifest artpicst.rc /link gdiplus.lib user32.lib kernel32.lib shell32.lib shlwapi.lib gdi32.lib msimg32.lib ole32.lib oleaut32.lib uuid.lib dwmapi.lib windowscodecs.lib comdlg32.lib /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF
+
+if %ERRORLEVEL% NEQ 0 (
+    echo Error al compilar el programa principal
     exit /b 1
 )
 
-if not exist build mkdir build
+echo [2/4] Compilando instalador premium...
+cd installer
+cl /nologo /EHsc /std:c++17 /O2 /utf-8 /W4 /I. /I..\include /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0601 /Fe:"build\artpicst_installer.exe" artpicst_installer.cpp /link gdiplus.lib shlwapi.lib shell32.lib comctl32.lib dwmapi.lib user32.lib advapi32.lib /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF
 
-set "OUTPUT=build\artpicst.exe"
-cl /nologo /EHsc /std:c++17 /O2 /utf-8 /W4 /I. /Iinclude /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /DSTBI_WINDOWS_UTF8 /D_WIN32_WINNT=0x0601 /Fe:"%OUTPUT%" src\main.cpp artpicst.manifest artpicst.rc /link gdiplus.lib user32.lib kernel32.lib shell32.lib shlwapi.lib gdi32.lib msimg32.lib ole32.lib oleaut32.lib uuid.lib dwmapi.lib windowscodecs.lib comdlg32.lib /SUBSYSTEM:WINDOWS
-if %ERRORLEVEL% NEQ 0 exit /b %ERRORLEVEL%
+if %ERRORLEVEL% NEQ 0 (
+    echo Error al compilar el instalador
+    cd ..
+    exit /b 1
+)
 
-if not exist dist mkdir dist
+cd ..
+
+echo [3/4] Compilando actualizador ligero...
+cd updater
+cl /nologo /EHsc /std:c++17 /O2 /utf-8 /W4 /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0601 /Fe:"build\auto_updater.exe" auto_updater_simple.cpp /link winhttp.lib shlwapi.lib shell32.lib user32.lib advapi32.lib /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF
+
+if %ERRORLEVEL% NEQ 0 (
+    echo Error al compilar el actualizador
+    cd ..
+    exit /b 1
+)
+
+cd ..
+
+echo [4/4] Copiando archivos a directorio de distribucion...
 copy /y "build\artpicst.exe" "dist\artpicst.exe" >nul
+copy /y "installer\build\artpicst_installer.exe" "dist\artpicst_installer.exe" >nul
+copy /y "updater\build\auto_updater.exe" "dist\auto_updater.exe" >nul
 copy /y "resources\artpicst.ico" "dist\artpicst.ico" >nul
+copy /y "version.json" "dist\version.json" >nul
+
+:: Crear batch script actualizador ligero
+echo @echo off > "dist\auto_updater.bat"
+echo setlocal EnableExtensions >> "dist\auto_updater.bat"
+echo cd /d "%%~dp0" >> "dist\auto_updater.bat"
+echo if exist "auto_updater.exe" ( >> "dist\auto_updater.bat"
+echo     start "" "auto_updater.exe" --gui >> "dist\auto_updater.bat"
+echo ) else ( >> "dist\auto_updater.bat"
+echo     echo Actualizador C++ no encontrado, usando version batch >> "dist\auto_updater.bat"
+echo     start "" cmd /c "..\updater\auto_updater.bat" >> "dist\auto_updater.bat"
+echo ) >> "dist\auto_updater.bat"
 
 echo.
-echo ARTPICST compilado y empaquetado correctamente con cl.exe.
-echo Directorio de distribucion: %CD%\dist
+echo ========================================
+echo COMPILACION COMPLETADA EXITOSAMENTE
+echo ========================================
+echo.
+echo Archivos generados en directorio dist\:
+echo   - artpicst.exe (Programa principal)
+echo   - artpicst_installer.exe (Instalador premium)
+echo   - auto_updater.exe (Actualizador C++ ligero)
+echo   - auto_updater.bat (Script actualizador alternativo)
+echo   - artpicst.ico (Icono)
+echo   - version.json (Version info)
+echo.
+
+:: Mostrar tamaños de archivos
+for %%I in (dist\artpicst.exe) do echo Programa principal: %%~zI bytes
+for %%I in (dist\artpicst_installer.exe) do echo Instalador: %%~zI bytes
+for %%I in (dist\auto_updater.exe) do echo Actualizador C++: %%~zI bytes
+
+echo.
+echo Sistema listo para distribucion en GitHub sin errores.
 exit /b 0

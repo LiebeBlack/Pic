@@ -69,7 +69,7 @@ using namespace Gdiplus;
 // Identificadores y constantes visuales Premium
 const wchar_t CLASS_NAME[] = L"ARTPICSTWindow";
 const wchar_t APP_NAME_TEXT[] = L"ARTPICST";
-const wchar_t APP_VERSION_TEXT[] = L"1.1.0";
+const wchar_t APP_VERSION_TEXT[] = L"1.1.0 Premium";
 
 const COLORREF BG_COLOR = RGB(8, 10, 14);
 const COLORREF CHECKER_A = RGB(12, 14, 20);
@@ -951,7 +951,7 @@ unsigned char* DecodeWithGdiplus(const std::wstring& filepath, int& width, int& 
             short orientation = *reinterpret_cast<short*>(prop->value);
             switch (orientation) {
                 case 2: bmp.RotateFlip(RotateNoneFlipX); break;
-                case 3: bmp.Rotate180FlipNone; break;
+                case 3: bmp.RotateFlip(Rotate180FlipNone); break;
                 case 4: bmp.RotateFlip(Rotate180FlipX); break;
                 case 5: bmp.RotateFlip(Rotate90FlipX); break;
                 case 6: bmp.RotateFlip(Rotate90FlipNone); break;
@@ -1373,7 +1373,7 @@ void LayoutHud(const RECT& client) {
     }
 
     const int dockWidth = totalItemsWidth + (paddingX * 2);
-    const int dockX = std::max(10, (client.right - dockWidth) / 2);
+    const int dockX = std::max(10, static_cast<int>((client.right - dockWidth) / 2));
     const int dockY = client.bottom - dockHeight - 16;
 
     g_state.dockRect = { dockX, dockY, dockX + dockWidth, dockY + dockHeight };
@@ -1573,7 +1573,7 @@ void CreateDoubleBuffer(int width, int height) {
 }
 
 void RenderEmptyState(Graphics& graphics, const RECT& clientRect) {
-    SolidBrush bgBrush(Color(255, GetRValue(BG_COLOR), GetGValue(BG_COLOR), GetBValue(BG_COLOR)));
+    SolidBrush bgBrush(Color(static_cast<BYTE>(255), static_cast<BYTE>(GetRValue(BG_COLOR)), static_cast<BYTE>(GetGValue(BG_COLOR)), static_cast<BYTE>(GetBValue(BG_COLOR))));
     graphics.FillRectangle(&bgBrush, 0, 0, clientRect.right, clientRect.bottom);
 
     FontFamily titleFamily(L"Segoe UI");
@@ -1597,8 +1597,8 @@ void RenderEmptyState(Graphics& graphics, const RECT& clientRect) {
 
 void DrawCheckerboard(Graphics& g, float x, float y, float w, float h) {
     const float tileSize = 16.0f;
-    SolidBrush brushA(Color(255, GetRValue(CHECKER_A), GetGValue(CHECKER_A), GetBValue(CHECKER_A)));
-    SolidBrush brushB(Color(255, GetRValue(CHECKER_B), GetGValue(CHECKER_B), GetBValue(CHECKER_B)));
+    SolidBrush brushA(Color(static_cast<BYTE>(255), static_cast<BYTE>(GetRValue(CHECKER_A)), static_cast<BYTE>(GetGValue(CHECKER_A)), static_cast<BYTE>(GetBValue(CHECKER_A))));
+    SolidBrush brushB(Color(static_cast<BYTE>(255), static_cast<BYTE>(GetRValue(CHECKER_B)), static_cast<BYTE>(GetGValue(CHECKER_B)), static_cast<BYTE>(GetBValue(CHECKER_B))));
 
     g.FillRectangle(&brushA, x, y, w, h);
     int cols = static_cast<int>(std::ceil(w / tileSize));
@@ -1634,7 +1634,7 @@ void RenderImage() {
         return;
     }
 
-    SolidBrush bgBrush(Color(255, GetRValue(BG_COLOR), GetGValue(BG_COLOR), GetBValue(BG_COLOR)));
+    SolidBrush bgBrush(Color(static_cast<BYTE>(255), static_cast<BYTE>(GetRValue(BG_COLOR)), static_cast<BYTE>(GetGValue(BG_COLOR)), static_cast<BYTE>(GetBValue(BG_COLOR))));
     graphics.FillRectangle(&bgBrush, 0, 0, rect.right, rect.bottom);
 
     Bitmap bitmap(g_state.imageWidth, g_state.imageHeight,
