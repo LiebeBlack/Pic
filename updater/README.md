@@ -1,27 +1,28 @@
 # ARTPICST Updater
 
-Updater independiente para comprobar la ultima version en GitHub y descargar el instalador.
+Actualizador independiente y seguro para ARTPICST. Comprueba la última versión en GitHub Releases, descarga el instalador y lo ejecuta de forma silenciosa o con confirmación de usuario.
 
-## Configuracion
+## Características
 
-Edita `config.py` y pon:
+- **Cero dependencias externas**: Usa la biblioteca estándar de Python (`urllib.request`, `winreg`, `ctypes`, etc.).
+- **Detección inteligente de versiones**: Compatible con tags `auto-XX`, `vX.Y.Z`, `X.Y.Z` y números de build.
+- **Modos de ejecución**:
+  - `python auto_updater.py` o doble clic: Modo interactivo con interfaz nativa de Windows.
+  - `python auto_updater.py --check`: Comprueba si hay actualizaciones sin descargar.
+  - `python auto_updater.py --silent`: Actualización en segundo plano para tareas programadas.
+  - `python auto_updater.py --force`: Fuerza descarga e instalación.
+- **Empaquetado**: `build_exe.py` compila `dist/auto_updater.exe` usando PyInstaller.
 
-- `GITHUB_OWNER`: tu usuario o organizacion de GitHub
-- `GITHUB_REPO`: nombre del repositorio
-- `CURRENT_VERSION`: version actual de la aplicacion
-- `INSTALLER_ASSET_NAME`: nombre exacto del archivo .exe publicado en GitHub Releases
+## Configuración (`config.py`)
 
-## Ejecutar
+- `GITHUB_OWNER`: Usuario u organización de GitHub (`LiebeBlack`).
+- `GITHUB_REPO`: Nombre del repositorio (`Pic`).
+- `INSTALLER_ASSET_NAME`: Nombre del instalador generado (`artpicst-installer.exe`).
+- `CURRENT_VERSION`: Versión actual del software.
+
+## Compilar el ejecutable autónomo
 
 ```bat
-python updater.py
+python build_exe.py
 ```
-
-## Comportamiento
-
-- consulta la ultima release de GitHub
-- compara version con la actual
-- pregunta si quieres actualizar
-- descarga el installer del release
-- desinstala la version previa si existe
-- ejecuta la nueva instalacion silenciosa
+El ejecutable resultante quedará en `dist\auto_updater.exe`.

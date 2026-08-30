@@ -1,27 +1,30 @@
-$ErrorActionPreference = 'Stop'
+# Script de PowerShell para registrar la tarea de actualización programada
+$ErrorActionPreference = 'SilentlyContinue'
 $taskName = 'ARTPICST AutoUpdater'
+
 $exePath = $args[0]
 if (-not $exePath) {
-    $exePath = Join-Path $PSScriptRoot '..\auto_updater.exe'
+    $candidates = @(
+        (Join-Path $PSScriptRoot '..\auto_updater.exe'),
+        (Join-Path $PSScriptRoot 'auto_updater.exe'),
+        (Join-Path $env:ProgramFiles 'ARTPICST\auto_updater.exe')
+    )
+    $exePath = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
 }
 
-if (-not (Test-Path $exePath)) {
-    throw "No se encontro auto_updater.exe en: $exePath"
+if (-not $exePath -or -not (Test-Path $exePath)) {
+    Write-Warning "[ARTPICST] No se encontro auto_updater.exe para programar la tarea."
+    exit 1
 }
 
 $exists = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
 if ($exists) {
-    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
+    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
 }
 
-$action = New-ScheduledTaskAction -Execute $exePath
-$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1)
-Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Force | Out-Null
+$action = New-ScheduledTaskAction -Execute $exePath -Argument '--silent'
+$trigger = New-ScheduledTaskTrigger -Daily -At '09:00' -DaysInterval 2
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
 
-# Ejecuta cada 2 dias en el horario indicado.
-$task = Get-ScheduledTask -TaskName $taskName
-$task.Triggers.Clear()
-$task.Triggers.Add((New-ScheduledTaskTrigger -Daily -At '09:00' -DaysInterval 2))
-$task | Set-ScheduledTask | Out-Null
-
-Write-Host "Tarea creada: $taskName"
+Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Force | Out-Null
+Write-Host "[ARTPICST] Tarea programada registrada exitosamente: $taskName"

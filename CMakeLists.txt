@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(ARTPICST VERSION 1.0.0 LANGUAGES CXX)
+project(ARTPICST VERSION 1.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -32,7 +32,7 @@ if(WIN32)
         _WIN32_WINNT=0x0601
     )
     target_link_libraries(artpicst PRIVATE
-        gdiplus user32 kernel32 shell32 gdi32 msimg32 ole32 oleaut32 uuid dwmapi windowscodecs comdlg32
+        gdiplus user32 kernel32 shell32 shlwapi gdi32 msimg32 ole32 oleaut32 uuid dwmapi windowscodecs comdlg32
     )
 endif()
 

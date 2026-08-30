@@ -3,7 +3,7 @@
 
 a = Analysis(
     ['C:/Users/Admin/Documents/GitHub/Pic/updater/auto_updater.py'],
-    pathex=[],
+    pathex=['C:/Users/Admin/Documents/GitHub/Pic/updater'],
     binaries=[],
     datas=[],
     hiddenimports=[],
