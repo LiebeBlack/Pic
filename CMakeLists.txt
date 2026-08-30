@@ -14,9 +14,11 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL "${CMAKE_BINARY_DIR}/bin")
 add_executable(artpicst WIN32
     src/main.cpp
     artpicst.manifest
+    artpicst.rc
 )
 
 target_include_directories(artpicst PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
@@ -54,5 +56,6 @@ if(MSVC)
     )
 endif()
 
-install(TARGETS artpicst RUNTIME DESTINATION bin)
+install(TARGETS artpicst RUNTIME DESTINATION .)
 install(FILES README.md DESTINATION .)
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/resources/artpicst.ico" DESTINATION .)

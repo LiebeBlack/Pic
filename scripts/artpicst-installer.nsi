@@ -7,7 +7,9 @@
 !ifndef APP_PUBLISHER
   !define APP_PUBLISHER "ARTPICST"
 !endif
-
+!ifndef APP_URL
+  !define APP_URL "https://github.com"
+!endif
 !ifndef OutFile
   !define OutFile "artpicst-installer.exe"
 !endif
@@ -21,16 +23,97 @@ OutFile "${OutFile}"
 InstallDir "$PROGRAMFILES64\ARTPICST"
 RequestExecutionLevel admin
 SetCompressor /SOLID lzma
+SetCompress auto
+XPStyle on
 
-Page directory
-Page instfiles
-UninstPage uninstConfirm
-UninstPage instfiles
+!define MUI_ICON "..\resources\artpicst.ico"
+!define MUI_UNICON "..\resources\artpicst.ico"
+!define MUI_WELCOMEPAGE_TITLE "Instalación de ${APP_NAME}"
+!define MUI_WELCOMEPAGE_TEXT "Este asistente instalará ARTPICST y lo registrará automáticamente como visor de imágenes en Windows."
+!define MUI_FINISHPAGE_RUN "$INSTDIR\artpicst.exe"
+!define MUI_FINISHPAGE_RUN_TEXT "Abrir ARTPICST al terminar"
+!define MUI_FINISHPAGE_LINK "Más información"
+!define MUI_FINISHPAGE_LINK_LOCATION "${APP_URL}"
+
+!include "MUI2.nsh"
+
+!insertmacro MUI_PAGE_WELCOME
+!insertmacro MUI_PAGE_DIRECTORY
+!insertmacro MUI_PAGE_INSTFILES
+!insertmacro MUI_PAGE_FINISH
+
+!insertmacro MUI_UNPAGE_CONFIRM
+!insertmacro MUI_UNPAGE_INSTFILES
+
+!insertmacro MUI_LANGUAGE "Spanish"
+
+Var appIconPath
+
+Function RegisterImageFileAssociations
+    SetRegView 64
+
+    WriteRegStr HKLM "Software\Classes\ARTPICST.Image" "" "ARTPICST Image"
+    WriteRegStr HKLM "Software\Classes\ARTPICST.Image" "Content Type" "image/*"
+    WriteRegStr HKLM "Software\Classes\ARTPICST.Image" "FriendlyTypeName" "ARTPICST Image"
+    WriteRegStr HKLM "Software\Classes\ARTPICST.Image\DefaultIcon" "" "$INSTDIR\artpicst.exe,0"
+    WriteRegStr HKLM "Software\Classes\ARTPICST.Image\shell\open\command" "" '"$INSTDIR\artpicst.exe" "%1"'
+    WriteRegStr HKLM "Software\Classes\ARTPICST.Image\shell\open" "MuiVerb" "Abrir"
+    WriteRegStr HKLM "Software\Classes\ARTPICST.Image\shell\open" "Icon" "$INSTDIR\artpicst.exe,0"
+
+    WriteRegStr HKLM "Software\Classes\Applications\artpicst.exe" "FriendlyAppName" "ARTPICST"
+    WriteRegStr HKLM "Software\Classes\Applications\artpicst.exe\shell\open\command" "" '"$INSTDIR\artpicst.exe" "%1"'
+    WriteRegStr HKLM "Software\Classes\Applications\artpicst.exe\shell\open" "MuiVerb" "Abrir"
+    WriteRegStr HKLM "Software\Classes\Applications\artpicst.exe\shell\open" "Icon" "$INSTDIR\artpicst.exe,0"
+
+    WriteRegStr HKLM "Software\Classes\Applications\artpicst.exe\SupportedTypes" ".png" ""
+    WriteRegStr HKLM "Software\Classes\Applications\artpicst.exe\SupportedTypes" ".jpg" ""
+    WriteRegStr HKLM "Software\Classes\Applications\artpicst.exe\SupportedTypes" ".jpeg" ""
+    WriteRegStr HKLM "Software\Classes\Applications\artpicst.exe\SupportedTypes" ".bmp" ""
+    WriteRegStr HKLM "Software\Classes\Applications\artpicst.exe\SupportedTypes" ".gif" ""
+    WriteRegStr HKLM "Software\Classes\Applications\artpicst.exe\SupportedTypes" ".tif" ""
+    WriteRegStr HKLM "Software\Classes\Applications\artpicst.exe\SupportedTypes" ".tiff" ""
+    WriteRegStr HKLM "Software\Classes\Applications\artpicst.exe\SupportedTypes" ".webp" ""
+    WriteRegStr HKLM "Software\Classes\Applications\artpicst.exe\SupportedTypes" ".ico" ""
+    WriteRegStr HKLM "Software\Classes\Applications\artpicst.exe\SupportedTypes" ".heic" ""
+    WriteRegStr HKLM "Software\Classes\Applications\artpicst.exe\SupportedTypes" ".heif" ""
+    WriteRegStr HKLM "Software\Classes\Applications\artpicst.exe\SupportedTypes" ".avif" ""
+    WriteRegStr HKLM "Software\Classes\Applications\artpicst.exe\SupportedTypes" ".jfif" ""
+
+    WriteRegStr HKLM "Software\Classes\.png" "" "ARTPICST.Image"
+    WriteRegStr HKLM "Software\Classes\.jpg" "" "ARTPICST.Image"
+    WriteRegStr HKLM "Software\Classes\.jpeg" "" "ARTPICST.Image"
+    WriteRegStr HKLM "Software\Classes\.bmp" "" "ARTPICST.Image"
+    WriteRegStr HKLM "Software\Classes\.gif" "" "ARTPICST.Image"
+    WriteRegStr HKLM "Software\Classes\.tif" "" "ARTPICST.Image"
+    WriteRegStr HKLM "Software\Classes\.tiff" "" "ARTPICST.Image"
+    WriteRegStr HKLM "Software\Classes\.webp" "" "ARTPICST.Image"
+    WriteRegStr HKLM "Software\Classes\.ico" "" "ARTPICST.Image"
+    WriteRegStr HKLM "Software\Classes\.heic" "" "ARTPICST.Image"
+    WriteRegStr HKLM "Software\Classes\.heif" "" "ARTPICST.Image"
+    WriteRegStr HKLM "Software\Classes\.avif" "" "ARTPICST.Image"
+    WriteRegStr HKLM "Software\Classes\.jfif" "" "ARTPICST.Image"
+
+    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\ARTPICST" "DisplayName" "${APP_NAME}"
+    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\ARTPICST" "DisplayVersion" "${APP_VERSION}"
+    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\ARTPICST" "Publisher" "${APP_PUBLISHER}"
+    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\ARTPICST" "DisplayIcon" "$INSTDIR\artpicst.exe,0"
+    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\ARTPICST" "UninstallString" "$INSTDIR\Uninstall.exe"
+    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\ARTPICST" "URLInfoAbout" "${APP_URL}"
+    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\ARTPICST" "InstallLocation" "$INSTDIR"
+    WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\ARTPICST" "NoModify" 1
+    WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\ARTPICST" "NoRepair" 1
+FunctionEnd
 
 Section "Main"
     SetOutPath "$INSTDIR"
     File "${SourceDir}\artpicst.exe"
+    File "${SourceDir}\artpicst.ico"
     File /nonfatal "${SourceDir}\README.md"
+    File /nonfatal "${SourceDir}\auto_updater.exe"
+
+    SetOutPath "$INSTDIR\updater"
+    File "..\updater\install_auto_update_task.bat"
+    File "..\updater\install_auto_update_task.ps1"
 
     CreateDirectory "$SMPROGRAMS\ARTPICST"
     CreateShortCut "$SMPROGRAMS\ARTPICST\ARTPICST.lnk" "$INSTDIR\artpicst.exe"
@@ -39,13 +122,8 @@ Section "Main"
     WriteUninstaller "$INSTDIR\Uninstall.exe"
     CreateShortCut "$SMPROGRAMS\ARTPICST\Uninstall ARTPICST.lnk" "$INSTDIR\Uninstall.exe"
 
-    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\ARTPICST" "DisplayName" "${APP_NAME}"
-    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\ARTPICST" "DisplayVersion" "${APP_VERSION}"
-    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\ARTPICST" "Publisher" "${APP_PUBLISHER}"
-    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\ARTPICST" "UninstallString" "$INSTDIR\Uninstall.exe"
-    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\ARTPICST" "DisplayIcon" "$INSTDIR\artpicst.exe"
-    WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\ARTPICST" "NoModify" 1
-    WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\ARTPICST" "NoRepair" 1
+    Call RegisterImageFileAssociations
+    ExecWait 'cmd /c "$INSTDIR\updater\install_auto_update_task.bat" "$INSTDIR\auto_updater.exe"'
 SectionEnd
 
 Section "Uninstall"
@@ -53,9 +131,29 @@ Section "Uninstall"
     Delete "$SMPROGRAMS\ARTPICST\ARTPICST.lnk"
     Delete "$SMPROGRAMS\ARTPICST\Uninstall ARTPICST.lnk"
     RMDir "$SMPROGRAMS\ARTPICST"
+
     Delete "$INSTDIR\artpicst.exe"
+    Delete "$INSTDIR\artpicst.ico"
     Delete "$INSTDIR\README.md"
     Delete "$INSTDIR\Uninstall.exe"
     RMDir "$INSTDIR"
+
+    DeleteRegKey HKLM "Software\Classes\ARTPICST.Image"
+    DeleteRegKey HKLM "Software\Classes\Applications\artpicst.exe"
+    DeleteRegKey HKLM "Software\Classes\SystemFileAssociations\image"
     DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\ARTPICST"
+
+    DeleteRegKey HKLM "Software\Classes\.png"
+    DeleteRegKey HKLM "Software\Classes\.jpg"
+    DeleteRegKey HKLM "Software\Classes\.jpeg"
+    DeleteRegKey HKLM "Software\Classes\.bmp"
+    DeleteRegKey HKLM "Software\Classes\.gif"
+    DeleteRegKey HKLM "Software\Classes\.tif"
+    DeleteRegKey HKLM "Software\Classes\.tiff"
+    DeleteRegKey HKLM "Software\Classes\.webp"
+    DeleteRegKey HKLM "Software\Classes\.ico"
+    DeleteRegKey HKLM "Software\Classes\.heic"
+    DeleteRegKey HKLM "Software\Classes\.heif"
+    DeleteRegKey HKLM "Software\Classes\.avif"
+    DeleteRegKey HKLM "Software\Classes\.jfif"
 SectionEnd

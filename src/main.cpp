@@ -29,10 +29,12 @@
 #include <dwmapi.h>
 #include <wincodec.h>
 #include <gdiplus.h>
+#include "resource.h"
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -1234,7 +1236,8 @@ void RenderImage() {
                   g_state.imageWidth * 4, PixelFormat32bppARGB, g_state.imageData);
     Graphics graphics(g_state.hdcMem);
     graphics.SetClip(Rect(0, 0, rect.right, ViewHeight(rect.bottom)));
-    graphics.SetInterpolationMode(g_state.zoom >= 1.0f
+    const bool pixelPerfectZoom = std::fabs(g_state.zoom - std::round(g_state.zoom)) < 0.02f;
+    graphics.SetInterpolationMode(pixelPerfectZoom
                                       ? InterpolationModeNearestNeighbor
                                       : InterpolationModeHighQualityBicubic);
     graphics.SetPixelOffsetMode(PixelOffsetModeHalf);
@@ -1815,14 +1818,89 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
-std::wstring GetExecutableFolder() {
+std::wstring GetExecutablePath() {
     wchar_t path[MAX_PATH] = {};
     DWORD len = GetModuleFileNameW(nullptr, path, MAX_PATH);
     if (len == 0 || len >= MAX_PATH) return {};
-    std::wstring full(path);
+    return path;
+}
+
+std::wstring GetExecutableFolder() {
+    std::wstring full = GetExecutablePath();
     size_t pos = full.find_last_of(L'\\');
     if (pos == std::wstring::npos) return {};
     return full.substr(0, pos);
+}
+
+bool SetRegStringValue(HKEY root, const std::wstring& key, const std::wstring& name, const std::wstring& value) {
+    HKEY hKey = nullptr;
+    if (RegCreateKeyExW(root, key.c_str(), 0, nullptr, REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr, &hKey, nullptr) != ERROR_SUCCESS) return false;
+    const DWORD type = REG_SZ;
+    const DWORD bytes = static_cast<DWORD>((value.size() + 1) * sizeof(wchar_t));
+    const bool ok = RegSetValueExW(hKey, name.empty() ? nullptr : name.c_str(), 0, type,
+                                  reinterpret_cast<const BYTE*>(value.c_str()), bytes) == ERROR_SUCCESS;
+    RegCloseKey(hKey);
+    return ok;
+}
+
+bool SetRegEmptyValue(HKEY root, const std::wstring& key, const std::wstring& name) {
+    HKEY hKey = nullptr;
+    if (RegCreateKeyExW(root, key.c_str(), 0, nullptr, REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr, &hKey, nullptr) != ERROR_SUCCESS) return false;
+    const bool ok = RegSetValueExW(hKey, name.c_str(), 0, REG_SZ, reinterpret_cast<const BYTE*>(L""), sizeof(wchar_t)) == ERROR_SUCCESS;
+    RegCloseKey(hKey);
+    return ok;
+}
+
+bool RegisterFileAssociationForCurrentUser() {
+    std::wstring exePath = GetExecutablePath();
+    if (exePath.empty()) return false;
+    const std::wstring fileType = L"ARTPICST.Image";
+    const std::wstring command = L"\"" + exePath + L"\" \"%1\"";
+    const std::vector<std::wstring> extensions = {
+        L".png", L".jpg", L".jpeg", L".bmp", L".gif", L".tif", L".tiff",
+        L".webp", L".ico", L".heic", L".heif", L".avif", L".jfif"
+    };
+
+    bool ok = true;
+    ok = ok && SetRegStringValue(HKEY_CURRENT_USER, L"Software\\Classes\\" + fileType, L"", L"ARTPICST Image");
+    ok = ok && SetRegStringValue(HKEY_CURRENT_USER, L"Software\\Classes\\" + fileType, L"Content Type", L"image/*");
+    ok = ok && SetRegStringValue(HKEY_CURRENT_USER, L"Software\\Classes\\" + fileType, L"FriendlyTypeName", L"ARTPICST Image");
+    ok = ok && SetRegStringValue(HKEY_CURRENT_USER, L"Software\\Classes\\" + fileType + L"\\DefaultIcon", L"", L"\"" + exePath + L"\",0");
+    ok = ok && SetRegStringValue(HKEY_CURRENT_USER, L"Software\\Classes\\" + fileType + L"\\shell\\open\\command", L"", command);
+    ok = ok && SetRegStringValue(HKEY_CURRENT_USER, L"Software\\Classes\\" + fileType + L"\\shell\\open", L"MuiVerb", L"Abrir");
+    ok = ok && SetRegStringValue(HKEY_CURRENT_USER, L"Software\\Classes\\" + fileType + L"\\shell\\open", L"Icon", L"\"" + exePath + L"\",0");
+    ok = ok && SetRegStringValue(HKEY_CURRENT_USER, L"Software\\Classes\\Applications\\artpicst.exe", L"FriendlyAppName", L"ARTPICST");
+    ok = ok && SetRegStringValue(HKEY_CURRENT_USER, L"Software\\Classes\\Applications\\artpicst.exe\\shell\\open\\command", L"", command);
+    ok = ok && SetRegStringValue(HKEY_CURRENT_USER, L"Software\\Classes\\Applications\\artpicst.exe\\shell\\open", L"MuiVerb", L"Abrir");
+    for (const auto& ext : extensions) {
+        ok = ok && SetRegStringValue(HKEY_CURRENT_USER, L"Software\\Classes\\" + ext, L"", fileType);
+    }
+    return ok;
+}
+
+bool UnregisterFileAssociationForCurrentUser() {
+    std::vector<std::wstring> keys = {
+        L"Software\\Classes\\ARTPICST.Image",
+        L"Software\\Classes\\Applications\\artpicst.exe",
+        L"Software\\Classes\\.png",
+        L"Software\\Classes\\.jpg",
+        L"Software\\Classes\\.jpeg",
+        L"Software\\Classes\\.bmp",
+        L"Software\\Classes\\.gif",
+        L"Software\\Classes\\.tif",
+        L"Software\\Classes\\.tiff",
+        L"Software\\Classes\\.webp",
+        L"Software\\Classes\\.ico",
+        L"Software\\Classes\\.heic",
+        L"Software\\Classes\\.heif",
+        L"Software\\Classes\\.avif",
+        L"Software\\Classes\\.jfif"
+    };
+    bool ok = true;
+    for (const auto& key : keys) {
+        ok = ok && (RegDeleteTreeW(HKEY_CURRENT_USER, key.c_str()) == ERROR_SUCCESS || RegDeleteTreeW(HKEY_CURRENT_USER, key.c_str()) == ERROR_FILE_NOT_FOUND);
+    }
+    return ok;
 }
 
 std::wstring GetDefaultImageFolder() {
@@ -1847,6 +1925,18 @@ void ParseStartupOptions(std::wstring& outFolder, WindowMode& outMode) {
     std::wstring firstPath;
     for (int i = 1; i < argc; ++i) {
         std::wstring arg = argv[i];
+        if (arg == L"--register") {
+            RegisterFileAssociationForCurrentUser();
+            PostQuitMessage(0);
+            LocalFree(argv);
+            return;
+        }
+        if (arg == L"--unregister") {
+            UnregisterFileAssociationForCurrentUser();
+            PostQuitMessage(0);
+            LocalFree(argv);
+            return;
+        }
         if (arg == L"--fullscreen" || arg == L"-f") {
             outMode = WindowMode::Fullscreen;
             continue;
@@ -1927,7 +2017,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
     g_state.classBrush = CreateSolidBrush(BG_COLOR);
     wc.hbrBackground = g_state.classBrush;
     wc.lpszClassName = CLASS_NAME;
-    wc.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
+    wc.hIcon = LoadIconW(hInstance, MAKEINTRESOURCEW(IDI_APP_ICON));
+    if (!wc.hIcon) {
+        wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    }
     wc.hIconSm = wc.hIcon;
 
     if (!RegisterClassExW(&wc)) {
