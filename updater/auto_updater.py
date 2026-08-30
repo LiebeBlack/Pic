@@ -190,7 +190,6 @@ def update_installed_version_registry_and_file(version_tag: str):
             except OSError:
                 continue
 
-    # Escribir en version.json si la carpeta existe
     target_dirs = [
         Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / APP_NAME,
         Path(__file__).resolve().parent.parent,
@@ -236,18 +235,26 @@ def show_message_box(title: str, text: str, style: int = 0) -> int:
     return ctypes.windll.user32.MessageBoxW(0, text, title, style)
 
 
-def show_update_prompt(current_ver: str, latest_tag: str, release_name: str) -> bool:
-    """Muestra cuadro de diálogo preguntando al usuario si desea actualizar."""
+def show_update_prompt(current_ver: str, latest_tag: str, release_name: str, release_body: str) -> bool:
+    """Muestra cuadro de diálogo informativo preguntando al usuario si desea actualizar."""
     MB_YESNO = 0x00000004
     MB_ICONQUESTION = 0x00000020
     IDYES = 6
 
     display_name = release_name if release_name != latest_tag else latest_tag
+    body_snippet = ""
+    if release_body:
+        clean_body = release_body.strip()
+        if len(clean_body) > 350:
+            clean_body = clean_body[:350] + "..."
+        body_snippet = f"\n\nNotas de la versión:\n{clean_body}"
+
     msg = (
-        f"Hay una nueva versión disponible de {APP_NAME}:\n\n"
-        f"• Versión instalada: {current_ver}\n"
-        f"• Nueva versión: {display_name}\n\n"
-        f"¿Desea descargar e instalar la actualización ahora?"
+        f"Se ha encontrado una nueva versión de {APP_NAME}:\n\n"
+        f"• Versión actual instalada: {current_ver}\n"
+        f"• Nueva versión disponible: {display_name}"
+        f"{body_snippet}\n\n"
+        f"¿Desea descargar e instalar la actualización ahora de forma automática?"
     )
     res = show_message_box(
         f"Actualización disponible — {APP_NAME}",
@@ -260,19 +267,21 @@ def show_update_prompt(current_ver: str, latest_tag: str, release_name: str) -> 
 def perform_update(silent: bool = False, force: bool = False) -> int:
     """
     Proceso principal de comprobación y actualización.
-    Retorna 0 si tuvo éxito / está al día, 1 si hubo error, 2 si hay actualización disponible (en modo comprobación).
+    Informa detalladamente al usuario del estado en todo momento.
     """
     current_ver = get_current_installed_version()
     log(f"Comprobando actualizaciones para {APP_NAME} (versión instalada: {current_ver})...")
 
     try:
-        latest_tag, installer_url, release_name, _ = fetch_latest_release()
+        latest_tag, installer_url, release_name, release_body = fetch_latest_release()
     except Exception as exc:
         log(f"No se pudo consultar GitHub: {exc}")
         if not silent:
             show_message_box(
-                f"{APP_NAME} — Error de actualización",
-                f"No se pudo verificar actualizaciones en este momento.\n\nDetalle: {exc}",
+                f"{APP_NAME} — Error de Conexión",
+                f"No se pudo conectar con los servidores de actualización de GitHub.\n\n"
+                f"Por favor comprueba tu conexión a Internet y vuelve a intentarlo más tarde.\n\n"
+                f"Detalle técnico: {exc}",
                 0x00000010,  # MB_ICONERROR
             )
         return 1
@@ -281,8 +290,8 @@ def perform_update(silent: bool = False, force: bool = False) -> int:
         log("No se encontró ninguna release publicada.")
         if not silent:
             show_message_box(
-                APP_NAME,
-                "No hay releases disponibles en el repositorio.",
+                f"{APP_NAME} — Actualizaciones",
+                "No hay nuevas versiones publicadas en el repositorio en este momento.",
                 0x00000040,  # MB_ICONINFORMATION
             )
         return 0
@@ -294,8 +303,12 @@ def perform_update(silent: bool = False, force: bool = False) -> int:
         log(f"La aplicación ya está en su última versión ({current_ver}).")
         if not silent:
             show_message_box(
-                f"{APP_NAME} — Actualizaciones",
-                f"Ya tienes instalada la versión más reciente de {APP_NAME} ({current_ver}).",
+                f"{APP_NAME} — Software al Día",
+                f"¡{APP_NAME} ya está actualizado a la versión más reciente!\n\n"
+                f"• Versión instalada en tu equipo: {current_ver}\n"
+                f"• Última versión en GitHub: {latest_tag}\n"
+                f"• Estado: Al día y funcionando correctamente.\n\n"
+                f"No se requiere ninguna acción.",
                 0x00000040,  # MB_ICONINFORMATION
             )
         return 0
@@ -304,14 +317,15 @@ def perform_update(silent: bool = False, force: bool = False) -> int:
         log(f"La release {latest_tag} no contiene el archivo {INSTALLER_ASSET_NAME}.")
         if not silent:
             show_message_box(
-                f"{APP_NAME} — Actualización",
-                f"Se encontró la versión {latest_tag}, pero el instalador no está disponible todavía.",
+                f"{APP_NAME} — Actualización en Proceso",
+                f"Se ha publicado la versión {latest_tag}, pero el instalador automático aún se está compilando en GitHub.\n"
+                f"Por favor, intenta nuevamente en unos minutos.",
                 0x00000030,  # MB_ICONWARNING
             )
         return 0
 
     if not silent:
-        if not show_update_prompt(current_ver, latest_tag, release_name):
+        if not show_update_prompt(current_ver, latest_tag, release_name, release_body):
             log("El usuario canceló la actualización.")
             return 0
 
@@ -324,8 +338,8 @@ def perform_update(silent: bool = False, force: bool = False) -> int:
         log(f"Error al descargar la actualización: {exc}")
         if not silent:
             show_message_box(
-                f"{APP_NAME} — Error",
-                f"Error al descargar el archivo de instalación:\n{exc}",
+                f"{APP_NAME} — Error de Descarga",
+                f"No se pudo completar la descarga del instalador:\n\n{exc}",
                 0x00000010,
             )
         return 1
@@ -335,6 +349,12 @@ def perform_update(silent: bool = False, force: bool = False) -> int:
         return 0
     else:
         log("No se pudo iniciar el instalador.")
+        if not silent:
+            show_message_box(
+                f"{APP_NAME} — Error",
+                "No se pudo ejecutar el instalador de la actualización. Intente ejecutar como administrador.",
+                0x00000010,
+            )
         return 1
 
 

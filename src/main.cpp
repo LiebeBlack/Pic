@@ -66,31 +66,36 @@
 
 using namespace Gdiplus;
 
-// Identificadores y constantes visuales
+// Identificadores y constantes visuales Premium
 const wchar_t CLASS_NAME[] = L"ARTPICSTWindow";
 const wchar_t APP_NAME_TEXT[] = L"ARTPICST";
 const wchar_t APP_VERSION_TEXT[] = L"1.1.0";
-const COLORREF BG_COLOR = RGB(12, 14, 18);
-const COLORREF BAR_COLOR = RGB(21, 24, 29);
-const COLORREF ACCENT_COLOR = RGB(102, 176, 255);
-const COLORREF ACCENT_SOFT = RGB(78, 130, 205);
-const COLORREF PANEL_COLOR = RGB(33, 37, 43);
-const COLORREF PANEL_BORDER = RGB(68, 75, 85);
-const COLORREF BAR_EDGE = RGB(52, 58, 66);
-const COLORREF TEXT_SOFT = RGB(176, 184, 194);
-const COLORREF TEXT_STRONG = RGB(239, 243, 249);
-const COLORREF SHADOW_COLOR = RGB(7, 9, 12);
-const COLORREF CHECKER_A = RGB(19, 22, 27);
-const COLORREF CHECKER_B = RGB(27, 31, 38);
 
-const float MIN_ZOOM = 0.02f;
-const float MAX_ZOOM = 80.0f;
-const float ZOOM_STEP = 1.18f;
+const COLORREF BG_COLOR = RGB(8, 10, 14);
+const COLORREF CHECKER_A = RGB(12, 14, 20);
+const COLORREF CHECKER_B = RGB(20, 23, 30);
+
+// Estilos de la interfaz Glassmorphism / Acrílica Premium Mejorados
+const Color GLASS_DOCK_BG(235, 8, 10, 16);
+const Color GLASS_DOCK_BORDER(120, 255, 255, 255);
+const Color GLASS_DOCK_SHADOW(150, 0, 0, 0);
+
+const Color GLASS_BTN_NORMAL(75, 255, 255, 255);
+const Color GLASS_BTN_BORDER_NORMAL(60, 255, 255, 255);
+const Color GLASS_BTN_HOT(245, 55, 130, 245);
+const Color GLASS_BTN_BORDER_HOT(255, 120, 200, 255);
+const Color GLASS_BTN_ACTIVE(245, 40, 190, 150);
+
+const Color GLASS_INFO_BG(215, 10, 12, 18);
+const Color GLASS_INFO_BORDER(90, 255, 255, 255);
+
+const float MIN_ZOOM = 0.01f;
+const float MAX_ZOOM = 200.0f;
+const float ZOOM_STEP = 1.25f;
 const size_t CACHE_SIZE = 6;
 const int MAX_DIMENSION = 30000;
 const LONGLONG MAX_FILE_BYTES = 1000LL * 1024LL * 1024LL; // 1 GB
 const UINT OSD_MS = 3500;
-const int HUD_HEIGHT = 52;
 const UINT_PTR TIMER_OSD = 1;
 const UINT_PTR TIMER_SLIDESHOW = 2;
 const UINT SLIDESHOW_INTERVAL_MS = 3500;
@@ -178,6 +183,7 @@ enum HudId {
     HUD_ONE,
     HUD_ROT,
     HUD_FLIP,
+    HUD_CLARITY,
     HUD_WALLPAPER,
     HUD_SAVE,
     HUD_FULL,
@@ -205,8 +211,12 @@ struct AppState {
     bool currentFlipH = false;
     bool currentFlipV = false;
     bool hasAlpha = false;
+
+    // Efectos de renderizado premium
+    bool effectUltraClarity = false;
     bool effectGrayscale = false;
     bool effectInvert = false;
+
     std::wstring currentFilePath;
     std::wstring decoderName;
 
@@ -251,9 +261,11 @@ struct AppState {
     LONG windowedStyle = 0;
     LONG windowedExStyle = 0;
 
-    HudItem hud[11]{};
+    RECT dockRect{};
+    HudItem hud[12]{};
     int hudCount = 0;
     HudId hudHot = HUD_NONE;
+    bool hudVisible = true;
 
     std::wstring lastError;
     ULONG_PTR gdiplusToken = 0;
@@ -293,6 +305,7 @@ void FitImageToWindow(int windowWidth, int windowHeight);
 void RotateImage(int degrees = 90);
 void FlipHorizontal();
 void FlipVertical();
+void ToggleUltraClarity();
 void ToggleGrayscale();
 void ToggleInvert();
 void ToggleFullscreen();
@@ -314,6 +327,7 @@ bool OpenFolderDialog(HWND hwnd);
 bool SaveImageDialog(HWND hwnd);
 void SetAsWallpaper();
 void ShowExifDialog(HWND hwnd);
+void ShowProgramInfoDialog(HWND hwnd);
 void LayoutHud(const RECT& client);
 HudId HitTestHud(int x, int y);
 void InvokeHud(HudId id);
@@ -333,10 +347,6 @@ static bool SafePixelBytes(int width, int height, size_t& outBytes) {
     if (bytes > static_cast<uint64_t>(SIZE_MAX)) return false;
     outBytes = static_cast<size_t>(bytes);
     return true;
-}
-
-static int ViewHeight(int clientHeight) {
-    return std::max(1, clientHeight - HUD_HEIGHT);
 }
 
 static std::wstring LogPath() {
@@ -413,8 +423,18 @@ bool InitGDIPlus() {
 void EnableDarkTitleBar(HWND hwnd) {
     if (!hwnd) return;
     BOOL dark = TRUE;
-    DwmSetWindowAttribute(hwnd, 20, &dark, sizeof(dark));
-    DwmSetWindowAttribute(hwnd, 19, &dark, sizeof(dark));
+    DwmSetWindowAttribute(hwnd, 20, &dark, sizeof(dark)); // DWMWA_USE_IMMERSIVE_DARK_MODE (Win11 / Win10 20H1+)
+    DwmSetWindowAttribute(hwnd, 19, &dark, sizeof(dark)); // DWMWA_USE_IMMERSIVE_DARK_MODE (Win10 1809)
+
+    // Color de barra de título y texto premium moderno (Win 11)
+    COLORREF captionColor = RGB(14, 16, 22);
+    COLORREF textColor = RGB(242, 245, 250);
+    DwmSetWindowAttribute(hwnd, 35, &captionColor, sizeof(captionColor)); // DWMWA_CAPTION_COLOR
+    DwmSetWindowAttribute(hwnd, 36, &textColor, sizeof(textColor));       // DWMWA_TEXT_COLOR
+
+    // Efecto de fondo Mica/Acrílico (Win 11)
+    DWORD backdropType = 2; // 2 = Mica
+    DwmSetWindowAttribute(hwnd, 38, &backdropType, sizeof(backdropType)); // DWMWA_SYSTEMBACKDROP_TYPE
 }
 
 void FreeDoubleBuffer() {
@@ -547,6 +567,7 @@ void FreeCurrentImage() {
     g_state.currentFlipH = false;
     g_state.currentFlipV = false;
     g_state.hasAlpha = false;
+    g_state.effectUltraClarity = false;
     g_state.effectGrayscale = false;
     g_state.effectInvert = false;
     g_state.currentFilePath.clear();
@@ -600,14 +621,64 @@ void HandleError(const std::wstring& errorMsg, bool showUser) {
 
 void ShowAboutDialog(HWND hwnd) {
     std::wstring info =
-        std::wstring(APP_NAME_TEXT) + L" v" + APP_VERSION_TEXT + L"\n\n" +
-        L"Visor de imágenes nativo de alto rendimiento para Windows.\n" +
-        L"Soporta JPG, PNG, BMP, GIF, TIFF, WebP, HEIC/HEIF, AVIF, HDR, TGA, PSD y RAW.\n\n" +
-        L"• Motores: stb_image, WIC y GDI+ con aceleración y antialiasing bicúbico.\n" +
-        L"• Auto-orientación EXIF, soporte de transparencia y orden natural.\n" +
-        L"• Comprobador de actualizaciones integrado y seguro.\n\n" +
+        std::wstring(APP_NAME_TEXT) + L" v" + APP_VERSION_TEXT + L" (Edición Premium)\n\n" +
+        L"Visor de imágenes nativo con aceleración por hardware y diseño Acrílico/Glassmorphism.\n\n" +
+        L"• Motores: stb_image, WIC y GDI+ con interpolación bicúbica de precisión y Ultra-Claridad HDR.\n" +
+        L"• Auto-orientación EXIF, visor de máxima área, fondo de pantalla directo y exportador PNG/JPG.\n" +
+        L"• Actualizador integrado sin bucles y soporte para más de 30 formatos gráficos.\n\n" +
         L"© 2026 ARTPICST";
     MessageBoxW(hwnd ? hwnd : nullptr, info.c_str(), APP_NAME_TEXT, MB_OK | MB_ICONINFORMATION);
+}
+
+void ShowProgramInfoDialog(HWND hwnd) {
+    std::wstring info =
+        std::wstring(APP_NAME_TEXT) + L" v" + APP_VERSION_TEXT + L" — Guía Completa de Uso y Controles\n\n"
+        L"⌨️ ATAJOS DE TECLADO:\n"
+        L"• ◀ ▶ : Imagen anterior / siguiente\n"
+        L"• ▲ ▼ : Acercar / alejar zoom\n"
+        L"• Espacio / Retroceso : Imagen siguiente / anterior\n"
+        L"• Inicio / Fin : Primera / última imagen de la carpeta\n"
+        L"• Rueda / '+' / '-' : Acercar y alejar zoom fluido centrado\n"
+        L"• F : Ajustar imagen a toda la pantalla/ventana\n"
+        L"• 1 o 0 : Tamaño real al 100% (píxel a píxel)\n"
+        L"• D : Activar / desactivar modo Ultra-Claridad (Detalles HDR)\n"
+        L"• R / Shift+R : Rotar 90° (horario / antihorario)\n"
+        L"• H / V : Volteo horizontal / vertical\n"
+        L"• G : Alternar escala de grises (Blanco y Negro)\n"
+        L"• N : Alternar colores invertidos (Negativo)\n"
+        L"• F5 : Iniciar o detener presentación (pase de diapositivas)\n"
+        L"• F11 o Doble clic : Pantalla completa (ESC para salir)\n"
+        L"• Supr (Delete) : Enviar imagen a la Papelera de reciclaje\n"
+        L"• E o Ctrl+I : Ver metadatos detallados y propiedades EXIF\n"
+        L"• Ctrl+S : Guardar / Exportar imagen (PNG, JPG, BMP)\n"
+        L"• Ctrl+W : Establecer como fondo de pantalla de Windows\n"
+        L"• Ctrl+E : Mostrar y seleccionar en el Explorador de Windows\n"
+        L"• Ctrl+C / Ctrl+Shift+C : Copiar imagen / copiar ruta completa\n"
+        L"• Ctrl+O / Ctrl+Shift+O : Abrir archivo de imagen / abrir carpeta\n"
+        L"• Ctrl+U : Comprobar e instalar actualizaciones\n"
+        L"• I : Fijar o alternar barra de información flotante\n\n"
+        L"🖱️ CONTROLES DE RATÓN:\n"
+        L"• Clic izquierdo + Arrastrar : Mover / desplazar imagen (Pan) siempre disponible\n"
+        L"• Rueda del ratón : Zoom inteligente centrado en el cursor\n"
+        L"• Clic central (rueda) : Alternar entre 100% y ajuste\n"
+        L"• Botones laterales X1 / X2 : Imagen anterior / siguiente\n"
+        L"• Doble clic : Pantalla completa\n\n"
+        L"🎛️ BOTONES DEL PANEL FLOTANTE (DOCK):\n"
+        L"• ◀ ▶ : Navegación de imágenes en la carpeta\n"
+        L"• Ajustar : Ajusta la foto al máximo tamaño de la ventana\n"
+        L"• 1:1 : Visualización a resolución nativa\n"
+        L"• Claridad : Modo Ultra-Claridad / realce de detalles finos\n"
+        L"• Rotar / Voltear : Transformaciones geométricas\n"
+        L"• Fondo : Aplica la foto como fondo de escritorio de Windows\n"
+        L"• Guardar : Exporta la foto con transformaciones aplicadas\n"
+        L"• Pantalla : Alterna pantalla completa / ventana\n"
+        L"• Abrir : Diálogo para abrir nueva imagen o carpeta\n\n"
+        L"🚀 MOTORES Y COMPATIBILIDAD:\n"
+        L"• Decodificadores: stb_image, Windows Imaging Component (WIC) y GDI+\n"
+        L"• Formatos: JPG, PNG, WebP, HEIC/HEIF, AVIF, BMP, GIF, TIFF, ICO, TGA, PSD, HDR, RAW y más.\n"
+        L"• Calidad: Anti-aliasing bicúbico, auto-orientación EXIF y transparencia premium.";
+
+    MessageBoxW(hwnd, info.c_str(), L"Info — ARTPICST (Atajos, Funciones y Controles)", MB_OK | MB_ICONINFORMATION);
 }
 
 bool IsSupportedImageExtension(const std::wstring& extLower) {
@@ -657,7 +728,7 @@ void ScanFolderForImages(const std::wstring& folderPath) {
         } while (FindNextFileW(hFind, &findData));
         FindClose(hFind);
     }
-    // Orden natural inteligente de Windows (ej. foto1, foto2, foto10)
+    // Orden natural inteligente de Windows
     std::sort(found.begin(), found.end(), [](const std::wstring& a, const std::wstring& b) {
         return StrCmpLogicalW(a.c_str(), b.c_str()) < 0;
     });
@@ -701,7 +772,6 @@ void EnsureFileInList(const std::wstring& path) {
     g_state.currentImageIndex = g_state.imageFiles.size() - 1;
 }
 
-// Analizador de orientación EXIF en JPEG
 int GetExifOrientationFromJpeg(const std::wstring& filepath) {
     FILE* f = nullptr;
     if (_wfopen_s(&f, filepath.c_str(), L"rb") != 0 || !f) return 1;
@@ -881,7 +951,7 @@ unsigned char* DecodeWithGdiplus(const std::wstring& filepath, int& width, int& 
             short orientation = *reinterpret_cast<short*>(prop->value);
             switch (orientation) {
                 case 2: bmp.RotateFlip(RotateNoneFlipX); break;
-                case 3: bmp.RotateFlip(Rotate180FlipNone); break;
+                case 3: bmp.Rotate180FlipNone; break;
                 case 4: bmp.RotateFlip(Rotate180FlipX); break;
                 case 5: bmp.RotateFlip(Rotate90FlipX); break;
                 case 6: bmp.RotateFlip(Rotate90FlipNone); break;
@@ -1155,6 +1225,13 @@ void FlipVertical() {
     InvalidateRect(g_state.hwnd, nullptr, FALSE);
 }
 
+void ToggleUltraClarity() {
+    if (!g_state.imageData) return;
+    g_state.effectUltraClarity = !g_state.effectUltraClarity;
+    ShowOSD(g_state.effectUltraClarity ? L"✨ Ultra-Claridad HDR: Activado" : L"Claridad estándar");
+    InvalidateRect(g_state.hwnd, nullptr, FALSE);
+}
+
 void ToggleGrayscale() {
     if (!g_state.imageData) return;
     g_state.effectGrayscale = !g_state.effectGrayscale;
@@ -1174,7 +1251,7 @@ void EnsureImageVisible() {
     RECT client{};
     GetClientRect(g_state.hwnd, &client);
     const int windowWidth = client.right - client.left;
-    const int windowHeight = ViewHeight(client.bottom - client.top);
+    const int windowHeight = client.bottom - client.top;
     if (windowWidth <= 0 || windowHeight <= 0) return;
     int imageWidth = 0, imageHeight = 0;
     DisplaySize(imageWidth, imageHeight);
@@ -1188,7 +1265,6 @@ void EnsureImageVisible() {
 
 void FitImageToWindow(int windowWidth, int windowHeight) {
     if (!g_state.imageData || windowWidth <= 0 || windowHeight <= 0) return;
-    windowHeight = ViewHeight(windowHeight);
     int imageWidth = 0, imageHeight = 0;
     DisplaySize(imageWidth, imageHeight);
     const float scaleX = static_cast<float>(windowWidth) / static_cast<float>(imageWidth);
@@ -1209,7 +1285,7 @@ void ActualSize() {
     int imageWidth = 0, imageHeight = 0;
     DisplaySize(imageWidth, imageHeight);
     g_state.offsetX = (client.right - imageWidth) * 0.5f;
-    g_state.offsetY = (ViewHeight(client.bottom) - imageHeight) * 0.5f;
+    g_state.offsetY = (client.bottom - imageHeight) * 0.5f;
     EnsureImageVisible();
     ShowOSD(L"100% (Tamaño real)");
     InvalidateRect(g_state.hwnd, nullptr, FALSE);
@@ -1255,134 +1331,224 @@ std::wstring GetFileName(const std::wstring& filepath) {
     return filepath.substr(pos + 1);
 }
 
+void AddRoundedRect(GraphicsPath& path, const RectF& rect, float radius) {
+    float diameter = radius * 2.0f;
+    path.AddArc(rect.X, rect.Y, diameter, diameter, 180, 90);
+    path.AddArc(rect.X + rect.Width - diameter, rect.Y, diameter, diameter, 270, 90);
+    path.AddArc(rect.X + rect.Width - diameter, rect.Y + rect.Height - diameter, diameter, diameter, 0, 90);
+    path.AddArc(rect.X, rect.Y + rect.Height - diameter, diameter, diameter, 90, 90);
+    path.CloseFigure();
+}
+
 void LayoutHud(const RECT& client) {
-    const int y = client.bottom - HUD_HEIGHT + 10;
-    const int h = HUD_HEIGHT - 18;
-    const int gap = 6;
-    int x = 10;
-    auto add = [&](HudId id, const wchar_t* label, int w) {
-        if (g_state.hudCount >= 11) return;
-        HudItem& item = g_state.hud[g_state.hudCount++];
-        item.id = id;
-        item.label = label;
-        item.rc = { x, y, x + w, y + h };
-        x += w + gap;
-    };
     g_state.hudCount = 0;
-    add(HUD_PREV, L"◀", 38);
-    add(HUD_NEXT, L"▶", 38);
-    add(HUD_FIT, L"Ajustar", 70);
-    add(HUD_ONE, L"100%", 52);
-    add(HUD_ROT, L"Rotar", 58);
-    add(HUD_FLIP, L"Voltear", 62);
-    add(HUD_WALLPAPER, L"Fondo", 56);
-    add(HUD_SAVE, L"Guardar", 66);
-    add(HUD_FULL, g_state.isFullscreen ? L"Ventana" : L"Pantalla", 80);
-    add(HUD_OPEN, L"Abrir", 56);
+    const int dockHeight = 44;
+    const int itemH = 32;
+    const int gap = 6;
+    const int paddingX = 10;
+    const int paddingY = 6;
+
+    struct ItemDef {
+        HudId id;
+        const wchar_t* label;
+        int w;
+    } items[] = {
+        { HUD_PREV, L"◀", 32 },
+        { HUD_NEXT, L"▶", 32 },
+        { HUD_FIT, L"Ajustar", 60 },
+        { HUD_ONE, L"1:1", 44 },
+        { HUD_CLARITY, L"✨ Claridad", 74 },
+        { HUD_ROT, L"Rotar", 50 },
+        { HUD_FLIP, L"Voltear", 56 },
+        { HUD_WALLPAPER, L"Fondo", 52 },
+        { HUD_SAVE, L"Guardar", 60 },
+        { HUD_FULL, g_state.isFullscreen ? L"Ventana" : L"Pantalla", 68 },
+        { HUD_OPEN, L"Abrir", 50 }
+    };
+
+    int totalItemsWidth = 0;
+    const int count = sizeof(items) / sizeof(items[0]);
+    for (int i = 0; i < count; ++i) {
+        totalItemsWidth += items[i].w + (i > 0 ? gap : 0);
+    }
+
+    const int dockWidth = totalItemsWidth + (paddingX * 2);
+    const int dockX = std::max(10, (client.right - dockWidth) / 2);
+    const int dockY = client.bottom - dockHeight - 16;
+
+    g_state.dockRect = { dockX, dockY, dockX + dockWidth, dockY + dockHeight };
+
+    int curX = dockX + paddingX;
+    const int curY = dockY + paddingY;
+
+    for (int i = 0; i < count && g_state.hudCount < 12; ++i) {
+        HudItem& item = g_state.hud[g_state.hudCount++];
+        item.id = items[i].id;
+        item.label = items[i].label;
+        item.rc = { curX, curY, curX + items[i].w, curY + itemH };
+        curX += items[i].w + gap;
+    }
 }
 
 HudId HitTestHud(int x, int y) {
-    if (g_state.hwnd) {
-        RECT client{};
-        GetClientRect(g_state.hwnd, &client);
-        LayoutHud(client);
-    }
+    if (!g_state.hwnd) return HUD_NONE;
+    RECT client{};
+    GetClientRect(g_state.hwnd, &client);
+    LayoutHud(client);
+
     for (int i = 0; i < g_state.hudCount; ++i) {
         if (PtInRect(&g_state.hud[i].rc, POINT{ x, y })) return g_state.hud[i].id;
     }
     return HUD_NONE;
 }
 
-void DrawRoundish(HDC hdc, const RECT& rc, COLORREF fill, COLORREF border) {
-    HPEN pen = CreatePen(PS_SOLID, 1, border);
-    HBRUSH brush = CreateSolidBrush(fill);
-    HPEN oldPen = static_cast<HPEN>(SelectObject(hdc, pen));
-    HBRUSH oldBrush = static_cast<HBRUSH>(SelectObject(hdc, brush));
-    RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, 8, 8);
-    SelectObject(hdc, oldPen);
-    SelectObject(hdc, oldBrush);
-    DeleteObject(pen);
-    DeleteObject(brush);
-}
-
-void RenderHud(HDC hdc, const RECT& client) {
+void RenderHud(Graphics& graphics, const RECT& client) {
     LayoutHud(client);
-    RECT bar = { 0, client.bottom - HUD_HEIGHT, client.right, client.bottom };
-    HBRUSH barBrush = CreateSolidBrush(BAR_COLOR);
-    FillRect(hdc, &bar, barBrush);
-    DeleteObject(barBrush);
 
-    RECT shadow = bar;
-    shadow.top -= 2;
-    shadow.bottom = bar.top;
-    HBRUSH shadowBrush = CreateSolidBrush(SHADOW_COLOR);
-    FillRect(hdc, &shadow, shadowBrush);
-    DeleteObject(shadowBrush);
+    // 1. Panel de Información Flotante Superior (Top Pill)
+    if (g_state.imageData && !g_state.currentFilePath.empty()) {
+        int dw = 0, dh = 0;
+        DisplaySize(dw, dh);
+        double megapixels = (static_cast<double>(g_state.imageWidth) * g_state.imageHeight) / 1000000.0;
+        wchar_t badgeText[300];
+        swprintf_s(badgeText, L"  %s   ·   %dx%d (%.1f MP)   ·   %s   ·   %.0f%%   ·   %zu/%zu   ·   [%s]%s%s%s%s",
+                   GetFileName(g_state.currentFilePath).c_str(), dw, dh, megapixels,
+                   GetFileSizeString(g_state.currentFilePath).c_str(),
+                   g_state.zoom * 100.0f,
+                   g_state.currentImageIndex + 1, ImageCount(),
+                   g_state.decoderName.c_str(),
+                   g_state.effectUltraClarity ? L" [✨HDR]" : L"",
+                   g_state.effectGrayscale ? L" [B/N]" : L"",
+                   g_state.effectInvert ? L" [Inv]" : L"",
+                   g_state.currentRotation ? L" [Rot]" : L"");
 
-    HPEN line = CreatePen(PS_SOLID, 1, BAR_EDGE);
-    HPEN oldPen = static_cast<HPEN>(SelectObject(hdc, line));
-    MoveToEx(hdc, 0, bar.top, nullptr);
-    LineTo(hdc, client.right, bar.top);
-    SelectObject(hdc, oldPen);
-    DeleteObject(line);
+        FontFamily fontFamily(L"Segoe UI");
+        Font font(&fontFamily, 10.0f, FontStyleBold, UnitPoint);
+        RectF layoutRect(0, 0, 1000, 40);
+        RectF boundRect;
+        StringFormat format;
+        format.SetAlignment(StringAlignmentNear);
+        format.SetLineAlignment(StringAlignmentCenter);
+        graphics.MeasureString(badgeText, -1, &font, layoutRect, &format, &boundRect);
 
-    HFONT hFont = CreateFontW(14, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
-                              DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                              CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
-    HFONT hOld = static_cast<HFONT>(SelectObject(hdc, hFont));
-    SetBkMode(hdc, TRANSPARENT);
+        const float infoW = boundRect.Width + 24.0f;
+        const float infoH = 28.0f;
+        const float infoX = 14.0f;
+        const float infoY = 14.0f;
+
+        RectF infoRect(infoX, infoY, infoW, infoH);
+        GraphicsPath infoPath;
+        AddRoundedRect(infoPath, infoRect, 14.0f);
+
+        // Efecto de sombra premium en el panel de información
+        RectF infoShadowRect = infoRect;
+        infoShadowRect.Y += 2.0f;
+        GraphicsPath infoShadowPath;
+        AddRoundedRect(infoShadowPath, infoShadowRect, 14.0f);
+        SolidBrush infoShadowBrush(Color(120, 0, 0, 0));
+        graphics.FillPath(&infoShadowBrush, &infoShadowPath);
+
+        SolidBrush infoBg(GLASS_INFO_BG);
+        Pen infoBorder(GLASS_INFO_BORDER, 1.0f);
+        graphics.FillPath(&infoBg, &infoPath);
+        graphics.DrawPath(&infoBorder, &infoPath);
+
+        SolidBrush textBrush(Color(240, 245, 252));
+        graphics.DrawString(badgeText, -1, &font, infoRect, &format, &textBrush);
+    }
+
+    // 2. Mensaje OSD / Estado Flotante
+    if (!g_state.statusMessage.empty() &&
+        (g_state.osdPinned || GetTickCount() - g_state.osdDisplayTime < OSD_MS)) {
+        FontFamily fontFamily(L"Segoe UI");
+        Font font(&fontFamily, 10.5f, FontStyleBold, UnitPoint);
+        RectF layoutRect(0, 0, 600, 40);
+        RectF boundRect;
+        StringFormat format;
+        format.SetAlignment(StringAlignmentCenter);
+        format.SetLineAlignment(StringAlignmentCenter);
+        graphics.MeasureString(g_state.statusMessage.c_str(), -1, &font, layoutRect, &format, &boundRect);
+
+        const float osdW = boundRect.Width + 30.0f;
+        const float osdH = 32.0f;
+        const float osdX = (client.right - osdW) / 2.0f;
+        const float osdY = 14.0f;
+
+        RectF osdRect(osdX, osdY, osdW, osdH);
+        GraphicsPath osdPath;
+        AddRoundedRect(osdPath, osdRect, 16.0f);
+
+        SolidBrush osdBg(Color(220, 20, 24, 32));
+        Pen osdBorder(Color(120, 102, 176, 255), 1.2f);
+        graphics.FillPath(&osdBg, &osdPath);
+        graphics.DrawPath(&osdBorder, &osdPath);
+
+        SolidBrush textBrush(Color(255, 255, 255));
+        graphics.DrawString(g_state.statusMessage.c_str(), -1, &font, osdRect, &format, &textBrush);
+    }
+
+    // 3. Dock Flotante Acrílico Inferior (Glass Pill Dock)
+    RectF dockRectF(static_cast<float>(g_state.dockRect.left),
+                   static_cast<float>(g_state.dockRect.top),
+                   static_cast<float>(g_state.dockRect.right - g_state.dockRect.left),
+                   static_cast<float>(g_state.dockRect.bottom - g_state.dockRect.top));
+
+    GraphicsPath dockPath;
+    AddRoundedRect(dockPath, dockRectF, 22.0f);
+
+    // Sombra suave inferior premium (más difusa y profunda)
+    RectF shadowRect = dockRectF;
+    shadowRect.Y += 5.0f;
+    GraphicsPath shadowPath;
+    AddRoundedRect(shadowPath, shadowRect, 22.0f);
+    SolidBrush shadowBrush(GLASS_DOCK_SHADOW);
+    graphics.FillPath(&shadowBrush, &shadowPath);
+
+    // Fondo acrílico translúcido y borde brillante
+    SolidBrush dockBg(GLASS_DOCK_BG);
+    Pen dockBorder(GLASS_DOCK_BORDER, 1.2f);
+    graphics.FillPath(&dockBg, &dockPath);
+    graphics.DrawPath(&dockBorder, &dockPath);
+
+    // Botones del Dock
+    FontFamily btnFontFamily(L"Segoe UI");
+    Font btnFont(&btnFontFamily, 9.5f, FontStyleBold, UnitPoint);
+    StringFormat btnFormat;
+    btnFormat.SetAlignment(StringAlignmentCenter);
+    btnFormat.SetLineAlignment(StringAlignmentCenter);
 
     for (int i = 0; i < g_state.hudCount; ++i) {
-        const bool hot = g_state.hud[i].id == g_state.hudHot;
-        DrawRoundish(hdc, g_state.hud[i].rc,
-                     hot ? ACCENT_SOFT : PANEL_COLOR,
-                     hot ? ACCENT_COLOR : PANEL_BORDER);
-        SetTextColor(hdc, hot ? TEXT_STRONG : RGB(233, 236, 240));
-        DrawTextW(hdc, g_state.hud[i].label, -1, &g_state.hud[i].rc,
-                  DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    }
+        const bool hot = (g_state.hud[i].id == g_state.hudHot);
+        const bool active = (g_state.hud[i].id == HUD_CLARITY && g_state.effectUltraClarity);
 
-    RECT info = { 10, bar.top, client.right - 10, bar.bottom };
-    if (g_state.hudCount > 0) {
-        info.left = g_state.hud[g_state.hudCount - 1].rc.right + 14;
-    }
-    if (info.left < info.right - 20) {
-        SetTextColor(hdc, TEXT_SOFT);
-        std::wstring text;
-        if (g_state.imageData && !g_state.currentFilePath.empty()) {
-            int dw = 0, dh = 0;
-            DisplaySize(dw, dh);
-            double megapixels = (static_cast<double>(g_state.imageWidth) * g_state.imageHeight) / 1000000.0;
-            wchar_t extra[256];
-            swprintf_s(extra, L"%s   %dx%d (%.1f MP)   %s   %.0f%%   %zu/%zu   [%s]",
-                       GetFileName(g_state.currentFilePath).c_str(), dw, dh, megapixels,
-                       GetFileSizeString(g_state.currentFilePath).c_str(),
-                       g_state.zoom * 100.0f,
-                       g_state.currentImageIndex + 1, ImageCount(),
-                       g_state.decoderName.c_str());
-            text = extra;
-            if (g_state.currentRotation) {
-                wchar_t rot[24];
-                swprintf_s(rot, L"  %d°", g_state.currentRotation);
-                text += rot;
-            }
-            if (g_state.currentFlipH) text += L"  ↔";
-            if (g_state.currentFlipV) text += L"  ↕";
-            if (g_state.effectGrayscale) text += L" [B/N]";
-            if (g_state.effectInvert) text += L" [Inv]";
+        RectF itemRect(static_cast<float>(g_state.hud[i].rc.left),
+                      static_cast<float>(g_state.hud[i].rc.top),
+                      static_cast<float>(g_state.hud[i].rc.right - g_state.hud[i].rc.left),
+                      static_cast<float>(g_state.hud[i].rc.bottom - g_state.hud[i].rc.top));
+
+        GraphicsPath itemPath;
+        AddRoundedRect(itemPath, itemRect, 15.0f);
+
+        if (active) {
+            SolidBrush activeBrush(GLASS_BTN_ACTIVE);
+            Pen activeBorder(Color(255, 80, 240, 180), 1.2f);
+            graphics.FillPath(&activeBrush, &itemPath);
+            graphics.DrawPath(&activeBorder, &itemPath);
+        } else if (hot) {
+            SolidBrush hotBrush(GLASS_BTN_HOT);
+            Pen hotBorder(GLASS_BTN_BORDER_HOT, 1.2f);
+            graphics.FillPath(&hotBrush, &itemPath);
+            graphics.DrawPath(&hotBorder, &itemPath);
         } else {
-            text = L"Arrastra una imagen aquí  ·  Ctrl + O abrir  ·  F11 pantalla completa  ·  F1 ayuda";
+            SolidBrush normalBrush(GLASS_BTN_NORMAL);
+            Pen normalBorder(GLASS_BTN_BORDER_NORMAL, 1.0f);
+            graphics.FillPath(&normalBrush, &itemPath);
+            graphics.DrawPath(&normalBorder, &itemPath);
         }
-        if (!g_state.statusMessage.empty() &&
-            (g_state.osdPinned || GetTickCount() - g_state.osdDisplayTime < OSD_MS)) {
-            text += L"   ·   ";
-            text += g_state.statusMessage;
-        }
-        DrawTextW(hdc, text.c_str(), -1, &info, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-    }
 
-    SelectObject(hdc, hOld);
-    DeleteObject(hFont);
+        SolidBrush btnTextBrush((hot || active) ? Color(255, 255, 255) : Color(225, 230, 238));
+        graphics.DrawString(g_state.hud[i].label, -1, &btnFont, itemRect, &btnFormat, &btnTextBrush);
+    }
 }
 
 void CreateDoubleBuffer(int width, int height) {
@@ -1406,40 +1572,27 @@ void CreateDoubleBuffer(int width, int height) {
     ReleaseDC(g_state.hwnd, hdc);
 }
 
-void RenderEmptyState(HDC hdc, const RECT& clientRect) {
-    RECT view = clientRect;
-    view.bottom = std::max(view.top, view.bottom - HUD_HEIGHT);
-    HBRUSH hBrush = CreateSolidBrush(BG_COLOR);
-    FillRect(hdc, &view, hBrush);
-    DeleteObject(hBrush);
+void RenderEmptyState(Graphics& graphics, const RECT& clientRect) {
+    SolidBrush bgBrush(Color(255, GetRValue(BG_COLOR), GetGValue(BG_COLOR), GetBValue(BG_COLOR)));
+    graphics.FillRectangle(&bgBrush, 0, 0, clientRect.right, clientRect.bottom);
 
-    RECT glow = view;
-    glow.bottom = glow.top + 1;
-    HBRUSH glowBrush = CreateSolidBrush(RGB(26, 29, 35));
-    FillRect(hdc, &glow, glowBrush);
-    DeleteObject(glowBrush);
+    FontFamily titleFamily(L"Segoe UI");
+    Font titleFont(&titleFamily, 28.0f, FontStyleBold, UnitPoint);
+    Font hintFont(&titleFamily, 11.5f, FontStyleRegular, UnitPoint);
 
-    SetBkMode(hdc, TRANSPARENT);
-    SetTextColor(hdc, TEXT_STRONG);
-    HFONT hTitle = CreateFontW(28, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-                               DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                               CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
-    HFONT hHint = CreateFontW(15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                              DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                              CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
-    HFONT old = static_cast<HFONT>(SelectObject(hdc, hTitle));
-    RECT title = view;
-    title.bottom = view.top + (view.bottom - view.top) / 2 + 10;
-    DrawTextW(hdc, L"ARTPICST", -1, &title, DT_SINGLELINE | DT_CENTER | DT_BOTTOM);
-    SelectObject(hdc, hHint);
-    SetTextColor(hdc, TEXT_SOFT);
-    RECT hint = view;
-    hint.top = title.bottom + 8;
-    DrawTextW(hdc, L"Arrastra una imagen o carpeta aquí  ·  Ctrl + O abrir  ·  F11 pantalla completa  ·  F1 ayuda",
-              -1, &hint, DT_SINGLELINE | DT_CENTER | DT_TOP);
-    SelectObject(hdc, old);
-    DeleteObject(hTitle);
-    DeleteObject(hHint);
+    StringFormat format;
+    format.SetAlignment(StringAlignmentCenter);
+    format.SetLineAlignment(StringAlignmentCenter);
+
+    RectF titleRect(0.0f, clientRect.bottom * 0.38f - 30.0f, static_cast<float>(clientRect.right), 50.0f);
+    RectF hintRect(0.0f, clientRect.bottom * 0.38f + 25.0f, static_cast<float>(clientRect.right), 40.0f);
+
+    SolidBrush titleBrush(Color(245, 248, 252));
+    SolidBrush hintBrush(Color(160, 170, 185));
+
+    graphics.DrawString(L"ARTPICST", -1, &titleFont, titleRect, &format, &titleBrush);
+    graphics.DrawString(L"Arrastra una imagen aquí  ·  Ctrl + O abrir  ·  F11 pantalla completa  ·  F1 info/atajos",
+                        -1, &hintFont, hintRect, &format, &hintBrush);
 }
 
 void DrawCheckerboard(Graphics& g, float x, float y, float w, float h) {
@@ -1467,29 +1620,32 @@ void RenderImage() {
     if (!g_state.hdcMem || !g_state.hwnd) return;
     RECT rect{};
     GetClientRect(g_state.hwnd, &rect);
-    HBRUSH hBrush = CreateSolidBrush(BG_COLOR);
-    FillRect(g_state.hdcMem, &rect, hBrush);
-    DeleteObject(hBrush);
+
+    Graphics graphics(g_state.hdcMem);
+    graphics.SetCompositingMode(CompositingModeSourceOver);
+    graphics.SetCompositingQuality(CompositingQualityHighQuality);
+    graphics.SetSmoothingMode(SmoothingModeHighQuality);
+    graphics.SetPixelOffsetMode(PixelOffsetModeHighQuality);
+    graphics.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
 
     if (!g_state.imageData) {
-        RenderEmptyState(g_state.hdcMem, rect);
-        RenderHud(g_state.hdcMem, rect);
+        RenderEmptyState(graphics, rect);
+        RenderHud(graphics, rect);
         return;
     }
 
+    SolidBrush bgBrush(Color(255, GetRValue(BG_COLOR), GetGValue(BG_COLOR), GetBValue(BG_COLOR)));
+    graphics.FillRectangle(&bgBrush, 0, 0, rect.right, rect.bottom);
+
     Bitmap bitmap(g_state.imageWidth, g_state.imageHeight,
                   g_state.imageWidth * 4, PixelFormat32bppARGB, g_state.imageData);
-    Graphics graphics(g_state.hdcMem);
-    graphics.SetClip(Rect(0, 0, rect.right, ViewHeight(rect.bottom)));
 
     const bool pixelPerfectZoom = std::fabs(g_state.zoom - std::round(g_state.zoom)) < 0.01f && g_state.zoom >= 1.0f;
-    graphics.SetCompositingMode(CompositingModeSourceOver);
-    graphics.SetCompositingQuality(CompositingQualityHighQuality);
     graphics.SetInterpolationMode(pixelPerfectZoom
                                       ? InterpolationModeNearestNeighbor
                                       : InterpolationModeHighQualityBicubic);
-    graphics.SetPixelOffsetMode(PixelOffsetModeHalf);
     graphics.SetSmoothingMode(SmoothingModeHighQuality);
+    graphics.SetPixelOffsetMode(PixelOffsetModeHighQuality);
 
     int boxW = 0, boxH = 0;
     DisplaySize(boxW, boxH);
@@ -1529,6 +1685,18 @@ void RenderImage() {
              1.0f,  1.0f,  1.0f, 0.0f, 1.0f
         };
         imgAttr.SetColorMatrix(&invMatrix, ColorMatrixFlagsDefault, ColorAdjustTypeBitmap);
+    } else if (g_state.effectUltraClarity) {
+        // Matriz Ultra-Claridad HDR (Realce de micro-contraste y detalles finos)
+        const float c = 1.07f;
+        const float t = (1.0f - c) / 2.0f;
+        ColorMatrix clarityMatrix = {
+            c,     0.0f,  0.0f,  0.0f, 0.0f,
+            0.0f,  c,     0.0f,  0.0f, 0.0f,
+            0.0f,  0.0f,  c,     0.0f, 0.0f,
+            0.0f,  0.0f,  0.0f,  1.0f, 0.0f,
+            t,     t,     t,     0.0f, 1.0f
+        };
+        imgAttr.SetColorMatrix(&clarityMatrix, ColorMatrixFlagsDefault, ColorAdjustTypeBitmap);
     }
 
     GraphicsState state = graphics.Save();
@@ -1547,7 +1715,9 @@ void RenderImage() {
                        UnitPixel, &imgAttr);
 
     graphics.Restore(state);
-    RenderHud(g_state.hdcMem, rect);
+
+    // Renderizar Dock y controles flotantes con transparencia acrílica
+    RenderHud(graphics, rect);
 }
 
 int GetEncoderClsid(const WCHAR* format, CLSID* pClsid) {
@@ -2037,6 +2207,7 @@ void InvokeHud(HudId id) {
             }
             break;
         case HUD_ONE: ActualSize(); break;
+        case HUD_CLARITY: ToggleUltraClarity(); break;
         case HUD_ROT: RotateImage(90); break;
         case HUD_FLIP: FlipHorizontal(); break;
         case HUD_WALLPAPER: SetAsWallpaper(); break;
@@ -2049,6 +2220,8 @@ void InvokeHud(HudId id) {
 
 void ShowContextMenu(HWND hwnd, int x, int y) {
     HMENU menu = CreatePopupMenu();
+    AppendMenuW(menu, MF_STRING, 23, L"Info (Controles, Atajos y Funciones)\tF1");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, 1, L"Abrir imagen...\tCtrl + O");
     AppendMenuW(menu, MF_STRING, 2, L"Abrir carpeta...\tCtrl + Shift + O");
     AppendMenuW(menu, MF_STRING, 18, L"Guardar imagen como...\tCtrl + S");
@@ -2066,6 +2239,7 @@ void ShowContextMenu(HWND hwnd, int x, int y) {
     AppendMenuW(menu, MF_STRING, 13, L"Volteo horizontal\tH");
     AppendMenuW(menu, MF_STRING, 14, L"Volteo vertical\tV");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, 24, g_state.effectUltraClarity ? L"Desactivar Ultra-Claridad HDR\tD" : L"✨ Modo Ultra-Claridad (Detalles HDR)\tD");
     AppendMenuW(menu, MF_STRING, 20, g_state.effectGrayscale ? L"Desactivar escala de grises\tG" : L"Escala de grises (B/N)\tG");
     AppendMenuW(menu, MF_STRING, 21, g_state.effectInvert ? L"Desactivar invertir colores\tN" : L"Invertir colores (Negativo)\tN");
     AppendMenuW(menu, MF_STRING, 15, g_state.isSlideshowActive ? L"Detener presentación\tF5" : L"Iniciar presentación\tF5");
@@ -2091,13 +2265,13 @@ void ShowContextMenu(HWND hwnd, int x, int y) {
         case 9: {
             RECT client{};
             GetClientRect(hwnd, &client);
-            ZoomAt(ZOOM_STEP, (client.right - client.left) / 2, ViewHeight(client.bottom) / 2);
+            ZoomAt(ZOOM_STEP, (client.right - client.left) / 2, (client.bottom - client.top) / 2);
             break;
         }
         case 10: {
             RECT client{};
             GetClientRect(hwnd, &client);
-            ZoomAt(1.0f / ZOOM_STEP, (client.right - client.left) / 2, ViewHeight(client.bottom) / 2);
+            ZoomAt(1.0f / ZOOM_STEP, (client.right - client.left) / 2, (client.bottom - client.top) / 2);
             break;
         }
         case 11: ShowAboutDialog(hwnd); break;
@@ -2112,6 +2286,8 @@ void ShowContextMenu(HWND hwnd, int x, int y) {
         case 20: ToggleGrayscale(); break;
         case 21: ToggleInvert(); break;
         case 22: ShowExifDialog(hwnd); break;
+        case 23: ShowProgramInfoDialog(hwnd); break;
+        case 24: ToggleUltraClarity(); break;
         default: break;
     }
 }
@@ -2182,12 +2358,26 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
             switch (wParam) {
                 case VK_LEFT:
-                case VK_UP:
-                case VK_BACK:
                     PreviousImage();
                     break;
                 case VK_RIGHT:
-                case VK_DOWN:
+                    NextImage();
+                    break;
+                case VK_UP: {
+                    RECT client{};
+                    GetClientRect(hwnd, &client);
+                    ZoomAt(ZOOM_STEP, (client.right - client.left) / 2, (client.bottom - client.top) / 2);
+                    break;
+                }
+                case VK_DOWN: {
+                    RECT client{};
+                    GetClientRect(hwnd, &client);
+                    ZoomAt(1.0f / ZOOM_STEP, (client.right - client.left) / 2, (client.bottom - client.top) / 2);
+                    break;
+                }
+                case VK_BACK:
+                    PreviousImage();
+                    break;
                 case VK_SPACE:
                     NextImage();
                     break;
@@ -2212,8 +2402,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     DeleteCurrentImage();
                     break;
                 case VK_F1:
-                    ShowOSD(L"◀ ▶ navegar · Rueda zoom · F ajustar · 1 100% · R rotar · H/V voltear · G B/N · F5 diapositivas · Supr borrar");
-                    InvalidateRect(hwnd, nullptr, FALSE);
+                    ShowProgramInfoDialog(hwnd);
                     break;
                 case 'A':
                     if (ctrl && shift) {
@@ -2233,6 +2422,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 case 'U':
                     if (ctrl) CheckForUpdates();
                     break;
+                case 'D':
+                    ToggleUltraClarity();
+                    break;
                 case 'G':
                     ToggleGrayscale();
                     break;
@@ -2243,14 +2435,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 case VK_ADD: {
                     RECT client{};
                     GetClientRect(hwnd, &client);
-                    ZoomAt(ZOOM_STEP, (client.right - client.left) / 2, ViewHeight(client.bottom) / 2);
+                    ZoomAt(ZOOM_STEP, (client.right - client.left) / 2, (client.bottom - client.top) / 2);
                     break;
                 }
                 case VK_OEM_MINUS:
                 case VK_SUBTRACT: {
                     RECT client{};
                     GetClientRect(hwnd, &client);
-                    ZoomAt(1.0f / ZOOM_STEP, (client.right - client.left) / 2, ViewHeight(client.bottom) / 2);
+                    ZoomAt(1.0f / ZOOM_STEP, (client.right - client.left) / 2, (client.bottom - client.top) / 2);
                     break;
                 }
                 case 'I':
@@ -2296,17 +2488,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             const int delta = GET_WHEEL_DELTA_WPARAM(wParam);
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             ScreenToClient(hwnd, &pt);
-            RECT client{};
-            GetClientRect(hwnd, &client);
-            if (pt.y >= client.bottom - HUD_HEIGHT) return 0;
             ZoomAt((delta > 0) ? ZOOM_STEP : (1.0f / ZOOM_STEP), pt.x, pt.y);
             return 0;
         }
         case WM_MBUTTONUP: {
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
-            RECT client{};
-            GetClientRect(hwnd, &client);
-            if (pt.y < client.bottom - HUD_HEIGHT) {
+            if (!PtInRect(&g_state.dockRect, pt)) {
                 if (g_state.fitMode) ActualSize();
                 else InvokeHud(HUD_FIT);
             }
@@ -2320,9 +2507,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         case WM_LBUTTONDBLCLK: {
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
-            RECT client{};
-            GetClientRect(hwnd, &client);
-            if (pt.y < client.bottom - HUD_HEIGHT) ToggleFullscreen();
+            if (!PtInRect(&g_state.dockRect, pt)) {
+                ToggleFullscreen();
+            }
             return 0;
         }
         case WM_LBUTTONDOWN: {
@@ -2333,9 +2520,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 InvokeHud(hit);
                 return 0;
             }
-            RECT client{};
-            GetClientRect(hwnd, &client);
-            if (y >= client.bottom - HUD_HEIGHT) return 0;
+            if (PtInRect(&g_state.dockRect, POINT{ x, y })) {
+                return 0;
+            }
             g_state.isDragging = true;
             g_state.dragStartX = x;
             g_state.dragStartY = y;
@@ -2370,6 +2557,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (g_state.isDragging) {
                 g_state.offsetX = g_state.dragStartOffsetX + static_cast<float>(x - g_state.dragStartX);
                 g_state.offsetY = g_state.dragStartOffsetY + static_cast<float>(y - g_state.dragStartY);
+                g_state.fitMode = false;
                 EnsureImageVisible();
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
