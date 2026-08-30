@@ -2,7 +2,7 @@ $ErrorActionPreference = 'Stop'
 $taskName = 'ARTPICST AutoUpdater'
 $exePath = $args[0]
 if (-not $exePath) {
-    $exePath = Join-Path $PSScriptRoot 'auto_updater.exe'
+    $exePath = Join-Path $PSScriptRoot '..\auto_updater.exe'
 }
 
 if (-not (Test-Path $exePath)) {

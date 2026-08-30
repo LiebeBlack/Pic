@@ -29,9 +29,9 @@ XPStyle on
 !define MUI_ICON "..\resources\artpicst.ico"
 !define MUI_UNICON "..\resources\artpicst.ico"
 !define MUI_WELCOMEPAGE_TITLE "Instalación de ${APP_NAME}"
-!define MUI_WELCOMEPAGE_TEXT "Este asistente instalará ARTPICST y lo registrará automáticamente como visor de imágenes en Windows."
+!define MUI_WELCOMEPAGE_TEXT "Este asistente instalará ${APP_NAME} y lo registrará como visor de imágenes de Windows."
 !define MUI_FINISHPAGE_RUN "$INSTDIR\artpicst.exe"
-!define MUI_FINISHPAGE_RUN_TEXT "Abrir ARTPICST al terminar"
+!define MUI_FINISHPAGE_RUN_TEXT "Abrir ${APP_NAME} al finalizar"
 !define MUI_FINISHPAGE_LINK "Más información"
 !define MUI_FINISHPAGE_LINK_LOCATION "${APP_URL}"
 

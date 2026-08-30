@@ -65,6 +65,8 @@
 using namespace Gdiplus;
 
 const wchar_t CLASS_NAME[] = L"ARTPICSTWindow";
+const wchar_t APP_NAME_TEXT[] = L"ARTPICST";
+const wchar_t APP_VERSION_TEXT[] = L"1.0.0";
 const COLORREF BG_COLOR = RGB(12, 14, 18);
 const COLORREF BAR_COLOR = RGB(21, 24, 29);
 const COLORREF ACCENT_COLOR = RGB(102, 176, 255);
@@ -543,9 +545,20 @@ void HandleError(const std::wstring& errorMsg, bool showUser) {
         DWORD now = GetTickCount();
         if (now - lastErrorTime > 2500) {
             lastErrorTime = now;
-            MessageBoxW(g_state.hwnd, errorMsg.c_str(), L"ARTPICST", MB_OK | MB_ICONWARNING);
+            MessageBoxW(g_state.hwnd, errorMsg.c_str(), APP_NAME_TEXT, MB_OK | MB_ICONWARNING);
         }
     }
+}
+
+void ShowAboutDialog(HWND hwnd) {
+    std::wstring info =
+        std::wstring(APP_NAME_TEXT) + L" v" + APP_VERSION_TEXT + L"\n\n" +
+        L"Visor de imágenes nativo para Windows.\n" +
+        L"Soporta JPG, PNG, BMP, GIF, TIFF, WEBP, HEIC/HEIF, AVIF y más.\n\n" +
+        L"Motores: stb_image, WIC y GDI+.\n" +
+        L"Desarrollado para una experiencia rápida, limpia y fiable.\n\n" +
+        L"© 2026 ARTPICST";
+    MessageBoxW(hwnd ? hwnd : nullptr, info.c_str(), APP_NAME_TEXT, MB_OK | MB_ICONINFORMATION);
 }
 
 bool IsSupportedImageExtension(const std::wstring& extLower) {
@@ -1542,6 +1555,8 @@ void ShowContextMenu(HWND hwnd, int x, int y) {
     AppendMenuW(menu, MF_STRING, 10, L"Alejar\t-");
     AppendMenuW(menu, MF_STRING, 7, L"Rotar\tR");
     AppendMenuW(menu, MF_STRING, 8, L"Pantalla completa\tF11");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, 11, L"Acerca de");
     const int cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, x, y, 0, hwnd, nullptr);
     DestroyMenu(menu);
     switch (cmd) {
@@ -1565,6 +1580,7 @@ void ShowContextMenu(HWND hwnd, int x, int y) {
             ZoomAt(1.0f / ZOOM_STEP, (client.right - client.left) / 2, ViewHeight(client.bottom) / 2);
             break;
         }
+        case 11: ShowAboutDialog(hwnd); break;
         default: break;
     }
 }
@@ -1658,8 +1674,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     ToggleFullscreen();
                     break;
                 case VK_F1:
-                    ShowOSD(L"Flechas para navegar · rueda para acercar · F ajustar · R rotar · F11 pantalla completa");
+                    ShowOSD(L"Flechas para navegar · rueda para acercar · F ajustar · R rotar · F11 pantalla completa · F1 ayuda");
                     InvalidateRect(hwnd, nullptr, FALSE);
+                    break;
+                case 'A':
+                    if (ctrl && shift) {
+                        ShowAboutDialog(hwnd);
+                    }
                     break;
                 case VK_OEM_PLUS:
                 case VK_ADD: {

@@ -3,7 +3,7 @@ setlocal
 
 set "TARGET_EXE=%~1"
 if "%TARGET_EXE%"=="" (
-    set "TARGET_EXE=%~dp0auto_updater.exe"
+    set "TARGET_EXE=%~dp0..\auto_updater.exe"
 )
 
 if not exist "%TARGET_EXE%" (

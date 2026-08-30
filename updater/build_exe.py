@@ -23,6 +23,8 @@ def build():
         "PyInstaller",
         "--onefile",
         "--noconsole",
+        "--strip",
+        "--noupx",
         "--icon",
         str(ROOT / "resources" / "artpicst.ico"),
         "--distpath",
