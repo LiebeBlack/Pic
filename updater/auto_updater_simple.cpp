@@ -57,7 +57,7 @@ bool IsNewerVersion(const std::wstring& current, const std::wstring& remote) {
     std::vector<int> current_parts = NormalizeVersion(current);
     std::vector<int> remote_parts = NormalizeVersion(remote);
     
-    for (size_t i = 0; i < std::min(current_parts.size(), remote_parts.size()); ++i) {
+    for (size_t i = 0; i < (std::min)(current_parts.size(), remote_parts.size()); ++i) {
         if (remote_parts[i] > current_parts[i]) return true;
         if (remote_parts[i] < current_parts[i]) return false;
     }
@@ -189,7 +189,12 @@ ReleaseInfo ParseReleaseJson(const std::string& json) {
     // Find installer URL in assets
     size_t assetsPos = jsonStr.find("\"assets\"");
     if (assetsPos != std::string::npos) {
-        size_t installerPos = jsonStr.find(INSTALLER_ASSET_NAME, assetsPos);
+        // Convert wide string to narrow string for search
+        std::string installerAssetName;
+        for (wchar_t c : std::wstring(INSTALLER_ASSET_NAME)) {
+            installerAssetName += static_cast<char>(c);
+        }
+        size_t installerPos = jsonStr.find(installerAssetName, assetsPos);
         if (installerPos != std::string::npos) {
             size_t urlPos = jsonStr.find("\"browser_download_url\"", installerPos);
             if (urlPos != std::string::npos) {

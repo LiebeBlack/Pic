@@ -33,7 +33,7 @@
 #include <dwmapi.h>
 #include <wincodec.h>
 #include <gdiplus.h>
-#include "resource.h"
+#include "../resource.h"
 
 // Bibliotecas estándar de C++
 #include <algorithm>
@@ -336,6 +336,7 @@ void PreviousImage();
 void OpenPath(const std::wstring& path);
 void UpdateWindowTitle();
 void EnableDarkTitleBar(HWND hwnd);
+int ShowThemedMessageBox(HWND parent, const wchar_t* title, const wchar_t* message, UINT buttons, UINT icon);
 bool OpenImageFileDialog(HWND hwnd);
 bool OpenFolderDialog(HWND hwnd);
 bool SaveImageDialog(HWND hwnd);
@@ -427,10 +428,19 @@ std::wstring NormalizePath(const std::wstring& path) {
     return full;
 }
 
-// Inicialización de GDI+
-bool InitGDIPlus() {
-    return GdiplusStartup(&g_state.gdiplusToken, &g_state.gdiplusStartupInput, nullptr) == Ok;
-}
+// Sistema de diálogos personalizados con tema
+struct ThemedDialogState {
+    HWND hwnd = nullptr;
+    std::wstring title;
+    std::wstring message;
+    UINT buttons = MB_OK;
+    UINT icon = MB_ICONINFORMATION;
+    int result = IDOK;
+    GdiplusStartupInput gdiplusStartupInput;
+    ULONG_PTR gdiplusToken = 0;
+};
+
+ThemedDialogState g_dialogState;
 
 void EnableDarkTitleBar(HWND hwnd) {
     if (!hwnd) return;
@@ -447,6 +457,247 @@ void EnableDarkTitleBar(HWND hwnd) {
     // Efecto de fondo Mica/Acrílico (Win 11)
     DWORD backdropType = 2; // 2 = Mica
     DwmSetWindowAttribute(hwnd, 38, &backdropType, sizeof(backdropType)); // DWMWA_SYSTEMBACKDROP_TYPE
+}
+
+LRESULT CALLBACK ThemedDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+        case WM_CREATE: {
+            g_dialogState.hwnd = hwnd;
+            EnableDarkTitleBar(hwnd);
+            
+            // Initialize GDI+ for dialog
+            GdiplusStartup(&g_dialogState.gdiplusToken, &g_dialogState.gdiplusStartupInput, nullptr);
+            return 0;
+        }
+        case WM_PAINT: {
+            PAINTSTRUCT ps;
+            HDC hdc = BeginPaint(hwnd, &ps);
+            
+            Graphics graphics(hdc);
+            graphics.SetCompositingQuality(CompositingQualityHighQuality);
+            graphics.SetSmoothingMode(SmoothingModeHighQuality);
+            graphics.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
+            
+            RECT client;
+            GetClientRect(hwnd, &client);
+            
+            // Background with glass effect
+            SolidBrush bgBrush(Color(240, 12, 14, 20));
+            graphics.FillRectangle(&bgBrush, 0, 0, client.right, client.bottom);
+            
+            // Border
+            Pen borderPen(Color(255, 80, 200, 210, 230), 1.0f);
+            graphics.DrawRectangle(&borderPen, 0, 0, client.right - 1, client.bottom - 1);
+            
+            // Title
+            Gdiplus::FontFamily titleFamily(L"Segoe UI");
+            Gdiplus::Font titleFont(&titleFamily, 16.0f, FontStyleBold, UnitPoint);
+            StringFormat titleFormat;
+            titleFormat.SetAlignment(StringAlignmentCenter);
+            titleFormat.SetLineAlignment(StringAlignmentNear);
+            
+            SolidBrush titleBrush(Color(255, 242, 245, 250));
+            RectF titleRect(0, 20, client.right, 40);
+            graphics.DrawString(g_dialogState.title.c_str(), -1, &titleFont, titleRect, &titleFormat, &titleBrush);
+            
+            // Message
+            Gdiplus::Font messageFont(&titleFamily, 11.0f, FontStyleRegular, UnitPoint);
+            StringFormat messageFormat;
+            messageFormat.SetAlignment(StringAlignmentCenter);
+            messageFormat.SetLineAlignment(StringAlignmentCenter);
+            
+            SolidBrush messageBrush(Color(255, 200, 210, 220));
+            RectF messageRect(40, 80, client.right - 80, client.bottom - 160);
+            graphics.DrawString(g_dialogState.message.c_str(), -1, &messageFont, messageRect, &messageFormat, &messageBrush);
+            
+            // Icon
+            if (g_dialogState.icon == MB_ICONERROR) {
+                SolidBrush iconBrush(Color(255, 255, 100, 100));
+                graphics.FillEllipse(&iconBrush, 30, 30, 40, 40);
+            } else if (g_dialogState.icon == MB_ICONWARNING) {
+                SolidBrush iconBrush(Color(255, 255, 200, 100));
+                graphics.FillEllipse(&iconBrush, 30, 30, 40, 40);
+            } else if (g_dialogState.icon == MB_ICONQUESTION) {
+                SolidBrush iconBrush(Color(255, 100, 200, 255));
+                graphics.FillEllipse(&iconBrush, 30, 30, 40, 40);
+            } else {
+                SolidBrush iconBrush(Color(255, 100, 255, 150));
+                graphics.FillEllipse(&iconBrush, 30, 30, 40, 40);
+            }
+            
+            // Draw buttons
+            int buttonWidth = 100;
+            int buttonHeight = 32;
+            int buttonY = client.bottom - 50;
+            
+            if (g_dialogState.buttons == MB_YESNO) {
+                int yesX = client.right / 2 - buttonWidth - 10;
+                int noX = client.right / 2 + 10;
+                
+                // Yes button
+                SolidBrush yesBrush(Color(255, 48, 120, 235));
+                graphics.FillRectangle(&yesBrush, yesX, buttonY, buttonWidth, buttonHeight);
+                Pen yesBorder(Color(255, 80, 200, 210, 230), 1.0f);
+                graphics.DrawRectangle(&yesBorder, yesX, buttonY, buttonWidth, buttonHeight);
+                
+                // No button
+                SolidBrush noBrush(Color(255, 55, 55, 55));
+                graphics.FillRectangle(&noBrush, noX, buttonY, buttonWidth, buttonHeight);
+                Pen noBorder(Color(255, 80, 80, 80), 1.0f);
+                graphics.DrawRectangle(&noBorder, noX, buttonY, buttonWidth, buttonHeight);
+                
+                // Button text
+                Gdiplus::Font buttonFont(&titleFamily, 11.0f, FontStyleRegular, UnitPoint);
+                StringFormat buttonFormat;
+                buttonFormat.SetAlignment(StringAlignmentCenter);
+                buttonFormat.SetLineAlignment(StringAlignmentCenter);
+                
+                SolidBrush buttonTextBrush(Color(255, 242, 245, 250));
+                RectF yesTextRect(yesX, buttonY, buttonWidth, buttonHeight);
+                graphics.DrawString(L"Sí", -1, &buttonFont, yesTextRect, &buttonFormat, &buttonTextBrush);
+                
+                RectF noTextRect(noX, buttonY, buttonWidth, buttonHeight);
+                graphics.DrawString(L"No", -1, &buttonFont, noTextRect, &buttonFormat, &buttonTextBrush);
+            } else {
+                int okX = client.right / 2 - buttonWidth / 2;
+                
+                // OK button
+                SolidBrush okBrush(Color(255, 48, 120, 235));
+                graphics.FillRectangle(&okBrush, okX, buttonY, buttonWidth, buttonHeight);
+                Pen okBorder(Color(255, 80, 200, 210, 230), 1.0f);
+                graphics.DrawRectangle(&okBorder, okX, buttonY, buttonWidth, buttonHeight);
+                
+                // Button text
+                Gdiplus::Font buttonFont(&titleFamily, 11.0f, FontStyleRegular, UnitPoint);
+                StringFormat buttonFormat;
+                buttonFormat.SetAlignment(StringAlignmentCenter);
+                buttonFormat.SetLineAlignment(StringAlignmentCenter);
+                
+                SolidBrush buttonTextBrush(Color(255, 242, 245, 250));
+                RectF okTextRect(okX, buttonY, buttonWidth, buttonHeight);
+                graphics.DrawString(L"Aceptar", -1, &buttonFont, okTextRect, &buttonFormat, &buttonTextBrush);
+            }
+            
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
+        case WM_ERASEBKGND:
+            return TRUE;
+        case WM_DESTROY:
+            if (g_dialogState.gdiplusToken) {
+                GdiplusShutdown(g_dialogState.gdiplusToken);
+                g_dialogState.gdiplusToken = 0;
+            }
+            PostQuitMessage(0);
+            return 0;
+        case WM_LBUTTONDOWN: {
+            int x = GET_X_LPARAM(lParam);
+            int y = GET_Y_LPARAM(lParam);
+            
+            RECT client;
+            GetClientRect(hwnd, &client);
+            
+            int buttonWidth = 100;
+            int buttonHeight = 32;
+            int buttonY = client.bottom - 50;
+            
+            // Check button clicks
+            if (g_dialogState.buttons == MB_YESNO) {
+                int yesX = client.right / 2 - buttonWidth - 10;
+                int noX = client.right / 2 + 10;
+                
+                if (x >= yesX && x <= yesX + buttonWidth && y >= buttonY && y <= buttonY + buttonHeight) {
+                    g_dialogState.result = IDYES;
+                    PostMessage(hwnd, WM_CLOSE, 0, 0);
+                } else if (x >= noX && x <= noX + buttonWidth && y >= buttonY && y <= buttonY + buttonHeight) {
+                    g_dialogState.result = IDNO;
+                    PostMessage(hwnd, WM_CLOSE, 0, 0);
+                }
+            } else {
+                int okX = client.right / 2 - buttonWidth / 2;
+                if (x >= okX && x <= okX + buttonWidth && y >= buttonY && y <= buttonY + buttonHeight) {
+                    g_dialogState.result = IDOK;
+                    PostMessage(hwnd, WM_CLOSE, 0, 0);
+                }
+            }
+            return 0;
+        }
+        default:
+            return DefWindowProc(hwnd, msg, wParam, lParam);
+    }
+}
+
+int ShowThemedMessageBox(HWND parent, const wchar_t* title, const wchar_t* message, UINT buttons, UINT icon) {
+    static bool classRegistered = false;
+    static const wchar_t* DIALOG_CLASS = L"ARTPICSTThemedDialog";
+    
+    if (!classRegistered) {
+        WNDCLASSEXW wc = {0};
+        wc.cbSize = sizeof(wc);
+        wc.style = CS_HREDRAW | CS_VREDRAW;
+        wc.lpfnWndProc = ThemedDialogProc;
+        wc.hInstance = GetModuleHandle(nullptr);
+        wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
+        wc.lpszClassName = DIALOG_CLASS;
+        RegisterClassExW(&wc);
+        classRegistered = true;
+    }
+    
+    g_dialogState.title = title;
+    g_dialogState.message = message;
+    g_dialogState.buttons = buttons;
+    g_dialogState.icon = icon;
+    g_dialogState.result = IDOK;
+    
+    // Calculate dialog size
+    int width = 400;
+    int height = 250;
+    
+    // Center dialog on parent or screen
+    RECT parentRect;
+    if (parent) {
+        GetWindowRect(parent, &parentRect);
+    } else {
+        parentRect.left = 0;
+        parentRect.top = 0;
+        parentRect.right = GetSystemMetrics(SM_CXSCREEN);
+        parentRect.bottom = GetSystemMetrics(SM_CYSCREEN);
+    }
+    
+    int x = parentRect.left + (parentRect.right - parentRect.left - width) / 2;
+    int y = parentRect.top + (parentRect.bottom - parentRect.top - height) / 2;
+    
+    HWND hwnd = CreateWindowExW(
+        WS_EX_APPWINDOW | WS_EX_DLGMODALFRAME,
+        DIALOG_CLASS,
+        title,
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+        x, y, width, height,
+        parent, nullptr, GetModuleHandle(nullptr), nullptr
+    );
+    
+    if (!hwnd) return IDOK;
+    
+    EnableWindow(parent ? parent : GetActiveWindow(), FALSE);
+    ShowWindow(hwnd, SW_SHOW);
+    UpdateWindow(hwnd);
+    
+    MSG msg;
+    while (GetMessage(&msg, nullptr, 0, 0)) {
+        TranslateMessage(&msg);
+        DispatchMessage(&msg);
+    }
+    
+    EnableWindow(parent ? parent : GetActiveWindow(), TRUE);
+    if (parent) SetForegroundWindow(parent);
+    
+    return g_dialogState.result;
+}
+
+// Inicialización de GDI+
+bool InitGDIPlus() {
+    return GdiplusStartup(&g_state.gdiplusToken, &g_state.gdiplusStartupInput, nullptr) == Ok;
 }
 
 // Gestión de buffers y recursos
@@ -619,7 +870,7 @@ void HandleError(const std::wstring& errorMsg, bool showUser) {
         DWORD now = GetTickCount();
         if (now - lastErrorTime > 2500) {
             lastErrorTime = now;
-            MessageBoxW(g_state.hwnd, errorMsg.c_str(), APP_NAME_TEXT, MB_OK | MB_ICONWARNING);
+            ShowThemedMessageBox(g_state.hwnd, APP_NAME_TEXT, errorMsg.c_str(), MB_OK, MB_ICONWARNING);
         }
     }
 }
@@ -632,7 +883,7 @@ void ShowAboutDialog(HWND hwnd) {
         L"• Auto-orientación EXIF, visor de máxima área, fondo de pantalla directo y exportador PNG/JPG.\n" +
         L"• Actualizador integrado sin bucles y soporte para más de 30 formatos gráficos.\n\n" +
         L"© 2026 ARTPICST";
-    MessageBoxW(hwnd ? hwnd : nullptr, info.c_str(), APP_NAME_TEXT, MB_OK | MB_ICONINFORMATION);
+    ShowThemedMessageBox(hwnd ? hwnd : nullptr, APP_NAME_TEXT, info.c_str(), MB_OK, MB_ICONINFORMATION);
 }
 
 void ShowProgramInfoDialog(HWND hwnd) {
@@ -683,7 +934,7 @@ void ShowProgramInfoDialog(HWND hwnd) {
         L"• Formatos: JPG, PNG, WebP, HEIC/HEIF, AVIF, BMP, GIF, TIFF, ICO, TGA, PSD, HDR, RAW y más.\n"
         L"• Calidad: Anti-aliasing bicúbico, auto-orientación EXIF y transparencia premium.";
 
-    MessageBoxW(hwnd, info.c_str(), L"Info — ARTPICST (Atajos, Funciones y Controles)", MB_OK | MB_ICONINFORMATION);
+    ShowThemedMessageBox(hwnd, L"Info — ARTPICST (Atajos, Funciones y Controles)", info.c_str(), MB_OK, MB_ICONINFORMATION);
 }
 
 bool IsSupportedImageExtension(const std::wstring& extLower) {
@@ -1793,7 +2044,7 @@ void ShowExifDialog(HWND hwnd) {
     wchar_t zoomBuf[64];
     swprintf_s(zoomBuf, L"• Zoom actual en pantalla: %.1f%%\n", g_state.zoom * 100.0f);
     info += zoomBuf;
-    MessageBoxW(hwnd, info.c_str(), L"Metadatos de Imagen — ARTPICST", MB_OK | MB_ICONINFORMATION);
+    ShowThemedMessageBox(hwnd, L"Metadatos de Imagen — ARTPICST", info.c_str(), MB_OK, MB_ICONINFORMATION);
 }
 
 bool CopyPathToClipboard() {
@@ -2019,7 +2270,7 @@ void DeleteCurrentImage() {
     const std::wstring path = g_state.currentFilePath;
     const std::wstring name = GetFileName(path);
     std::wstring prompt = L"¿Desea enviar \"" + name + L"\" a la Papelera de reciclaje?";
-    if (MessageBoxW(g_state.hwnd, prompt.c_str(), L"Eliminar imagen", MB_YESNO | MB_ICONQUESTION) != IDYES) {
+    if (ShowThemedMessageBox(g_state.hwnd, L"Eliminar imagen", prompt.c_str(), MB_YESNO, MB_ICONQUESTION) != IDYES) {
         return;
     }
 
@@ -2085,6 +2336,17 @@ bool OpenImageFileDialog(HWND hwnd) {
     FILEOPENDIALOGOPTIONS opts = 0;
     dialog->GetOptions(&opts);
     dialog->SetOptions(opts | FOS_FILEMUSTEXIST | FOS_FORCEFILESYSTEM);
+    
+    // Apply dark theme to COM dialog
+    IFileDialogCustomize* customize = nullptr;
+    if (SUCCEEDED(dialog->QueryInterface(IID_PPV_ARGS(&customize)))) {
+        DWORD dwFlags = 0;
+        if (SUCCEEDED(dialog->GetOptions(&dwFlags))) {
+            dialog->SetOptions(dwFlags | FOS_DONTADDTORECENT);
+        }
+        customize->Release();
+    }
+    
     hr = dialog->Show(hwnd);
     if (FAILED(hr)) return false;
     ComPtr<IShellItem> item;
@@ -2730,7 +2992,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
     LogMessage(L"Iniciando ARTPICST");
 
     if (!InitGDIPlus()) {
-        MessageBoxW(nullptr, L"Error al inicializar GDI+.", L"ARTPICST", MB_OK | MB_ICONERROR);
+        ShowThemedMessageBox(nullptr, L"ARTPICST", L"Error al inicializar GDI+.", MB_OK, MB_ICONERROR);
         if (SUCCEEDED(g_state.comHr)) CoUninitialize();
         return 1;
     }
@@ -2751,7 +3013,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
     wc.hIconSm = wc.hIcon;
 
     if (!RegisterClassExW(&wc)) {
-        MessageBoxW(nullptr, L"Error al registrar la ventana.", L"ARTPICST", MB_OK | MB_ICONERROR);
+        ShowThemedMessageBox(nullptr, L"ARTPICST", L"Error al registrar la ventana.", MB_OK, MB_ICONERROR);
         if (g_state.classBrush) {
             DeleteObject(g_state.classBrush);
             g_state.classBrush = nullptr;
@@ -2777,7 +3039,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
         nullptr, nullptr, hInstance, nullptr);
 
     if (!hwnd) {
-        MessageBoxW(nullptr, L"Error al crear la ventana.", L"ARTPICST", MB_OK | MB_ICONERROR);
+        ShowThemedMessageBox(nullptr, L"ARTPICST", L"Error al crear la ventana.", MB_OK, MB_ICONERROR);
         UnregisterClassW(CLASS_NAME, hInstance);
         if (g_state.classBrush) {
             DeleteObject(g_state.classBrush);

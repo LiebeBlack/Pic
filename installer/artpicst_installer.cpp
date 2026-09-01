@@ -42,10 +42,10 @@ const Color BG_COLOR(255, 8, 10, 14);
 const Color ACCENT_COLOR(255, 48, 120, 235);
 const Color TEXT_COLOR(255, 242, 245, 250);
 const Color CARD_BG(255, 16, 18, 23);
-const Color CARD_BORDER(255, 80, 255, 255, 255);
-const Color BUTTON_NORMAL(255, 55, 255, 255, 255);
+const Color CARD_BORDER(255, 80, 80, 80);
+const Color BUTTON_NORMAL(255, 55, 55, 55);
 const Color BUTTON_HOT(255, 48, 120, 235);
-const Color BUTTON_BORDER(255, 40, 255, 255, 255);
+const Color BUTTON_BORDER(255, 40, 40, 40);
 
 enum class InstallStep {
     Welcome,
@@ -103,8 +103,8 @@ void DrawButton(Graphics& g, const RectF& rect, const wchar_t* text, bool isHot,
     DrawRoundedRect(g, rect, 8.0f, bgColor, borderColor);
     
     if (isEnabled) {
-        FontFamily fontFamily(L"Segoe UI");
-        Font font(&fontFamily, 11.0f, FontStyleBold, UnitPoint);
+        Gdiplus::FontFamily fontFamily(L"Segoe UI");
+        Gdiplus::Font font(&fontFamily, 11.0f, FontStyleBold, UnitPoint);
         StringFormat format;
         format.SetAlignment(StringAlignmentCenter);
         format.SetLineAlignment(StringAlignmentCenter);
@@ -138,9 +138,9 @@ void RenderWelcome(Graphics& g, const RECT& client) {
     float centerY = client.bottom / 2.0f;
     
     // Logo/Title
-    FontFamily titleFamily(L"Segoe UI");
-    Font titleFont(&titleFamily, 32.0f, FontStyleBold, UnitPoint);
-    Font subtitleFont(&titleFamily, 14.0f, FontStyleRegular, UnitPoint);
+    Gdiplus::FontFamily titleFamily(L"Segoe UI");
+    Gdiplus::Font titleFont(&titleFamily, 32.0f, FontStyleBold, UnitPoint);
+    Gdiplus::Font subtitleFont(&titleFamily, 14.0f, FontStyleRegular, UnitPoint);
     
     StringFormat format;
     format.SetAlignment(StringAlignmentCenter);
@@ -158,7 +158,7 @@ void RenderWelcome(Graphics& g, const RECT& client) {
     RectF cardRect(centerX - 200, centerY - 20, 400, 200);
     DrawRoundedRect(g, cardRect, 16.0f, CARD_BG, CARD_BORDER);
     
-    Font featureFont(&titleFamily, 11.0f, FontStyleRegular, UnitPoint);
+    Gdiplus::Font featureFont(&titleFamily, 11.0f, FontStyleRegular, UnitPoint);
     SolidBrush featureBrush(Color(255, 200, 210, 220));
     
     const wchar_t* features[] = {
@@ -181,9 +181,9 @@ void RenderLicense(Graphics& g, const RECT& client) {
     float centerX = client.right / 2.0f;
     float centerY = client.bottom / 2.0f;
     
-    FontFamily titleFamily(L"Segoe UI");
-    Font titleFont(&titleFamily, 24.0f, FontStyleBold, UnitPoint);
-    Font textFont(&titleFamily, 11.0f, FontStyleRegular, UnitPoint);
+    Gdiplus::FontFamily titleFamily(L"Segoe UI");
+    Gdiplus::Font titleFont(&titleFamily, 24.0f, FontStyleBold, UnitPoint);
+    Gdiplus::Font textFont(&titleFamily, 11.0f, FontStyleRegular, UnitPoint);
     
     StringFormat format;
     format.SetAlignment(StringAlignmentCenter);
@@ -221,9 +221,9 @@ void RenderInstall(Graphics& g, const RECT& client) {
     float centerX = client.right / 2.0f;
     float centerY = client.bottom / 2.0f;
     
-    FontFamily titleFamily(L"Segoe UI");
-    Font titleFont(&titleFamily, 24.0f, FontStyleBold, UnitPoint);
-    Font textFont(&titleFamily, 11.0f, FontStyleRegular, UnitPoint);
+    Gdiplus::FontFamily titleFamily(L"Segoe UI");
+    Gdiplus::Font titleFont(&titleFamily, 24.0f, FontStyleBold, UnitPoint);
+    Gdiplus::Font textFont(&titleFamily, 11.0f, FontStyleRegular, UnitPoint);
     
     StringFormat format;
     format.SetAlignment(StringAlignmentCenter);
@@ -250,9 +250,9 @@ void RenderComplete(Graphics& g, const RECT& client) {
     float centerX = client.right / 2.0f;
     float centerY = client.bottom / 2.0f;
     
-    FontFamily titleFamily(L"Segoe UI");
-    Font titleFont(&titleFamily, 28.0f, FontStyleBold, UnitPoint);
-    Font textFont(&titleFamily, 12.0f, FontStyleRegular, UnitPoint);
+    Gdiplus::FontFamily titleFamily(L"Segoe UI");
+    Gdiplus::Font titleFont(&titleFamily, 28.0f, FontStyleBold, UnitPoint);
+    Gdiplus::Font textFont(&titleFamily, 12.0f, FontStyleRegular, UnitPoint);
     
     StringFormat format;
     format.SetAlignment(StringAlignmentCenter);
@@ -354,8 +354,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             g_state.installPath = GetDefaultInstallPath();
             
             // Enable dark title bar
-            DwmSetWindowAttribute(hwnd, 20, &(BOOL){TRUE}, sizeof(BOOL));
-            DwmSetWindowAttribute(hwnd, 19, &(BOOL){TRUE}, sizeof(BOOL));
+            BOOL darkMode = TRUE;
+            DwmSetWindowAttribute(hwnd, 20, &darkMode, sizeof(BOOL));
+            DwmSetWindowAttribute(hwnd, 19, &darkMode, sizeof(BOOL));
             
             return 0;
         }
