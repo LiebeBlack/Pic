@@ -30,6 +30,7 @@
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "advapi32.lib")
+#pragma comment(lib, "gdi32.lib")
 
 using namespace Gdiplus;
 

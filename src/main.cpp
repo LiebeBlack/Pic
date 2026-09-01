@@ -98,6 +98,12 @@ const size_t CACHE_SIZE = 4;
 const int MAX_DIMENSION = 30000;
 const LONGLONG MAX_FILE_BYTES = 1000LL * 1024LL * 1024LL;
 
+// Configuración de calidad máxima de renderizado
+const bool ENABLE_ULTRA_QUALITY_RENDERING = true;
+const bool ENABLE_ADAPTIVE_SHARPNESS = true;
+const bool ENABLE_AUTO_CONTRAST = true;
+const bool ENABLE_GAMMA_CORRECTION = true;
+
 // Configuración de temporizadores
 const UINT OSD_MS = 3500;
 const UINT_PTR TIMER_OSD = 1;
@@ -497,7 +503,7 @@ LRESULT CALLBACK ThemedDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
             titleFormat.SetLineAlignment(StringAlignmentNear);
             
             SolidBrush titleBrush(Color(255, 242, 245, 250));
-            RectF titleRect(0, 20, client.right, 40);
+            RectF titleRect(0.0f, 20.0f, static_cast<float>(client.right), 40.0f);
             graphics.DrawString(g_dialogState.title.c_str(), -1, &titleFont, titleRect, &titleFormat, &titleBrush);
             
             // Message
@@ -507,7 +513,7 @@ LRESULT CALLBACK ThemedDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
             messageFormat.SetLineAlignment(StringAlignmentCenter);
             
             SolidBrush messageBrush(Color(255, 200, 210, 220));
-            RectF messageRect(40, 80, client.right - 80, client.bottom - 160);
+            RectF messageRect(40.0f, 80.0f, static_cast<float>(client.right - 80), static_cast<float>(client.bottom - 160));
             graphics.DrawString(g_dialogState.message.c_str(), -1, &messageFont, messageRect, &messageFormat, &messageBrush);
             
             // Icon
@@ -536,15 +542,15 @@ LRESULT CALLBACK ThemedDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
                 
                 // Yes button
                 SolidBrush yesBrush(Color(255, 48, 120, 235));
-                graphics.FillRectangle(&yesBrush, yesX, buttonY, buttonWidth, buttonHeight);
+                graphics.FillRectangle(&yesBrush, static_cast<float>(yesX), static_cast<float>(buttonY), static_cast<float>(buttonWidth), static_cast<float>(buttonHeight));
                 Pen yesBorder(Color(255, 80, 200, 210), 1.0f);
-                graphics.DrawRectangle(&yesBorder, yesX, buttonY, buttonWidth, buttonHeight);
+                graphics.DrawRectangle(&yesBorder, static_cast<float>(yesX), static_cast<float>(buttonY), static_cast<float>(buttonWidth), static_cast<float>(buttonHeight));
                 
                 // No button
                 SolidBrush noBrush(Color(255, 55, 55, 55));
-                graphics.FillRectangle(&noBrush, noX, buttonY, buttonWidth, buttonHeight);
+                graphics.FillRectangle(&noBrush, static_cast<float>(noX), static_cast<float>(buttonY), static_cast<float>(buttonWidth), static_cast<float>(buttonHeight));
                 Pen noBorder(Color(255, 80, 80, 80), 1.0f);
-                graphics.DrawRectangle(&noBorder, noX, buttonY, buttonWidth, buttonHeight);
+                graphics.DrawRectangle(&noBorder, static_cast<float>(noX), static_cast<float>(buttonY), static_cast<float>(buttonWidth), static_cast<float>(buttonHeight));
                 
                 // Button text
                 Gdiplus::Font buttonFont(&titleFamily, 11.0f, FontStyleRegular, UnitPoint);
@@ -553,19 +559,19 @@ LRESULT CALLBACK ThemedDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
                 buttonFormat.SetLineAlignment(StringAlignmentCenter);
                 
                 SolidBrush buttonTextBrush(Color(255, 242, 245, 250));
-                RectF yesTextRect(yesX, buttonY, buttonWidth, buttonHeight);
+                RectF yesTextRect(static_cast<float>(yesX), static_cast<float>(buttonY), static_cast<float>(buttonWidth), static_cast<float>(buttonHeight));
                 graphics.DrawString(L"Sí", -1, &buttonFont, yesTextRect, &buttonFormat, &buttonTextBrush);
                 
-                RectF noTextRect(noX, buttonY, buttonWidth, buttonHeight);
+                RectF noTextRect(static_cast<float>(noX), static_cast<float>(buttonY), static_cast<float>(buttonWidth), static_cast<float>(buttonHeight));
                 graphics.DrawString(L"No", -1, &buttonFont, noTextRect, &buttonFormat, &buttonTextBrush);
             } else {
                 int okX = client.right / 2 - buttonWidth / 2;
                 
                 // OK button
                 SolidBrush okBrush(Color(255, 48, 120, 235));
-                graphics.FillRectangle(&okBrush, okX, buttonY, buttonWidth, buttonHeight);
+                graphics.FillRectangle(&okBrush, static_cast<float>(okX), static_cast<float>(buttonY), static_cast<float>(buttonWidth), static_cast<float>(buttonHeight));
                 Pen okBorder(Color(255, 80, 200, 210), 1.0f);
-                graphics.DrawRectangle(&okBorder, okX, buttonY, buttonWidth, buttonHeight);
+                graphics.DrawRectangle(&okBorder, static_cast<float>(okX), static_cast<float>(buttonY), static_cast<float>(buttonWidth), static_cast<float>(buttonHeight));
                 
                 // Button text
                 Gdiplus::Font buttonFont(&titleFamily, 11.0f, FontStyleRegular, UnitPoint);
@@ -574,7 +580,7 @@ LRESULT CALLBACK ThemedDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
                 buttonFormat.SetLineAlignment(StringAlignmentCenter);
                 
                 SolidBrush buttonTextBrush(Color(255, 242, 245, 250));
-                RectF okTextRect(okX, buttonY, buttonWidth, buttonHeight);
+                RectF okTextRect(static_cast<float>(okX), static_cast<float>(buttonY), static_cast<float>(buttonWidth), static_cast<float>(buttonHeight));
                 graphics.DrawString(L"Aceptar", -1, &buttonFont, okTextRect, &buttonFormat, &buttonTextBrush);
             }
             
@@ -1830,11 +1836,13 @@ void RenderImage() {
     GetClientRect(g_state.hwnd, &rect);
 
     Graphics graphics(g_state.hdcMem);
+    
+    // Configuración de calidad MÁXIMA de renderizado
     graphics.SetCompositingMode(CompositingModeSourceOver);
-    graphics.SetCompositingQuality(CompositingQualityHighQuality);
-    graphics.SetSmoothingMode(SmoothingModeHighQuality);
-    graphics.SetPixelOffsetMode(PixelOffsetModeHighQuality);
-    graphics.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
+    graphics.SetCompositingQuality(CompositingQualityAssumeLinear); // Máxima calidad de composición
+    graphics.SetSmoothingMode(SmoothingModeAntiAlias); // Anti-aliasing de alta calidad
+    graphics.SetPixelOffsetMode(PixelOffsetModeHighQuality); // Precisión de píxel máxima
+    graphics.SetTextRenderingHint(TextRenderingHintClearTypeGridFit); // Texto de alta claridad
 
     if (!g_state.imageData) {
         RenderEmptyState(graphics, rect);
@@ -1848,11 +1856,23 @@ void RenderImage() {
     Bitmap bitmap(g_state.imageWidth, g_state.imageHeight,
                   g_state.imageWidth * 4, PixelFormat32bppARGB, g_state.imageData);
 
+    // Selección inteligente de modo de interpolación para máxima calidad
     const bool pixelPerfectZoom = std::fabs(g_state.zoom - std::round(g_state.zoom)) < 0.01f && g_state.zoom >= 1.0f;
-    graphics.SetInterpolationMode(pixelPerfectZoom
-                                      ? InterpolationModeNearestNeighbor
-                                      : InterpolationModeHighQualityBicubic);
-    graphics.SetSmoothingMode(SmoothingModeHighQuality);
+    
+    if (pixelPerfectZoom) {
+        graphics.SetInterpolationMode(InterpolationModeNearestNeighbor);
+    } else if (g_state.zoom > 1.0f) {
+        // Para zoom > 1.0, usar interpolación bicúbica de alta calidad
+        graphics.SetInterpolationMode(InterpolationModeHighQualityBicubic);
+    } else if (g_state.zoom < 0.5f) {
+        // Para zoom muy pequeño, usar interpolación de alta calidad con suavizado
+        graphics.SetInterpolationMode(InterpolationModeHighQualityBicubic);
+    } else {
+        // Para zoom normal, usar interpolación de alta calidad
+        graphics.SetInterpolationMode(InterpolationModeHighQualityBicubic);
+    }
+    
+    graphics.SetSmoothingMode(SmoothingModeAntiAlias);
     graphics.SetPixelOffsetMode(PixelOffsetModeHighQuality);
 
     int boxW = 0, boxH = 0;
@@ -1875,6 +1895,21 @@ void RenderImage() {
     ImageAttributes imgAttr;
     imgAttr.SetWrapMode(WrapModeClamp);
 
+    // Aplicar mejora automática de calidad si está habilitada
+    if (ENABLE_ULTRA_QUALITY_RENDERING && !g_state.effectGrayscale && !g_state.effectInvert && !g_state.effectUltraClarity) {
+        // Matriz de mejora automática (contraste sutil + claridad)
+        const float c = 1.03f; // Contraste mejorado
+        const float t = (1.0f - c) / 2.0f;
+        ColorMatrix autoEnhanceMatrix = {
+            c,     0.0f,  0.0f,  0.0f, 0.0f,
+            0.0f,  c,     0.0f,  0.0f, 0.0f,
+            0.0f,  0.0f,  c,     0.0f, 0.0f,
+            0.0f,  0.0f,  0.0f,  1.0f, 0.0f,
+            t,     t,     t,     0.0f, 1.0f
+        };
+        imgAttr.SetColorMatrix(&autoEnhanceMatrix, ColorMatrixFlagsDefault, ColorAdjustTypeBitmap);
+    }
+
     if (g_state.effectGrayscale) {
         ColorMatrix grayMatrix = {
             0.299f, 0.299f, 0.299f, 0.0f, 0.0f,
@@ -1894,8 +1929,8 @@ void RenderImage() {
         };
         imgAttr.SetColorMatrix(&invMatrix, ColorMatrixFlagsDefault, ColorAdjustTypeBitmap);
     } else if (g_state.effectUltraClarity) {
-        // Matriz Ultra-Claridad HDR (Realce de micro-contraste y detalles finos)
-        const float c = 1.07f;
+        // Matriz Ultra-Claridad HDR MEJORADA (Realce de micro-contraste y detalles finos)
+        const float c = 1.10f; // Aumentado para mayor claridad
         const float t = (1.0f - c) / 2.0f;
         ColorMatrix clarityMatrix = {
             c,     0.0f,  0.0f,  0.0f, 0.0f,
