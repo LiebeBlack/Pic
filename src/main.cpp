@@ -647,7 +647,8 @@ LRESULT CALLBACK ThemedDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
                 graphics.DrawRectangle(&noBorder, static_cast<float>(noX), static_cast<float>(buttonY), static_cast<float>(buttonWidth), static_cast<float>(buttonHeight));
                 
                 // Button text
-                Gdiplus::Font buttonFont(&titleFamily, 11.0f, FontStyleRegular, UnitPoint);
+                Gdiplus::FontFamily btnFamily(L"Segoe UI");
+                Gdiplus::Font buttonFont(&btnFamily, 11.0f, FontStyleRegular, UnitPoint);
                 StringFormat buttonFormat;
                 buttonFormat.SetAlignment(StringAlignmentCenter);
                 buttonFormat.SetLineAlignment(StringAlignmentCenter);
@@ -668,7 +669,8 @@ LRESULT CALLBACK ThemedDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
                 graphics.DrawRectangle(&okBorder, static_cast<float>(okX), static_cast<float>(buttonY), static_cast<float>(buttonWidth), static_cast<float>(buttonHeight));
                 
                 // Button text
-                Gdiplus::Font buttonFont(&titleFamily, 11.0f, FontStyleRegular, UnitPoint);
+                Gdiplus::FontFamily btnFamily(L"Segoe UI");
+                Gdiplus::Font buttonFont(&btnFamily, 11.0f, FontStyleRegular, UnitPoint);
                 StringFormat buttonFormat;
                 buttonFormat.SetAlignment(StringAlignmentCenter);
                 buttonFormat.SetLineAlignment(StringAlignmentCenter);
@@ -1534,10 +1536,35 @@ unsigned char* DecodeWithStb(const std::wstring& filepath, int& width, int& heig
         int frameCount = 0;
         int tempWidth, tempHeight, tempChannels;
         
-        // Cargar GIF animado (stb_load_gif es más específico para GIFs)
-        unsigned char** frames = stbi_load_gif(utf8.c_str(), &tempWidth, &tempHeight, &tempChannels, &delays, &frameCount, 4);
+        // stbi only provides stbi_load_gif_from_memory, so read the file into memory first
+        // It returns a single flat buffer with all frames concatenated (frameSize = x * y * req_comp each)
+        unsigned char* gifData = nullptr;
+        {
+            FILE* gifFile = nullptr;
+#ifdef _WIN32
+            _wfopen_s(&gifFile, path.c_str(), L"rb");
+#else
+            gifFile = fopen(utf8.c_str(), "rb");
+#endif
+            if (gifFile) {
+                fseek(gifFile, 0, SEEK_END);
+                long gifSize = ftell(gifFile);
+                fseek(gifFile, 0, SEEK_SET);
+                if (gifSize > 0) {
+                    stbi_uc* gifBuffer = (stbi_uc*)malloc(gifSize);
+                    if (gifBuffer) {
+                        size_t readBytes = fread(gifBuffer, 1, gifSize, gifFile);
+                        if (readBytes == (size_t)gifSize) {
+                            gifData = stbi_load_gif_from_memory(gifBuffer, (int)gifSize, &delays, &tempWidth, &tempHeight, &frameCount, &tempChannels, 4);
+                        }
+                        free(gifBuffer);
+                    }
+                }
+                fclose(gifFile);
+            }
+        }
         
-        if (frames && frameCount > 1) {
+        if (gifData && frameCount > 1) {
             width = tempWidth;
             height = tempHeight;
             channels = tempChannels;
@@ -1554,19 +1581,19 @@ unsigned char* DecodeWithStb(const std::wstring& filepath, int& width, int& heig
                 g_state.gifFrameDelays.push_back(delays[i] ? delays[i] : 100); // Default 100ms
             }
             
-            // Copiar frames
+            // Copiar frames desde el buffer plano (cada frame = width * height * 4 bytes)
             g_state.gifFrameData.clear();
+            size_t frameSize = (size_t)width * height * 4;
             for (int i = 0; i < frameCount; i++) {
-                size_t frameBytes = width * height * 4;
-                unsigned char* frameCopy = new unsigned char[frameBytes];
-                memcpy(frameCopy, frames[i], frameBytes);
+                unsigned char* frameCopy = new unsigned char[frameSize];
+                memcpy(frameCopy, gifData + i * frameSize, frameSize);
                 ConvertRGBAtoBGRA(frameCopy, width, height, outHasAlpha);
                 g_state.gifFrameData.push_back(frameCopy);
             }
             
             // Usar el primer frame como imagen principal
-            size_t bytes = 0;
-            if (!SafePixelBytes(width, height, bytes)) {
+            size_t gifFrameBytes = 0;
+            if (!SafePixelBytes(width, height, gifFrameBytes)) {
                 // Limpiar memoria en caso de error
                 for (auto frame : g_state.gifFrameData) {
                     delete[] frame;
@@ -1574,16 +1601,16 @@ unsigned char* DecodeWithStb(const std::wstring& filepath, int& width, int& heig
                 g_state.gifFrameData.clear();
                 g_state.gifFrameDelays.clear();
                 g_state.isGifAnimated = false;
-                stbi_image_free(frames);
+                stbi_image_free(gifData);
                 free(delays);
                 return nullptr;
             }
             
-            unsigned char* firstFrameCopy = new unsigned char[bytes];
-            memcpy(firstFrameCopy, g_state.gifFrameData[0], bytes);
+            unsigned char* firstFrameCopy = new unsigned char[gifFrameBytes];
+            memcpy(firstFrameCopy, g_state.gifFrameData[0], gifFrameBytes);
             
             // Liberar memoria de stbi
-            stbi_image_free(frames);
+            stbi_image_free(gifData);
             free(delays);
             
             return firstFrameCopy;
@@ -1595,8 +1622,8 @@ unsigned char* DecodeWithStb(const std::wstring& filepath, int& width, int& heig
             g_state.gifFrameData.clear();
             g_state.gifFrameDelays.clear();
             
-            if (frames) {
-                stbi_image_free(frames);
+            if (gifData) {
+                stbi_image_free(gifData);
             }
             if (delays) {
                 free(delays);
@@ -1606,8 +1633,8 @@ unsigned char* DecodeWithStb(const std::wstring& filepath, int& width, int& heig
             unsigned char* staticPixels = stbi_load(utf8.c_str(), &width, &height, &channels, 4);
             if (!staticPixels) return nullptr;
             
-            size_t bytes = 0;
-            if (!SafePixelBytes(width, height, bytes)) {
+            size_t staticBytes = 0;
+            if (!SafePixelBytes(width, height, staticBytes)) {
                 stbi_image_free(staticPixels);
                 width = height = channels = 0;
                 return nullptr;
