@@ -2196,7 +2196,9 @@ void ActualSize() {
 void ZoomAt(float factor, int pivotX, int pivotY) {
     if (!g_state.imageData || !g_state.hwnd) return;
     const float oldZoom = g_state.zoom;
-    const float newZoom = std::max(MIN_ZOOM, std::min(MAX_ZOOM, oldZoom * factor));
+    float newZoom = std::max(MIN_ZOOM, std::min(MAX_ZOOM, oldZoom * factor));
+    // Auto-snap a 100% (1.0) cuando esté muy cerca para garantizar píxel perfecto nativo
+    if (std::fabs(newZoom - 1.0f) < 0.04f) newZoom = 1.0f;
     if (newZoom == oldZoom) return;
     g_state.fitMode = false;
     const float imageX = (static_cast<float>(pivotX) - g_state.offsetX) / oldZoom;
@@ -2475,12 +2477,15 @@ void RenderImage() {
     } else {
         graphics.SetCompositingQuality(CompositingQualityAssumeLinear);
         graphics.SetSmoothingMode(SmoothingModeAntiAlias);
-        graphics.SetPixelOffsetMode(PixelOffsetModeHighQuality);
         const bool pixelPerfectZoom = std::fabs(g_state.zoom - std::round(g_state.zoom)) < 0.01f && g_state.zoom >= 1.0f;
-        if (pixelPerfectZoom) {
+        if (pixelPerfectZoom || g_state.zoom > 3.5f) {
+            // Píxel perfecto (100%, 200%, etc.) o zoom profundo (> 350%): nitidez cristalina sin borrosidad
             graphics.SetInterpolationMode(InterpolationModeNearestNeighbor);
+            graphics.SetPixelOffsetMode(PixelOffsetModeHalf);
         } else {
+            // Escalas intermedias: máxima calidad bicúbica fotográfica sin artefactos
             graphics.SetInterpolationMode(InterpolationModeHighQualityBicubic);
+            graphics.SetPixelOffsetMode(PixelOffsetModeHighQuality);
         }
     }
     graphics.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
