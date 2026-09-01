@@ -2019,7 +2019,13 @@ bool SaveImageDialog(HWND hwnd) {
                   g_state.imageWidth * 4, PixelFormat32bppARGB, g_state.imageData);
     Bitmap output(boxW, boxH, PixelFormat32bppARGB);
     Graphics g(&output);
+    
+    // Configuración de calidad MÁXIMA para exportación
+    g.SetCompositingQuality(CompositingQualityAssumeLinear);
     g.SetInterpolationMode(InterpolationModeHighQualityBicubic);
+    g.SetSmoothingMode(SmoothingModeAntiAlias);
+    g.SetPixelOffsetMode(PixelOffsetModeHighQuality);
+    
     g.TranslateTransform(static_cast<REAL>(boxW) * 0.5f, static_cast<REAL>(boxH) * 0.5f);
     g.RotateTransform(static_cast<REAL>(g_state.currentRotation));
     if (g_state.currentFlipH || g_state.currentFlipV) {
@@ -2034,6 +2040,23 @@ bool SaveImageDialog(HWND hwnd) {
     CLSID encoderClsid{};
     if (ext == L"jpg" || ext == L"jpeg") {
         GetEncoderClsid(L"image/jpeg", &encoderClsid);
+        
+        // Configurar calidad JPEG máxima (100%)
+        EncoderParameters encoderParams;
+        encoderParams.Count = 1;
+        encoderParams.Parameter[0].Guid = EncoderQuality;
+        encoderParams.Parameter[0].Type = EncoderParameterValueTypeLong;
+        encoderParams.Parameter[0].NumberOfValues = 1;
+        ULONG quality = 100; // Calidad máxima
+        encoderParams.Parameter[0].Value = &quality;
+        
+        if (output.Save(outPath.c_str(), &encoderClsid, &encoderParams) == Ok) {
+            ShowOSD(L"Imagen guardada con éxito (Calidad 100%)");
+            return true;
+        } else {
+            ShowOSD(L"Error al guardar la imagen");
+            return false;
+        }
     } else if (ext == L"bmp") {
         GetEncoderClsid(L"image/bmp", &encoderClsid);
     } else {
