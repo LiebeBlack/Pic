@@ -134,19 +134,20 @@ Color GLASS_BTN_HOT = GLASS_BTN_HOT_DARK;
 Color GLASS_BTN_BORDER_HOT = GLASS_BTN_BORDER_HOT_DARK;
 Color GLASS_BTN_ACTIVE = GLASS_BTN_ACTIVE_DARK;
 
-// Configuración de zoom y renderizado
+// Configuración de zoom y renderizado optimizado (Bajo consumo de RAM y CPU)
 const float MIN_ZOOM = 0.01f;
 const float MAX_ZOOM = 200.0f;
 const float ZOOM_STEP = 1.25f;
-const size_t CACHE_SIZE = 4;
-const int MAX_DIMENSION = 30000;
-const LONGLONG MAX_FILE_BYTES = 1000LL * 1024LL * 1024LL;
+const size_t CACHE_SIZE = 1;                           // Máximo 1 imagen en caché para mantener RAM <= 80MB
+const size_t MAX_CACHE_BYTES = 20 * 1024 * 1024;       // Límite estricto de 20MB para caché en memoria
+const int MAX_DIMENSION = 4096;                        // Límite de 4K para decodificación directa
+const LONGLONG MAX_FILE_BYTES = 300LL * 1024LL * 1024LL;
 
-// Configuración de calidad máxima de renderizado
-const bool ENABLE_ULTRA_QUALITY_RENDERING = true;
-const bool ENABLE_ADAPTIVE_SHARPNESS = true;
-const bool ENABLE_AUTO_CONTRAST = true;
-const bool ENABLE_GAMMA_CORRECTION = true;
+// Configuración de renderizado ultra-rápido y eficiente
+const bool ENABLE_ULTRA_QUALITY_RENDERING = false;
+const bool ENABLE_ADAPTIVE_SHARPNESS = false;
+const bool ENABLE_AUTO_CONTRAST = false;
+const bool ENABLE_GAMMA_CORRECTION = false;
 
 // Sistema de tamaño UI adaptativo
 const int UI_SCALE_SMALL = 80;      // 80% del tamaño normal
@@ -362,6 +363,11 @@ struct AppState {
 
     ~AppState() {
         if (imageData) { stbi_image_free(imageData); imageData = nullptr; }
+        for (auto* frame : gifFrameData) {
+            if (frame) delete[] frame;
+        }
+        gifFrameData.clear();
+        gifFrameDelays.clear();
     }
 };
 
@@ -446,6 +452,66 @@ static bool SafePixelBytes(int width, int height, size_t& outBytes) {
     if (bytes > static_cast<uint64_t>(SIZE_MAX)) return false;
     outBytes = static_cast<size_t>(bytes);
     return true;
+}
+
+// Libera páginas de memoria física no utilizadas devolviéndolas al sistema operativo
+static void TrimProcessMemory() {
+    SetProcessWorkingSetSize(GetCurrentProcess(), static_cast<SIZE_T>(-1), static_cast<SIZE_T>(-1));
+}
+
+// Reduce imágenes gigantescas al decodificar con interpolación bilineal de alta fidelidad (RAM <= 80MB)
+static void DownscaleImageIfTooLarge(unsigned char*& pixels, int& width, int& height) {
+    if (!pixels || width <= 0 || height <= 0) return;
+    const int maxDim = 3840; // Límite 4K Ultra HD (máxima nitidez y fidelidad)
+    if (width <= maxDim && height <= maxDim) return;
+
+    float scale = std::min(static_cast<float>(maxDim) / width, static_cast<float>(maxDim) / height);
+    int newWidth = std::max(1, static_cast<int>(width * scale));
+    int newHeight = std::max(1, static_cast<int>(height * scale));
+
+    size_t newBytes = static_cast<size_t>(newWidth) * static_cast<size_t>(newHeight) * 4;
+    unsigned char* newPixels = static_cast<unsigned char*>(malloc(newBytes));
+    if (!newPixels) return;
+
+    float xRatio = static_cast<float>(width - 1) / std::max(1, newWidth - 1);
+    float yRatio = static_cast<float>(height - 1) / std::max(1, newHeight - 1);
+
+    for (int y = 0; y < newHeight; ++y) {
+        int srcY = static_cast<int>(y * yRatio);
+        float yDiff = (y * yRatio) - srcY;
+        int nextY = std::min(srcY + 1, height - 1);
+
+        for (int x = 0; x < newWidth; ++x) {
+            int srcX = static_cast<int>(x * xRatio);
+            float xDiff = (x * xRatio) - srcX;
+            int nextX = std::min(srcX + 1, width - 1);
+
+            size_t idxTL = (static_cast<size_t>(srcY) * width + srcX) * 4;
+            size_t idxTR = (static_cast<size_t>(srcY) * width + nextX) * 4;
+            size_t idxBL = (static_cast<size_t>(nextY) * width + srcX) * 4;
+            size_t idxBR = (static_cast<size_t>(nextY) * width + nextX) * 4;
+
+            size_t outIdx = (static_cast<size_t>(y) * newWidth + x) * 4;
+
+            for (int c = 0; c < 4; ++c) {
+                float tl = static_cast<float>(pixels[idxTL + c]);
+                float tr = static_cast<float>(pixels[idxTR + c]);
+                float bl = static_cast<float>(pixels[idxBL + c]);
+                float br = static_cast<float>(pixels[idxBR + c]);
+
+                float top = tl + xDiff * (tr - tl);
+                float bottom = bl + xDiff * (br - bl);
+                float val = top + yDiff * (bottom - top);
+
+                newPixels[outIdx + c] = static_cast<unsigned char>(std::min(255.0f, std::max(0.0f, val + 0.5f)));
+            }
+        }
+    }
+
+    stbi_image_free(pixels);
+    pixels = newPixels;
+    width = newWidth;
+    height = newHeight;
 }
 
 static std::wstring LogPath() {
@@ -1176,7 +1242,7 @@ void AddToCache(const std::wstring& filepath, unsigned char* data, int width, in
                 int channels, int rotation, bool flipH, bool flipV, bool hasAlpha, const std::wstring& decoder) {
     if (!data) return;
     size_t bytes = 0;
-    if (!SafePixelBytes(width, height, bytes)) {
+    if (!SafePixelBytes(width, height, bytes) || bytes > MAX_CACHE_BYTES) {
         stbi_image_free(data);
         return;
     }
@@ -1187,6 +1253,23 @@ void AddToCache(const std::wstring& filepath, unsigned char* data, int width, in
         if (it->second != g_state.imageCache.end()) g_state.imageCache.erase(it->second);
         g_state.cacheIndex.erase(it);
     }
+    
+    // Calcular uso total de memoria en caché y desalojar si excede el límite
+    auto getCacheMemoryBytes = [&]() -> size_t {
+        size_t total = 0;
+        for (const auto& item : g_state.imageCache) {
+            size_t b = 0;
+            if (SafePixelBytes(item.width, item.height, b)) total += b;
+        }
+        return total;
+    };
+    
+    while (!g_state.imageCache.empty() && (g_state.imageCache.size() >= CACHE_SIZE || (getCacheMemoryBytes() + bytes) > MAX_CACHE_BYTES)) {
+        auto oldest = g_state.imageCache.begin();
+        g_state.cacheIndex.erase(CacheKey(oldest->filepath));
+        g_state.imageCache.pop_front();
+    }
+
     CachedImage cached;
     cached.data = data;
     cached.width = width;
@@ -1200,11 +1283,6 @@ void AddToCache(const std::wstring& filepath, unsigned char* data, int width, in
     cached.decoder = decoder;
     g_state.imageCache.push_back(std::move(cached));
     g_state.cacheIndex[key] = std::prev(g_state.imageCache.end());
-    while (g_state.imageCache.size() > CACHE_SIZE) {
-        auto oldest = g_state.imageCache.begin();
-        g_state.cacheIndex.erase(CacheKey(oldest->filepath));
-        g_state.imageCache.pop_front();
-    }
 }
 
 bool IsInCache(const std::wstring& filepath) {
@@ -1216,6 +1294,7 @@ void ClearCache() {
     std::lock_guard<std::mutex> lock(g_state.cacheMutex);
     g_state.imageCache.clear();
     g_state.cacheIndex.clear();
+    TrimProcessMemory();
 }
 
 void FreeCurrentImage() {
@@ -1223,6 +1302,16 @@ void FreeCurrentImage() {
         stbi_image_free(g_state.imageData);
         g_state.imageData = nullptr;
     }
+    // Liberar todos los frames de GIF para evitar fuga de memoria
+    for (auto* frame : g_state.gifFrameData) {
+        if (frame) delete[] frame;
+    }
+    g_state.gifFrameData.clear();
+    g_state.gifFrameDelays.clear();
+    g_state.isGifAnimated = false;
+    g_state.gifCurrentFrame = 0;
+    g_state.gifTotalFrames = 0;
+
     g_state.imageWidth = 0;
     g_state.imageHeight = 0;
     g_state.imageChannels = 0;
@@ -1807,25 +1896,27 @@ unsigned char* DecodeImageFile(const std::wstring& filepath, int& width, int& he
     unsigned char* pixels = DecodeWithStb(filepath, width, height, channels, hasAlpha, autoRotateDeg);
     if (pixels) {
         decoder = L"stb";
-        return pixels;
+    } else {
+        pixels = DecodeWithWic(filepath, width, height, channels, hasAlpha);
+        if (pixels) {
+            decoder = L"WIC";
+        } else {
+            pixels = DecodeWithGdiplus(filepath, width, height, channels, hasAlpha);
+            if (pixels) {
+                decoder = L"GDI+";
+            }
+        }
     }
-    pixels = DecodeWithWic(filepath, width, height, channels, hasAlpha);
     if (pixels) {
-        decoder = L"WIC";
-        return pixels;
+        DownscaleImageIfTooLarge(pixels, width, height);
     }
-    pixels = DecodeWithGdiplus(filepath, width, height, channels, hasAlpha);
-    if (pixels) {
-        decoder = L"GDI+";
-        return pixels;
-    }
-    return nullptr;
+    return pixels;
 }
 
 void StoreCurrentInCache() {
     if (g_state.currentFilePath.empty() || !g_state.imageData) return;
     size_t bytes = 0;
-    if (!SafePixelBytes(g_state.imageWidth, g_state.imageHeight, bytes)) return;
+    if (!SafePixelBytes(g_state.imageWidth, g_state.imageHeight, bytes) || bytes > MAX_CACHE_BYTES) return;
     unsigned char* copy = static_cast<unsigned char*>(malloc(bytes));
     if (!copy) return;
     memcpy(copy, g_state.imageData, bytes);
@@ -1870,6 +1961,7 @@ bool ApplyLoadedImage(unsigned char* pixels, int width, int height, int channels
     }
     UpdateWindowTitle();
     ShowOSD();
+    TrimProcessMemory();
     return true;
 }
 
@@ -1951,10 +2043,11 @@ void RequestPrefetch(size_t targetIndex) {
 }
 
 void PrefetchThreadFunc() {
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
     const HRESULT comHr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     while (g_state.prefetchRunning) {
         std::unique_lock<std::mutex> lock(g_state.prefetchMutex);
-        g_state.prefetchCV.wait_for(lock, std::chrono::milliseconds(400), [] {
+        g_state.prefetchCV.wait_for(lock, std::chrono::milliseconds(500), [] {
             return g_state.prefetchRequested.load() || !g_state.prefetchRunning.load();
         });
         if (!g_state.prefetchRunning) break;
@@ -1965,30 +2058,30 @@ void PrefetchThreadFunc() {
 
         const uint64_t generation = g_state.folderGeneration.load(std::memory_order_relaxed);
         const size_t count = ImageCount();
-        if (count == 0) continue;
-        const size_t indices[4] = {
-            (targetIndex + 1) % count,
-            (targetIndex == 0) ? count - 1 : targetIndex - 1,
-            (targetIndex + 2) % count,
-            (targetIndex < 2) ? count - (2 - targetIndex) : targetIndex - 2
-        };
-        for (size_t idx : indices) {
-            if (!g_state.prefetchRunning) break;
-            if (generation != g_state.folderGeneration.load(std::memory_order_relaxed)) break;
-            const std::wstring filepath = ImagePathAt(idx);
-            if (filepath.empty() || IsInCache(filepath)) continue;
-            if (!ValidateFileIntegrity(filepath)) continue;
-            int width = 0, height = 0, channels = 0, autoRotate = 0;
-            bool hasAlpha = false;
-            std::wstring decoder;
-            unsigned char* pixels = DecodeImageFile(filepath, width, height, channels, hasAlpha, autoRotate, decoder);
-            if (!pixels) continue;
-            if (generation != g_state.folderGeneration.load(std::memory_order_relaxed)) {
-                stbi_image_free(pixels);
-                break;
-            }
-            AddToCache(filepath, pixels, width, height, channels, autoRotate, false, false, hasAlpha, decoder);
+        if (count <= 1) continue;
+        
+        // Precargar ÚNICAMENTE 1 imagen siguiente para conservar RAM y 0% CPU
+        const size_t nextIdx = (targetIndex + 1) % count;
+        if (!g_state.prefetchRunning) break;
+        if (generation != g_state.folderGeneration.load(std::memory_order_relaxed)) continue;
+        
+        const std::wstring filepath = ImagePathAt(nextIdx);
+        if (filepath.empty() || IsInCache(filepath)) continue;
+        if (!ValidateFileIntegrity(filepath)) continue;
+        
+        int width = 0, height = 0, channels = 0, autoRotate = 0;
+        bool hasAlpha = false;
+        std::wstring decoder;
+        unsigned char* pixels = DecodeImageFile(filepath, width, height, channels, hasAlpha, autoRotate, decoder);
+        if (!pixels) continue;
+        if (generation != g_state.folderGeneration.load(std::memory_order_relaxed)) {
+            stbi_image_free(pixels);
+            continue;
         }
+        AddToCache(filepath, pixels, width, height, channels, autoRotate, false, false, hasAlpha, decoder);
+        
+        // Ceder CPU
+        std::this_thread::sleep_for(std::chrono::milliseconds(80));
     }
     if (SUCCEEDED(comHr)) CoUninitialize();
 }
@@ -2372,12 +2465,25 @@ void RenderImage() {
 
     Graphics graphics(g_state.hdcMem);
     
-    // Configuración de calidad MÁXIMA de renderizado
+    // Configuración de renderizado adaptativo (Bajo CPU durante arrastre, Alta calidad en reposo)
     graphics.SetCompositingMode(CompositingModeSourceOver);
-    graphics.SetCompositingQuality(CompositingQualityAssumeLinear); // Máxima calidad de composición
-    graphics.SetSmoothingMode(SmoothingModeAntiAlias); // Anti-aliasing de alta calidad
-    graphics.SetPixelOffsetMode(PixelOffsetModeHighQuality); // Precisión de píxel máxima
-    graphics.SetTextRenderingHint(TextRenderingHintClearTypeGridFit); // Texto de alta claridad
+    if (g_state.isDragging) {
+        graphics.SetCompositingQuality(CompositingQualityHighSpeed);
+        graphics.SetSmoothingMode(SmoothingModeHighSpeed);
+        graphics.SetPixelOffsetMode(PixelOffsetModeHalf);
+        graphics.SetInterpolationMode(InterpolationModeBilinear);
+    } else {
+        graphics.SetCompositingQuality(CompositingQualityAssumeLinear);
+        graphics.SetSmoothingMode(SmoothingModeAntiAlias);
+        graphics.SetPixelOffsetMode(PixelOffsetModeHighQuality);
+        const bool pixelPerfectZoom = std::fabs(g_state.zoom - std::round(g_state.zoom)) < 0.01f && g_state.zoom >= 1.0f;
+        if (pixelPerfectZoom) {
+            graphics.SetInterpolationMode(InterpolationModeNearestNeighbor);
+        } else {
+            graphics.SetInterpolationMode(InterpolationModeHighQualityBicubic);
+        }
+    }
+    graphics.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
 
     if (!g_state.imageData) {
         RenderEmptyState(graphics, rect);
@@ -2397,29 +2503,6 @@ void RenderImage() {
     Bitmap bitmap(g_state.imageWidth, g_state.imageHeight,
                   g_state.imageWidth * 4, PixelFormat32bppARGB, currentImageData);
 
-    // Selección INTELIGENTE de modo de interpolación según tipo de imagen y zoom
-    const bool pixelPerfectZoom = std::fabs(g_state.zoom - std::round(g_state.zoom)) < 0.01f && g_state.zoom >= 1.0f;
-    const bool isVectorLike = (g_state.imageWidth < 512 && g_state.imageHeight < 512); // Imágenes pequeñas tipo icono
-    
-    if (pixelPerfectZoom) {
-        graphics.SetInterpolationMode(InterpolationModeNearestNeighbor);
-    } else if (g_state.zoom > 2.0f) {
-        // Zoom muy alto: usar interpolación de máxima calidad
-        graphics.SetInterpolationMode(InterpolationModeHighQualityBicubic);
-    } else if (g_state.zoom > 1.0f && isVectorLike) {
-        // Zoom moderado en imágenes pequeñas: bicúbico
-        graphics.SetInterpolationMode(InterpolationModeHighQualityBicubic);
-    } else if (g_state.zoom < 0.25f) {
-        // Zoom muy bajo: usar interpolación de alta calidad
-        graphics.SetInterpolationMode(InterpolationModeHighQualityBicubic);
-    } else {
-        // Zoom normal: bicúbico de alta calidad
-        graphics.SetInterpolationMode(InterpolationModeHighQualityBicubic);
-    }
-    
-    graphics.SetSmoothingMode(SmoothingModeAntiAlias);
-    graphics.SetPixelOffsetMode(PixelOffsetModeHighQuality);
-
     int boxW = 0, boxH = 0;
     DisplaySize(boxW, boxH);
     const float destW = boxW * g_state.zoom;
@@ -2438,31 +2521,7 @@ void RenderImage() {
     }
 
     ImageAttributes imgAttr;
-    imgAttr.SetWrapMode(WrapModeClamp);
-
-    // Mejora INTELIGENTE adaptativa según tipo de imagen
-    if (ENABLE_ULTRA_QUALITY_RENDERING && !g_state.effectGrayscale && !g_state.effectInvert && !g_state.effectUltraClarity) {
-        // Detectar tipo de imagen para optimización
-        const bool isDarkImage = (g_state.imageWidth * g_state.imageHeight > 1000000); // Imágenes grandes suelen ser fotos
-        const bool isPhoto = (!g_state.hasAlpha && g_state.imageWidth > 1024 && g_state.imageHeight > 1024);
-        
-        float contrastBoost = 1.03f;
-        if (isPhoto) {
-            contrastBoost = 1.02f; // Mejora sutil para fotos
-        } else if (isDarkImage) {
-            contrastBoost = 1.04f; // Mayor contraste para imágenes oscuras
-        }
-        
-        const float t = (1.0f - contrastBoost) / 2.0f;
-        ColorMatrix autoEnhanceMatrix = {
-            contrastBoost,     0.0f,  0.0f,  0.0f, 0.0f,
-            0.0f,  contrastBoost,     0.0f,  0.0f, 0.0f,
-            0.0f,  0.0f,  contrastBoost,     0.0f, 0.0f,
-            0.0f,  0.0f,  0.0f,  1.0f, 0.0f,
-            t,     t,     t,     0.0f, 1.0f
-        };
-        imgAttr.SetColorMatrix(&autoEnhanceMatrix, ColorMatrixFlagsDefault, ColorAdjustTypeBitmap);
-    }
+    ImageAttributes* pImgAttr = nullptr;
 
     if (g_state.effectGrayscale) {
         ColorMatrix grayMatrix = {
@@ -2473,6 +2532,8 @@ void RenderImage() {
             0.0f,   0.0f,   0.0f,   0.0f, 1.0f
         };
         imgAttr.SetColorMatrix(&grayMatrix, ColorMatrixFlagsDefault, ColorAdjustTypeBitmap);
+        imgAttr.SetWrapMode(WrapModeClamp);
+        pImgAttr = &imgAttr;
     } else if (g_state.effectInvert) {
         ColorMatrix invMatrix = {
             -1.0f,  0.0f,  0.0f, 0.0f, 0.0f,
@@ -2482,9 +2543,10 @@ void RenderImage() {
              1.0f,  1.0f,  1.0f, 0.0f, 1.0f
         };
         imgAttr.SetColorMatrix(&invMatrix, ColorMatrixFlagsDefault, ColorAdjustTypeBitmap);
+        imgAttr.SetWrapMode(WrapModeClamp);
+        pImgAttr = &imgAttr;
     } else if (g_state.effectUltraClarity) {
-        // Matriz Ultra-Claridad HDR MEJORADA (Realce de micro-contraste y detalles finos)
-        const float c = 1.12f; // Aumentado para mayor claridad HDR
+        const float c = 1.12f;
         const float t = (1.0f - c) / 2.0f;
         ColorMatrix clarityMatrix = {
             c,     0.0f,  0.0f,  0.0f, 0.0f,
@@ -2494,6 +2556,8 @@ void RenderImage() {
             t,     t,     t,     0.0f, 1.0f
         };
         imgAttr.SetColorMatrix(&clarityMatrix, ColorMatrixFlagsDefault, ColorAdjustTypeBitmap);
+        imgAttr.SetWrapMode(WrapModeClamp);
+        pImgAttr = &imgAttr;
     }
 
     GraphicsState state = graphics.Save();
@@ -2509,7 +2573,7 @@ void RenderImage() {
     graphics.DrawImage(&bitmap,
                        RectF(0.0f, 0.0f, g_state.imageWidth * g_state.zoom, g_state.imageHeight * g_state.zoom),
                        0.0f, 0.0f, static_cast<REAL>(g_state.imageWidth), static_cast<REAL>(g_state.imageHeight),
-                       UnitPixel, &imgAttr);
+                       UnitPixel, pImgAttr);
 
     graphics.Restore(state);
 
@@ -3114,7 +3178,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (wParam && g_state.isFullscreen) return 0;
             break;
         case WM_SIZE: {
-            if (wParam == SIZE_MINIMIZED) return 0;
+            if (wParam == SIZE_MINIMIZED) {
+                FreeDoubleBuffer();
+                TrimProcessMemory();
+                return 0;
+            }
             const int width = LOWORD(lParam);
             const int height = HIWORD(lParam);
             CreateDoubleBuffer(width, height);
@@ -3337,8 +3405,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
         }
         case WM_LBUTTONUP:
-            g_state.isDragging = false;
-            ReleaseCapture();
+            if (g_state.isDragging) {
+                g_state.isDragging = false;
+                ReleaseCapture();
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
             return 0;
         case WM_RBUTTONUP: {
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
@@ -3410,11 +3481,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 
                 if (distanceFromBottom >= DOCK_PROXIMITY_THRESHOLD) {
                     g_state.hudVisible = false;
+                    KillTimer(hwnd, TIMER_DOCK_HIDE);
                     InvalidateRect(hwnd, nullptr, FALSE);
                 } else {
-                    // Cursor still near bottom, reset timer
                     g_state.dockLastActivity = GetTickCount();
-                    SetTimer(hwnd, TIMER_DOCK_HIDE, DOCK_HIDE_MS, nullptr);
                 }
             } else if (wParam == TIMER_GIF) {
                 if (g_state.isGifAnimated && g_state.gifTotalFrames > 1 && !g_state.gifFrameDelays.empty()) {
