@@ -486,7 +486,7 @@ LRESULT CALLBACK ThemedDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
             graphics.FillRectangle(&bgBrush, 0, 0, client.right, client.bottom);
             
             // Border
-            Pen borderPen(Color(255, 80, 200, 210, 230), 1.0f);
+            Pen borderPen(Color(255, 80, 200, 210), 1.0f);
             graphics.DrawRectangle(&borderPen, 0, 0, client.right - 1, client.bottom - 1);
             
             // Title
@@ -537,7 +537,7 @@ LRESULT CALLBACK ThemedDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
                 // Yes button
                 SolidBrush yesBrush(Color(255, 48, 120, 235));
                 graphics.FillRectangle(&yesBrush, yesX, buttonY, buttonWidth, buttonHeight);
-                Pen yesBorder(Color(255, 80, 200, 210, 230), 1.0f);
+                Pen yesBorder(Color(255, 80, 200, 210), 1.0f);
                 graphics.DrawRectangle(&yesBorder, yesX, buttonY, buttonWidth, buttonHeight);
                 
                 // No button
@@ -564,7 +564,7 @@ LRESULT CALLBACK ThemedDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
                 // OK button
                 SolidBrush okBrush(Color(255, 48, 120, 235));
                 graphics.FillRectangle(&okBrush, okX, buttonY, buttonWidth, buttonHeight);
-                Pen okBorder(Color(255, 80, 200, 210, 230), 1.0f);
+                Pen okBorder(Color(255, 80, 200, 210), 1.0f);
                 graphics.DrawRectangle(&okBorder, okX, buttonY, buttonWidth, buttonHeight);
                 
                 // Button text
