@@ -1,18 +1,18 @@
 # ARTPICST
 
-Visor de imágenes premium nativo para Windows (C++ / Win32) con interfaz acrílica moderna, renderizado de máxima fidelidad (GDI+, WIC, stb_image), orientación EXIF automática, soporte para transparencias y sistema de actualizaciones integrado ultra-ligero.
+Visor de imágenes premium nativo para Windows (C++ / Win32) con interfaz acrílica moderna, renderizado de máxima fidelidad (GDI+, WIC, stb_image), orientación EXIF automática, soporte para transparencias y consumo ultra-ligero de recursos (RAM ≤ 80MB).
 
 ## 🎨 Características Premium
 
 - **Interfaz Glassmorphism/Acrílica**: Diseño moderno con efectos de transparencia, blur premium y colores vibrantes inspirados en Windows 11
 - **Renderizado de Máxima Calidad**: Interpolación bicúbica de alta precisión con modo de envoltura clamp y modo 1:1 pixel-perfect
 - **Ultra-Claridad HDR**: Modo de realce de detalles finos y micro-contraste
-- **Zoom Extendido**: Hasta 200x de ampliación para ver los detalles más finos
+- **Zoom Extendido y Píxel Perfecto**: Auto-snap a 100% y ampliación ultra-nítida
 - **Fondo Ajedrezado Inteligente**: Visualización clara de transparencias en PNG, WebP, ICO y GIF
 - **Orientación EXIF Automática**: Detecta y corrige la orientación de fotos de móviles y cámaras
 - **Navegación Avanzada**: Flechas ↑↓ para zoom, ←→ para imágenes, arrastrar para pan
 - **Instalador Premium**: Interfaz gráfica moderna con asistente paso a paso
-- **Actualizador Ultra-Ligero**: Menos de 1 MB en C++ nativo (reducido de 8.3 MB)
+- **Consumo Ultra-Ligero**: Huella de memoria optimizada (RAM < 80 MB, CPU ~0%)
 
 ## 🚀 Formatos Soportados
 
@@ -50,7 +50,6 @@ Visor de imágenes premium nativo para Windows (C++ / Win32) con interfaz acríl
 | Copiar ruta | `Ctrl + Shift + C` |
 | Abrir archivo | `Ctrl + O` |
 | Abrir carpeta | `Ctrl + Shift + O` |
-| Buscar actualizaciones | `Ctrl + U` |
 | **Otros** | |
 | Panorámica (Pan) | Clic izquierdo + arrastrar |
 | Menú contextual | Clic derecho |
@@ -78,8 +77,6 @@ build_mingw.bat
 Después de la compilación exitosa en `dist\`:
 - `artpicst.exe` - Programa principal premium
 - `artpicst_installer.exe` - Instalador con interfaz moderna
-- `auto_updater.exe` - Actualizador C++ nativo (< 1 MB)
-- `auto_updater.bat` - Script actualizador alternativo
 - `artpicst.ico` - Icono de la aplicación
 - `version.json` - Información de versión
 
@@ -95,21 +92,10 @@ artpicst.exe --register
 artpicst.exe --unregister
 ```
 
-## 🔄 Sistema de Actualización
-
-El actualizador usa la API de GitHub para:
-- Detectar nuevas versiones automáticamente
-- Descargar el instalador desde GitHub Releases
-- Ejecutar la instalación silenciosa
-- Actualizar el registro de Windows
-
-**Versión C++ Nativa**: Menos de 1 MB, sin dependencias, ejecutable Windows nativo.
-
 ## 🏗️ Arquitectura
 
-- **Main Program**: C++ nativo con Win32 API, GDI+, WIC, stb_image
+- **Main Program**: C++ nativo con Win32 API, GDI+, WIC, stb_image (ultra-optimizado)
 - **Installer**: C++ con GDI+ para interfaz gráfica premium
-- **Updater**: C++ nativo con WinHTTP para GitHub API (alternativa: Python/Batch)
 
 ## 📋 Requisitos
 

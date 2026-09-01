@@ -615,9 +615,6 @@ LRESULT CALLBACK ThemedDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
         case WM_CREATE: {
             g_dialogState.hwnd = hwnd;
             EnableDarkTitleBar(hwnd);
-            
-            // Initialize GDI+ for dialog
-            GdiplusStartup(&g_dialogState.gdiplusToken, &g_dialogState.gdiplusStartupInput, nullptr);
             return 0;
         }
         case WM_PAINT: {
@@ -752,11 +749,6 @@ LRESULT CALLBACK ThemedDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
         case WM_ERASEBKGND:
             return TRUE;
         case WM_DESTROY:
-            if (g_dialogState.gdiplusToken) {
-                GdiplusShutdown(g_dialogState.gdiplusToken);
-                g_dialogState.gdiplusToken = 0;
-            }
-            PostQuitMessage(0);
             return 0;
         case WM_LBUTTONDOWN: {
             int x = GET_X_LPARAM(lParam);
@@ -776,16 +768,16 @@ LRESULT CALLBACK ThemedDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
                 
                 if (x >= yesX && x <= yesX + buttonWidth && y >= buttonY && y <= buttonY + buttonHeight) {
                     g_dialogState.result = IDYES;
-                    PostMessage(hwnd, WM_CLOSE, 0, 0);
+                    DestroyWindow(hwnd);
                 } else if (x >= noX && x <= noX + buttonWidth && y >= buttonY && y <= buttonY + buttonHeight) {
                     g_dialogState.result = IDNO;
-                    PostMessage(hwnd, WM_CLOSE, 0, 0);
+                    DestroyWindow(hwnd);
                 }
             } else {
                 int okX = client.right / 2 - buttonWidth / 2;
                 if (x >= okX && x <= okX + buttonWidth && y >= buttonY && y <= buttonY + buttonHeight) {
                     g_dialogState.result = IDOK;
-                    PostMessage(hwnd, WM_CLOSE, 0, 0);
+                    DestroyWindow(hwnd);
                 }
             }
             return 0;
@@ -857,10 +849,14 @@ int ShowThemedMessageBox(HWND parent, const wchar_t* title, const wchar_t* messa
     InvalidateRect(hwnd, nullptr, TRUE);
     UpdateWindow(hwnd);
     
-    MSG msg;
-    while (GetMessage(&msg, nullptr, 0, 0)) {
+    MSG msg{};
+    while (IsWindow(hwnd) && GetMessageW(&msg, nullptr, 0, 0)) {
+        if (msg.message == WM_QUIT) {
+            PostQuitMessage(static_cast<int>(msg.wParam));
+            break;
+        }
         TranslateMessage(&msg);
-        DispatchMessage(&msg);
+        DispatchMessageW(&msg);
     }
     
     EnableWindow(parent ? parent : GetActiveWindow(), TRUE);
@@ -1042,79 +1038,63 @@ TextSizeInfo CalculateOptimalTextSize(const wchar_t* text, int maxWidth, int max
         return info;
     }
     
-    // Inicializar GDI+ temporalmente si no está inicializado
-    ULONG_PTR gdiplusToken = 0;
-    GdiplusStartupInput gdiplusStartupInput;
-    gdiplusStartupInput.GdiplusVersion = 1;
-    bool gdiplusInitialized = (GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, nullptr) == Ok);
+    Graphics graphics(hdc);
     
-    if (gdiplusInitialized) {
-        Graphics graphics(hdc);
-        
-        // Calcular longitud del texto y estimar líneas
-        size_t textLength = wcslen(text);
-        int estimatedLines = 1;
-        for (size_t i = 0; i < textLength; i++) {
-            if (text[i] == L'\n') estimatedLines++;
-        }
-        
-        // Ajustar tamaño de fuente según longitud del texto
-        float fontSize = 11.0f; // Base
-        if (textLength < 50) {
-            fontSize = 14.0f; // Texto corto - fuente más grande
-        } else if (textLength < 150) {
-            fontSize = 12.0f; // Texto medio
-        } else if (textLength < 300) {
-            fontSize = 11.0f; // Texto largo
-        } else {
-            fontSize = 10.0f; // Texto muy largo - fuente más pequeña
-        }
-        
-        // Ajustar según escala UI
-        fontSize = fontSize * g_uiScale / 100.0f;
-        
-        // Medir texto con diferentes tamaños
-        FontFamily fontFamily(fontName);
-        Font font(&fontFamily, fontSize, FontStyleRegular, UnitPoint);
-        StringFormat format;
-        format.SetAlignment(StringAlignmentCenter);
-        format.SetLineAlignment(StringAlignmentCenter);
-        format.SetTrimming(StringTrimmingEllipsisCharacter);
-        
-        RectF layoutRect(0.0f, 0.0f, static_cast<float>(maxWidth), static_cast<float>(maxHeight));
-        RectF boundsRect;
-        
-        if (graphics.MeasureString(text, -1, &font, layoutRect, &format, &boundsRect) == Ok) {
-            info.optimalWidth = static_cast<int>(boundsRect.Width + 80); // Padding
-            info.optimalHeight = static_cast<int>(boundsRect.Height + 100); // Espacio para título y botones
-            info.lineCount = estimatedLines;
-            
-            // Verificar si necesita scrolling
-            if (boundsRect.Height > maxHeight - 100) {
-                info.needsScrolling = true;
-                info.optimalHeight = maxHeight;
-            }
-            
-            // Ajustar ancho mínimo y máximo
-            info.optimalWidth = std::max(400, std::min(info.optimalWidth, 800));
-            info.optimalHeight = std::max(250, std::min(info.optimalHeight, 600));
-        } else {
-            // Fallback si falla la medición
-            info.optimalWidth = 500;
-            info.optimalHeight = 300 + (estimatedLines * 20);
-            info.lineCount = estimatedLines;
-        }
-        
-        info.optimalFontSize = fontSize;
-        
-        GdiplusShutdown(gdiplusToken);
-    } else {
-        // Fallback sin GDI+
-        info.optimalFontSize = 11.0f * g_uiScale / 100.0f;
-        info.optimalWidth = 500;
-        info.optimalHeight = 300;
-        info.lineCount = 1;
+    // Calcular longitud del texto y estimar líneas
+    size_t textLength = wcslen(text);
+    int estimatedLines = 1;
+    for (size_t i = 0; i < textLength; i++) {
+        if (text[i] == L'\n') estimatedLines++;
     }
+    
+    // Ajustar tamaño de fuente según longitud del texto
+    float fontSize = 11.0f; // Base
+    if (textLength < 50) {
+        fontSize = 14.0f; // Texto corto - fuente más grande
+    } else if (textLength < 150) {
+        fontSize = 12.0f; // Texto medio
+    } else if (textLength < 300) {
+        fontSize = 11.0f; // Texto largo
+    } else {
+        fontSize = 10.0f; // Texto muy largo - fuente más pequeña
+    }
+    
+    // Ajustar según escala UI
+    fontSize = fontSize * g_uiScale / 100.0f;
+    
+    // Medir texto con diferentes tamaños
+    FontFamily fontFamily(fontName);
+    Font font(&fontFamily, fontSize, FontStyleRegular, UnitPoint);
+    StringFormat format;
+    format.SetAlignment(StringAlignmentCenter);
+    format.SetLineAlignment(StringAlignmentCenter);
+    format.SetTrimming(StringTrimmingEllipsisCharacter);
+    
+    RectF layoutRect(0.0f, 0.0f, static_cast<float>(maxWidth), static_cast<float>(maxHeight));
+    RectF boundsRect;
+    
+    if (graphics.MeasureString(text, -1, &font, layoutRect, &format, &boundsRect) == Ok) {
+        info.optimalWidth = static_cast<int>(boundsRect.Width + 80); // Padding
+        info.optimalHeight = static_cast<int>(boundsRect.Height + 100); // Espacio para título y botones
+        info.lineCount = estimatedLines;
+        
+        // Verificar si necesita scrolling
+        if (boundsRect.Height > maxHeight - 100) {
+            info.needsScrolling = true;
+            info.optimalHeight = maxHeight;
+        }
+        
+        // Ajustar ancho mínimo y máximo
+        info.optimalWidth = std::max(400, std::min(info.optimalWidth, 800));
+        info.optimalHeight = std::max(250, std::min(info.optimalHeight, 600));
+    } else {
+        // Fallback si falla la medición
+        info.optimalWidth = 500;
+        info.optimalHeight = 300 + (estimatedLines * 20);
+        info.lineCount = estimatedLines;
+    }
+    
+    info.optimalFontSize = fontSize;
     
     ReleaseDC(nullptr, hdc);
     return info;
@@ -1374,10 +1354,10 @@ void HandleError(const std::wstring& errorMsg, bool showUser) {
 void ShowAboutDialog(HWND hwnd) {
     std::wstring info =
         std::wstring(APP_NAME_TEXT) + L" v" + APP_VERSION_TEXT + L" (Edición Premium)\n\n" +
-        L"Visor de imágenes nativo con aceleración por hardware y diseño Acrílico/Glassmorphism.\n\n" +
+        L"Visor de imágenes nativo ultra-ligero con aceleración por hardware y diseño Acrílico/Glassmorphism.\n\n" +
         L"• Motores: stb_image, WIC y GDI+ con interpolación bicúbica de precisión y Ultra-Claridad HDR.\n" +
         L"• Auto-orientación EXIF, visor de máxima área, fondo de pantalla directo y exportador PNG/JPG.\n" +
-        L"• Actualizador integrado sin bucles y soporte para más de 30 formatos gráficos.\n\n" +
+        L"• Rendimiento ultra-optimizado con consumo mínimo de RAM y soporte para más de 30 formatos gráficos.\n\n" +
         L"© 2026 ARTPICST";
     ShowThemedMessageBox(hwnd ? hwnd : nullptr, APP_NAME_TEXT, info.c_str(), MB_OK, MB_ICONINFORMATION);
 }
@@ -1407,7 +1387,6 @@ void ShowProgramInfoDialog(HWND hwnd) {
         L"• Ctrl+E : Mostrar y seleccionar en el Explorador de Windows\n"
         L"• Ctrl+C / Ctrl+Shift+C : Copiar imagen / copiar ruta completa\n"
         L"• Ctrl+O / Ctrl+Shift+O : Abrir archivo de imagen / abrir carpeta\n"
-        L"• Ctrl+U : Comprobar e instalar actualizaciones\n"
         L"• I : Fijar o alternar barra de información flotante\n\n"
         L"🖱️ CONTROLES DE RATÓN:\n"
         L"• Clic izquierdo + Arrastrar : Mover / desplazar imagen (Pan) siempre disponible\n"
@@ -1604,75 +1583,60 @@ unsigned char* DecodeWithStb(const std::wstring& filepath, int& width, int& heig
     const std::string utf8 = WideToUtf8(filepath);
     if (utf8.empty()) return nullptr;
     
-    // Check if this is a GIF file
     const std::wstring ext = GetExtensionLower(filepath);
     bool isGif = (ext == L"gif");
-    
-    unsigned char* pixels = stbi_load(utf8.c_str(), &width, &height, &channels, 4);
-    if (!pixels) return nullptr;
-    size_t bytes = 0;
-    if (!SafePixelBytes(width, height, bytes)) {
-        stbi_image_free(pixels);
-        width = height = channels = 0;
-        return nullptr;
-    }
-    ConvertRGBAtoBGRA(pixels, width, height, outHasAlpha);
 
-    // Handle GIF animation state - Cargar GIF con animación real
+    // Limpiar estado previo de GIF
+    g_state.isGifAnimated = false;
+    g_state.gifCurrentFrame = 0;
+    g_state.gifTotalFrames = 0;
+    for (auto* frame : g_state.gifFrameData) {
+        if (frame) delete[] frame;
+    }
+    g_state.gifFrameData.clear();
+    g_state.gifFrameDelays.clear();
+
     if (isGif) {
-        // Intentar cargar animación GIF real usando stb_image
         int* delays = nullptr;
         int frameCount = 0;
-        int tempWidth, tempHeight, tempChannels;
-        
-        // stbi only provides stbi_load_gif_from_memory, so read the file into memory first
-        // It returns a single flat buffer with all frames concatenated (frameSize = x * y * req_comp each)
+        int tempWidth = 0, tempHeight = 0, tempChannels = 0;
         unsigned char* gifData = nullptr;
-        {
-            FILE* gifFile = nullptr;
-#ifdef _WIN32
-            _wfopen_s(&gifFile, filepath.c_str(), L"rb");
-#else
-            gifFile = fopen(utf8.c_str(), "rb");
-#endif
-            if (gifFile) {
-                fseek(gifFile, 0, SEEK_END);
-                long gifSize = ftell(gifFile);
-                fseek(gifFile, 0, SEEK_SET);
-                if (gifSize > 0) {
-                    stbi_uc* gifBuffer = (stbi_uc*)malloc(gifSize);
-                    if (gifBuffer) {
-                        size_t readBytes = fread(gifBuffer, 1, gifSize, gifFile);
-                        if (readBytes == (size_t)gifSize) {
-                            gifData = stbi_load_gif_from_memory(gifBuffer, (int)gifSize, &delays, &tempWidth, &tempHeight, &frameCount, &tempChannels, 4);
-                        }
-                        free(gifBuffer);
-                    }
-                }
-                fclose(gifFile);
-            }
-        }
         
+        FILE* gifFile = nullptr;
+        _wfopen_s(&gifFile, filepath.c_str(), L"rb");
+        if (gifFile) {
+            fseek(gifFile, 0, SEEK_END);
+            long gifSize = ftell(gifFile);
+            fseek(gifFile, 0, SEEK_SET);
+            if (gifSize > 0 && gifSize <= MAX_FILE_BYTES) {
+                stbi_uc* gifBuffer = static_cast<stbi_uc*>(malloc(gifSize));
+                if (gifBuffer) {
+                    size_t readBytes = fread(gifBuffer, 1, gifSize, gifFile);
+                    if (readBytes == static_cast<size_t>(gifSize)) {
+                        gifData = stbi_load_gif_from_memory(gifBuffer, static_cast<int>(gifSize), &delays, &tempWidth, &tempHeight, &frameCount, &tempChannels, 4);
+                    }
+                    free(gifBuffer);
+                }
+            }
+            fclose(gifFile);
+        }
+
         if (gifData && frameCount > 1) {
             width = tempWidth;
             height = tempHeight;
             channels = tempChannels;
             
-            // GIF animado con múltiples frames
             g_state.isGifAnimated = true;
             g_state.gifCurrentFrame = 0;
             g_state.gifTotalFrames = frameCount;
             g_state.gifLastFrameTime = GetTickCount();
             
-            // Copiar delays
             g_state.gifFrameDelays.clear();
             for (int i = 0; i < frameCount; i++) {
-                g_state.gifFrameDelays.push_back(delays[i] ? delays[i] : 100); // Default 100ms
+                g_state.gifFrameDelays.push_back(delays[i] ? delays[i] : 100);
             }
             
-            // Copiar frames desde el buffer plano (cada frame = width * height * 4 bytes)
-            g_state.gifFrameData.clear();
-            size_t frameSize = (size_t)width * height * 4;
+            size_t frameSize = static_cast<size_t>(width) * height * 4;
             for (int i = 0; i < frameCount; i++) {
                 unsigned char* frameCopy = new unsigned char[frameSize];
                 memcpy(frameCopy, gifData + i * frameSize, frameSize);
@@ -1680,65 +1644,50 @@ unsigned char* DecodeWithStb(const std::wstring& filepath, int& width, int& heig
                 g_state.gifFrameData.push_back(frameCopy);
             }
             
-            // Usar el primer frame como imagen principal
             size_t gifFrameBytes = 0;
             if (!SafePixelBytes(width, height, gifFrameBytes)) {
-                // Limpiar memoria en caso de error
-                for (auto frame : g_state.gifFrameData) {
-                    delete[] frame;
+                for (auto* frame : g_state.gifFrameData) {
+                    if (frame) delete[] frame;
                 }
                 g_state.gifFrameData.clear();
                 g_state.gifFrameDelays.clear();
                 g_state.isGifAnimated = false;
                 stbi_image_free(gifData);
-                free(delays);
+                if (delays) free(delays);
                 return nullptr;
             }
             
-            unsigned char* firstFrameCopy = new unsigned char[gifFrameBytes];
+            unsigned char* firstFrameCopy = static_cast<unsigned char*>(malloc(gifFrameBytes));
+            if (!firstFrameCopy) {
+                stbi_image_free(gifData);
+                if (delays) free(delays);
+                return nullptr;
+            }
             memcpy(firstFrameCopy, g_state.gifFrameData[0], gifFrameBytes);
             
-            // Liberar memoria de stbi
             stbi_image_free(gifData);
-            free(delays);
-            
+            if (delays) free(delays);
             return firstFrameCopy;
-        } else {
-            // GIF no animado o error, cargar como imagen estática con stb_load normal
-            g_state.isGifAnimated = false;
-            g_state.gifCurrentFrame = 0;
-            g_state.gifTotalFrames = 0;
-            g_state.gifFrameData.clear();
-            g_state.gifFrameDelays.clear();
-            
-            if (gifData) {
-                stbi_image_free(gifData);
-            }
-            if (delays) {
-                free(delays);
-            }
-            
-            // Cargar como imagen estática normal
-            unsigned char* staticPixels = stbi_load(utf8.c_str(), &width, &height, &channels, 4);
-            if (!staticPixels) return nullptr;
-            
-            size_t staticBytes = 0;
-            if (!SafePixelBytes(width, height, staticBytes)) {
-                stbi_image_free(staticPixels);
-                width = height = channels = 0;
-                return nullptr;
-            }
-            ConvertRGBAtoBGRA(staticPixels, width, height, outHasAlpha);
-            
-            return staticPixels;
         }
-    } else {
-        g_state.isGifAnimated = false;
-        g_state.gifCurrentFrame = 0;
-        g_state.gifTotalFrames = 0;
-        g_state.gifFrameData.clear();
-        g_state.gifFrameDelays.clear();
         
+        if (gifData) stbi_image_free(gifData);
+        if (delays) free(delays);
+    }
+
+    // Carga estática para no-GIFs o GIFs estáticos de un solo frame
+    unsigned char* pixels = stbi_load(utf8.c_str(), &width, &height, &channels, 4);
+    if (!pixels) return nullptr;
+    
+    size_t bytes = 0;
+    if (!SafePixelBytes(width, height, bytes)) {
+        stbi_image_free(pixels);
+        width = height = channels = 0;
+        return nullptr;
+    }
+    
+    ConvertRGBAtoBGRA(pixels, width, height, outHasAlpha);
+
+    if (!isGif) {
         int exif = GetExifOrientationFromJpeg(filepath);
         if (exif == 6) autoRotateDeg = 90;
         else if (exif == 3) autoRotateDeg = 180;
@@ -3167,6 +3116,7 @@ void ShowContextMenu(HWND hwnd, int x, int y) {
 }
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    static bool s_trackingMouse = false;
     switch (msg) {
         case WM_CREATE: {
             g_state.hwnd = hwnd;
@@ -3425,11 +3375,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_MOUSEMOVE: {
             const int x = GET_X_LPARAM(lParam);
             const int y = GET_Y_LPARAM(lParam);
-            TRACKMOUSEEVENT tme{};
-            tme.cbSize = sizeof(tme);
-            tme.dwFlags = TME_LEAVE;
-            tme.hwndTrack = hwnd;
-            TrackMouseEvent(&tme);
+            if (!s_trackingMouse) {
+                TRACKMOUSEEVENT tme{};
+                tme.cbSize = sizeof(tme);
+                tme.dwFlags = TME_LEAVE;
+                tme.hwndTrack = hwnd;
+                TrackMouseEvent(&tme);
+                s_trackingMouse = true;
+            }
             
             // Dock proximity detection
             RECT client{};
@@ -3460,12 +3413,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
             return 0;
         }
-        case WM_MOUSELEAVE:
+        case WM_MOUSELEAVE: {
+            s_trackingMouse = false;
             if (g_state.hudHot != HUD_NONE) {
                 g_state.hudHot = HUD_NONE;
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
             return 0;
+        }
         case WM_TIMER:
             if (wParam == TIMER_OSD) {
                 KillTimer(hwnd, TIMER_OSD);

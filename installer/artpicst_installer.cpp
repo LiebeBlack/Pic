@@ -167,7 +167,7 @@ void RenderWelcome(Graphics& g, const RECT& client) {
         L"• Soporte para más de 30 formatos de imagen",
         L"• Ultra-Claridad HDR y efectos avanzados",
         L"• Navegación fluida con zoom y pan",
-        L"• Actualizaciones automáticas integradas"
+        L"• Rendimiento ultra-ligero y bajo consumo de recursos"
     };
     
     float featureY = cardRect.Y + 30;
@@ -206,7 +206,7 @@ void RenderLicense(Graphics& g, const RECT& client) {
         L"- Visualización de imágenes de alta calidad\n"
         L"- Interfaz moderna con efectos acrílicos\n"
         L"- Soporte para múltiples formatos\n"
-        L"- Actualizaciones automáticas\n\n"
+        L"- Rendimiento ultra-ligero y optimizado\n\n"
         L"Al continuar con la instalación, aceptas los términos de uso.";
     
     StringFormat textFormat;

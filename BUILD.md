@@ -33,20 +33,12 @@ cd installer
 cl /nologo /EHsc /std:c++17 /O2 /utf-8 /W4 /I. /I..\include /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0601 /Fe:"build\artpicst_installer.exe" artpicst_installer.cpp /link gdiplus.lib shlwapi.lib shell32.lib comctl32.lib dwmapi.lib user32.lib advapi32.lib /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF
 ```
 
-#### 3. Actualizador
-```cmd
-cd updater
-cl /nologo /EHsc /std:c++17 /O2 /utf-8 /W4 /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0601 /Fe:"build\auto_updater.exe" auto_updater_simple.cpp /link winhttp.lib shlwapi.lib shell32.lib user32.lib advapi32.lib /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF
-```
-
 ## Archivos Generados
 
 Después de la compilación exitosa, encontrarás los siguientes archivos en el directorio `dist\`:
 
-- `artpicst.exe` - Programa principal (visuales premium mejorados)
+- `artpicst.exe` - Programa principal (visuales premium y rendimiento optimizado)
 - `artpicst_installer.exe` - Instalador con interfaz moderna
-- `auto_updater.exe` - Actualizador C++ ligero (< 1 MB)
-- `auto_updater.bat` - Script actualizador alternativo
 - `artpicst.ico` - Icono de la aplicación
 - `version.json` - Información de versión
 
@@ -56,16 +48,10 @@ Después de la compilación exitosa, encontrarás los siguientes archivos en el 
 - ✅ Efectos glassmorphism/acrylic mejorados
 - ✅ Mayor transparencia y blur premium
 - ✅ Colores más vibrantes y modernos
-- ✅ Zoom máximo aumentado a 200x
-- ✅ Calidad de renderizado mejorada
+- ✅ Zoom de máxima calidad con auto-snap 100%
+- ✅ Calidad de renderizado bicúbico fotográfico
 - ✅ Navegación por teclado optimizada (↑↓ zoom, ←→ imágenes)
-- ✅ Capacidad de arrastrar imagen mejorada
-
-### Actualizador
-- ✅ Reescrito en C++ nativo (reducción de 8.3 MB a < 1 MB)
-- ✅ Sin dependencias externas
-- ✅ Ejecutable nativo Windows
-- ✅ Compatible con GitHub Releases
+- ✅ Consumo ultra-ligero de memoria (RAM ≤ 80 MB, CPU ~0%)
 
 ### Instalador
 - ✅ Interfaz gráfica premium con GDI+
@@ -90,21 +76,7 @@ Asegúrate de tener todas las dependencias:
 
 ## Preparación para GitHub
 
-1. Compila el proyecto usando build.ps1
-2. Verifica que todos los archivos estén en `dist\`
+1. Compila el proyecto usando build.ps1 o build.bat
+2. Verifica que los archivos estén en `dist\`
 3. Crea un release en GitHub
-4. Sube `artpicst_installer.exe` como asset principal
-5. El actualizador descargará automáticamente este archivo
-
-## Sistema de Actualización
-
-El actualizador usa la API de GitHub para:
-- Detectar nuevas versiones
-- Descargar el instalador automáticamente
-- Ejecutar la instalación silenciosa
-- Actualizar el registro de Windows
-
-Configurado en:
-- `updater/config.py` (Python)
-- `updater/auto_updater_simple.cpp` (C++ nativo optimizado)
-- `updater/auto_updater.bat` (Batch alternativo)
+4. Sube `artpicst_installer.exe` y `artpicst.exe` como assets principales
