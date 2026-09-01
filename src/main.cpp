@@ -1,3 +1,4 @@
+// Configuración de compilación para Windows
 #ifndef UNICODE
 #define UNICODE
 #endif
@@ -11,15 +12,17 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #ifndef _WIN32_WINNT
-#define _WIN32_WINNT 0x0601
+#define _WIN32_WINNT 0x0601  // Windows 7+
 #endif
 #ifndef STBI_WINDOWS_UTF8
 #define STBI_WINDOWS_UTF8
 #endif
 
+// Implementación de stb_image para carga de imágenes
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 
+// Headers de Windows API
 #include <windows.h>
 #include <windowsx.h>
 #include <shellapi.h>
@@ -32,6 +35,7 @@
 #include <gdiplus.h>
 #include "resource.h"
 
+// Bibliotecas estándar de C++
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -126,36 +130,23 @@ struct ComPtr {
     explicit operator bool() const { return p != nullptr; }
 };
 
+// Estructura de imagen cacheada con soporte GIF
 struct CachedImage {
     unsigned char* data = nullptr;
-    int width = 0;
-    int height = 0;
-    int channels = 0;
-    int rotation = 0;
-    bool flipH = false;
-    bool flipV = false;
-    bool hasAlpha = false;
-    std::wstring filepath;
-    std::wstring decoder;
+    int width = 0, height = 0, channels = 0, rotation = 0;
+    bool flipH = false, flipV = false, hasAlpha = false;
+    std::wstring filepath, decoder;
     
-    // GIF animation support
+    // Animación GIF
     bool isAnimated = false;
-    int currentFrame = 0;
-    int totalFrames = 0;
+    int currentFrame = 0, totalFrames = 0;
     std::vector<unsigned char*> frameData;
     std::vector<int> frameDelays;
 
     CachedImage() = default;
     ~CachedImage() {
-        if (data) {
-            stbi_image_free(data);
-            data = nullptr;
-        }
-        for (auto* frame : frameData) {
-            if (frame) {
-                stbi_image_free(frame);
-            }
-        }
+        if (data) { stbi_image_free(data); data = nullptr; }
+        for (auto* frame : frameData) if (frame) stbi_image_free(frame);
         frameData.clear();
     }
     CachedImage(const CachedImage&) = delete;
@@ -179,26 +170,17 @@ struct CachedImage {
         if (this != &other) {
             if (data) stbi_image_free(data);
             data = other.data;
-            width = other.width;
-            height = other.height;
-            channels = other.channels;
-            rotation = other.rotation;
-            flipH = other.flipH;
-            flipV = other.flipV;
+            width = other.width; height = other.height; channels = other.channels;
+            rotation = other.rotation; flipH = other.flipH; flipV = other.flipV;
             hasAlpha = other.hasAlpha;
-            filepath = std::move(other.filepath);
-            decoder = std::move(other.decoder);
-            isAnimated = other.isAnimated;
-            currentFrame = other.currentFrame;
+            filepath = std::move(other.filepath); decoder = std::move(other.decoder);
+            isAnimated = other.isAnimated; currentFrame = other.currentFrame;
             totalFrames = other.totalFrames;
-            frameData = std::move(other.frameData);
-            frameDelays = std::move(other.frameDelays);
+            frameData = std::move(other.frameData); frameDelays = std::move(other.frameDelays);
             other.data = nullptr;
             other.width = other.height = other.channels = other.rotation = 0;
             other.flipH = other.flipV = other.hasAlpha = false;
-            other.isAnimated = false;
-            other.currentFrame = 0;
-            other.totalFrames = 0;
+            other.isAnimated = false; other.currentFrame = 0; other.totalFrames = 0;
         }
         return *this;
     }
@@ -239,42 +221,34 @@ struct AppState {
     int imageHeight = 0;
     int imageChannels = 0;
     int currentRotation = 0;
-    bool currentFlipH = false;
-    bool currentFlipV = false;
-    bool hasAlpha = false;
+    bool currentFlipH = false, currentFlipV = false, hasAlpha = false;
 
-    // Efectos de renderizado premium
-    bool effectUltraClarity = false;
-    bool effectGrayscale = false;
-    bool effectInvert = false;
+    // Efectos de imagen
+    bool effectUltraClarity = false, effectGrayscale = false, effectInvert = false;
 
-    std::wstring currentFilePath;
-    std::wstring decoderName;
-
+    std::wstring currentFilePath, decoderName;
     std::vector<std::wstring> imageFiles;
     size_t currentImageIndex = 0;
-    std::wstring currentFolder;
-    std::wstring startupFilePath;
+    std::wstring currentFolder, startupFilePath;
     std::mutex filesMutex;
 
-    float zoom = 1.0f;
-    float offsetX = 0.0f;
-    float offsetY = 0.0f;
+    // Vista y navegación
+    float zoom = 1.0f, offsetX = 0.0f, offsetY = 0.0f;
     bool fitMode = true;
 
+    // Arrastre de imagen
     bool isDragging = false;
-    int dragStartX = 0;
-    int dragStartY = 0;
-    float dragStartOffsetX = 0.0f;
-    float dragStartOffsetY = 0.0f;
+    int dragStartX = 0, dragStartY = 0;
+    float dragStartOffsetX = 0.0f, dragStartOffsetY = 0.0f;
 
+    // Sistema de caché
     std::unordered_map<std::wstring, std::list<CachedImage>::iterator> cacheIndex;
     std::list<CachedImage> imageCache;
     std::mutex cacheMutex;
 
+    // Prefetch en segundo plano
     std::thread prefetchThread;
-    std::atomic<bool> prefetchRunning{false};
-    std::atomic<bool> prefetchRequested{false};
+    std::atomic<bool> prefetchRunning{false}, prefetchRequested{false};
     std::condition_variable prefetchCV;
     std::mutex prefetchMutex;
     size_t prefetchTargetIndex = 0;
@@ -302,13 +276,14 @@ struct AppState {
 
     // GIF animation support
     bool isGifAnimated = false;
-    int gifCurrentFrame = 0;
-    int gifTotalFrames = 0;
+    // Animación GIF
+    int gifCurrentFrame = 0, gifTotalFrames = 0;
     std::vector<unsigned char*> gifFrameData;
     std::vector<int> gifFrameDelays;
     UINT_PTR gifTimer = 0;
     DWORD gifLastFrameTime = 0;
 
+    // Sistema y recursos
     std::wstring lastError;
     ULONG_PTR gdiplusToken = 0;
     GdiplusStartupInput gdiplusStartupInput;
@@ -322,10 +297,7 @@ struct AppState {
     }
 
     ~AppState() {
-        if (imageData) {
-            stbi_image_free(imageData);
-            imageData = nullptr;
-        }
+        if (imageData) { stbi_image_free(imageData); imageData = nullptr; }
     }
 };
 
@@ -411,6 +383,7 @@ void LogMessage(const std::wstring& message) {
     }
 }
 
+// Utilidades de conversión de texto
 std::string WideToUtf8(const std::wstring& value) {
     if (value.empty()) return {};
     int needed = WideCharToMultiByte(CP_UTF8, 0, value.c_str(), -1, nullptr, 0, nullptr, nullptr);
@@ -432,19 +405,16 @@ std::wstring Utf8ToWide(const char* value) {
 }
 
 std::wstring WideToLower(std::wstring value) {
-    if (!value.empty()) {
-        CharLowerBuffW(value.data(), static_cast<DWORD>(value.size()));
-    }
+    if (!value.empty()) CharLowerBuffW(value.data(), static_cast<DWORD>(value.size()));
     return value;
 }
 
+// Utilidades de rutas
 bool PathsEqualCaseInsensitive(const std::wstring& a, const std::wstring& b) {
     return WideToLower(a) == WideToLower(b);
 }
 
-std::wstring CacheKey(const std::wstring& path) {
-    return WideToLower(path);
-}
+std::wstring CacheKey(const std::wstring& path) { return WideToLower(path); }
 
 std::wstring NormalizePath(const std::wstring& path) {
     if (path.empty()) return path;
@@ -457,6 +427,7 @@ std::wstring NormalizePath(const std::wstring& path) {
     return full;
 }
 
+// Inicialización de GDI+
 bool InitGDIPlus() {
     return GdiplusStartup(&g_state.gdiplusToken, &g_state.gdiplusStartupInput, nullptr) == Ok;
 }
@@ -478,16 +449,11 @@ void EnableDarkTitleBar(HWND hwnd) {
     DwmSetWindowAttribute(hwnd, 38, &backdropType, sizeof(backdropType)); // DWMWA_SYSTEMBACKDROP_TYPE
 }
 
+// Gestión de buffers y recursos
 void FreeDoubleBuffer() {
     if (!g_state.hdcMem) return;
-    if (g_state.hbmOld) {
-        SelectObject(g_state.hdcMem, g_state.hbmOld);
-        g_state.hbmOld = nullptr;
-    }
-    if (g_state.hbmMem) {
-        DeleteObject(g_state.hbmMem);
-        g_state.hbmMem = nullptr;
-    }
+    if (g_state.hbmOld) { SelectObject(g_state.hdcMem, g_state.hbmOld); g_state.hbmOld = nullptr; }
+    if (g_state.hbmMem) { DeleteObject(g_state.hbmMem); g_state.hbmMem = nullptr; }
     DeleteDC(g_state.hdcMem);
     g_state.hdcMem = nullptr;
 }
@@ -496,9 +462,7 @@ void StopPrefetchThread() {
     g_state.prefetchRunning = false;
     g_state.prefetchRequested = true;
     g_state.prefetchCV.notify_all();
-    if (g_state.prefetchThread.joinable()) {
-        g_state.prefetchThread.join();
-    }
+    if (g_state.prefetchThread.joinable()) g_state.prefetchThread.join();
 }
 
 void CleanupGDIPlus() {
@@ -1365,6 +1329,7 @@ void ZoomAt(float factor, int pivotX, int pivotY) {
     InvalidateRect(g_state.hwnd, nullptr, FALSE);
 }
 
+// Utilidades de archivos
 std::wstring GetFileSizeString(const std::wstring& filepath) {
     WIN32_FILE_ATTRIBUTE_DATA fileData{};
     if (!GetFileAttributesExW(filepath.c_str(), GetFileExInfoStandard, &fileData)) return L"?";
@@ -1374,10 +1339,7 @@ std::wstring GetFileSizeString(const std::wstring& filepath) {
     const wchar_t* units[] = { L"B", L"KB", L"MB", L"GB" };
     int unit = 0;
     double value = static_cast<double>(size.QuadPart);
-    while (value >= 1024.0 && unit < 3) {
-        value /= 1024.0;
-        ++unit;
-    }
+    while (value >= 1024.0 && unit < 3) { value /= 1024.0; ++unit; }
     wchar_t buffer[32];
     swprintf_s(buffer, L"%.1f %s", value, units[unit]);
     return buffer;
@@ -1400,35 +1362,18 @@ void AddRoundedRect(GraphicsPath& path, const RectF& rect, float radius) {
 
 void LayoutHud(const RECT& client) {
     g_state.hudCount = 0;
-    const int dockHeight = 44;
-    const int itemH = 32;
-    const int gap = 6;
-    const int paddingX = 10;
-    const int paddingY = 6;
+    const int dockHeight = 44, itemH = 32, gap = 6, paddingX = 10, paddingY = 6;
 
-    struct ItemDef {
-        HudId id;
-        const wchar_t* label;
-        int w;
-    } items[] = {
-        { HUD_PREV, L"◀", 32 },
-        { HUD_NEXT, L"▶", 32 },
-        { HUD_FIT, L"Ajustar", 60 },
-        { HUD_ONE, L"1:1", 44 },
-        { HUD_CLARITY, L"✨ Claridad", 74 },
-        { HUD_ROT, L"Rotar", 50 },
-        { HUD_FLIP, L"Voltear", 56 },
-        { HUD_WALLPAPER, L"Fondo", 52 },
-        { HUD_SAVE, L"Guardar", 60 },
-        { HUD_FULL, g_state.isFullscreen ? L"Ventana" : L"Pantalla", 68 },
-        { HUD_OPEN, L"Abrir", 50 }
+    struct ItemDef { HudId id; const wchar_t* label; int w; } items[] = {
+        { HUD_PREV, L"◀", 32 }, { HUD_NEXT, L"▶", 32 }, { HUD_FIT, L"Ajustar", 60 },
+        { HUD_ONE, L"1:1", 44 }, { HUD_CLARITY, L"✨ Claridad", 74 }, { HUD_ROT, L"Rotar", 50 },
+        { HUD_FLIP, L"Voltear", 56 }, { HUD_WALLPAPER, L"Fondo", 52 }, { HUD_SAVE, L"Guardar", 60 },
+        { HUD_FULL, g_state.isFullscreen ? L"Ventana" : L"Pantalla", 68 }, { HUD_OPEN, L"Abrir", 50 }
     };
 
     int totalItemsWidth = 0;
     const int count = sizeof(items) / sizeof(items[0]);
-    for (int i = 0; i < count; ++i) {
-        totalItemsWidth += items[i].w + (i > 0 ? gap : 0);
-    }
+    for (int i = 0; i < count; ++i) totalItemsWidth += items[i].w + (i > 0 ? gap : 0);
 
     const int dockWidth = totalItemsWidth + (paddingX * 2);
     const int dockX = std::max(10, static_cast<int>((client.right - dockWidth) / 2));
@@ -1441,8 +1386,7 @@ void LayoutHud(const RECT& client) {
 
     for (int i = 0; i < count && g_state.hudCount < 12; ++i) {
         HudItem& item = g_state.hud[g_state.hudCount++];
-        item.id = items[i].id;
-        item.label = items[i].label;
+        item.id = items[i].id; item.label = items[i].label;
         item.rc = { curX, curY, curX + items[i].w, curY + itemH };
         curX += items[i].w + gap;
     }
@@ -1502,7 +1446,7 @@ void RenderHud(Graphics& graphics, const RECT& client) {
         graphics.DrawString(g_state.statusMessage.c_str(), -1, &font, osdRect, &format, &textBrush);
     }
 
-    // 2. Dock Flotante Acrílico Inferior (Glass Pill Dock)
+    // 2. Dock Flotante Acrílico Inferior
     if (shouldShowDock) {
         RectF dockRectF(static_cast<float>(g_state.dockRect.left),
                        static_cast<float>(g_state.dockRect.top),
@@ -1512,7 +1456,7 @@ void RenderHud(Graphics& graphics, const RECT& client) {
         GraphicsPath dockPath;
         AddRoundedRect(dockPath, dockRectF, 22.0f);
 
-        // Sombra suave inferior premium (más difusa y profunda)
+        // Sombra
         RectF shadowRect = dockRectF;
         shadowRect.Y += 5.0f;
         GraphicsPath shadowPath;
@@ -1520,13 +1464,13 @@ void RenderHud(Graphics& graphics, const RECT& client) {
         SolidBrush shadowBrush(GLASS_DOCK_SHADOW);
         graphics.FillPath(&shadowBrush, &shadowPath);
 
-        // Fondo acrílico translúcido y borde brillante
+        // Fondo y borde
         SolidBrush dockBg(GLASS_DOCK_BG);
         Pen dockBorder(GLASS_DOCK_BORDER, 1.2f);
         graphics.FillPath(&dockBg, &dockPath);
         graphics.DrawPath(&dockBorder, &dockPath);
 
-        // Botones del Dock
+        // Botones
         FontFamily btnFontFamily(L"Segoe UI");
         Font btnFont(&btnFontFamily, 9.5f, FontStyleBold, UnitPoint);
         StringFormat btnFormat;
@@ -1614,21 +1558,17 @@ void RenderEmptyState(Graphics& graphics, const RECT& clientRect) {
 
 void DrawCheckerboard(Graphics& g, float x, float y, float w, float h) {
     const float tileSize = 16.0f;
-    SolidBrush brushA(Color(static_cast<BYTE>(255), static_cast<BYTE>(GetRValue(CHECKER_A)), static_cast<BYTE>(GetGValue(CHECKER_A)), static_cast<BYTE>(GetBValue(CHECKER_A))));
-    SolidBrush brushB(Color(static_cast<BYTE>(255), static_cast<BYTE>(GetRValue(CHECKER_B)), static_cast<BYTE>(GetGValue(CHECKER_B)), static_cast<BYTE>(GetBValue(CHECKER_B))));
+    SolidBrush brushA(Color(255, GetRValue(CHECKER_A), GetGValue(CHECKER_A), GetBValue(CHECKER_A)));
+    SolidBrush brushB(Color(255, GetRValue(CHECKER_B), GetGValue(CHECKER_B), GetBValue(CHECKER_B)));
 
     g.FillRectangle(&brushA, x, y, w, h);
     int cols = static_cast<int>(std::ceil(w / tileSize));
     int rows = static_cast<int>(std::ceil(h / tileSize));
     for (int r = 0; r < rows; ++r) {
         for (int c = (r % 2); c < cols; c += 2) {
-            float tx = x + c * tileSize;
-            float ty = y + r * tileSize;
-            float tw = std::min(tileSize, x + w - tx);
-            float th = std::min(tileSize, y + h - ty);
-            if (tw > 0 && th > 0) {
-                g.FillRectangle(&brushB, tx, ty, tw, th);
-            }
+            float tx = x + c * tileSize, ty = y + r * tileSize;
+            float tw = std::min(tileSize, x + w - tx), th = std::min(tileSize, y + h - ty);
+            if (tw > 0 && th > 0) g.FillRectangle(&brushB, tx, ty, tw, th);
         }
     }
 }
@@ -1651,7 +1591,7 @@ void RenderImage() {
         return;
     }
 
-    SolidBrush bgBrush(Color(static_cast<BYTE>(255), static_cast<BYTE>(GetRValue(BG_COLOR)), static_cast<BYTE>(GetGValue(BG_COLOR)), static_cast<BYTE>(GetBValue(BG_COLOR))));
+    SolidBrush bgBrush(Color(255, GetRValue(BG_COLOR), GetGValue(BG_COLOR), GetBValue(BG_COLOR)));
     graphics.FillRectangle(&bgBrush, 0, 0, rect.right, rect.bottom);
 
     Bitmap bitmap(g_state.imageWidth, g_state.imageHeight,
