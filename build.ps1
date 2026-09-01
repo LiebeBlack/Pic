@@ -31,7 +31,7 @@ if (-not $vsPath) {
 Write-Host "Visual Studio found: $vsPath" -ForegroundColor Green
 Write-Host ""
 
-$directories = @("build", "dist", "installer\build", "updater\build")
+$directories = @("build", "dist", "installer\build")
 foreach ($dir in $directories) {
     if (-not (Test-Path $dir)) {
         New-Item -ItemType Directory -Path $dir -Force | Out-Null
@@ -53,7 +53,7 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
-Write-Host "[2/4] Building installer..." -ForegroundColor Yellow
+Write-Host "[2/3] Building installer..." -ForegroundColor Yellow
 Push-Location installer
 $installerResult = & cl /nologo /EHsc /std:c++17 /O2 /utf-8 /W4 /I. /I..\include /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0601 /Fe:"build\artpicst_installer.exe" artpicst_installer.cpp /link gdiplus.lib shlwapi.lib shell32.lib comctl32.lib dwmapi.lib user32.lib advapi32.lib /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF 2>&1
 Pop-Location
@@ -63,25 +63,11 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
-Write-Host "[3/4] Building updater..." -ForegroundColor Yellow
-Push-Location updater
-$updaterResult = & cl /nologo /EHsc /std:c++17 /O2 /utf-8 /W4 /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0601 /Fe:"build\auto_updater.exe" auto_updater_simple.cpp /link winhttp.lib shlwapi.lib shell32.lib  user32.lib advapi32.lib /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF 2>&1
-Pop-Location
-
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "Error building updater" -ForegroundColor Red
-    exit 1
-}
-
-Write-Host "[4/4] Copying files to dist..." -ForegroundColor Yellow
+Write-Host "[3/3] Copying files to dist..." -ForegroundColor Yellow
 Copy-Item "build\artpicst.exe" "dist\artpicst.exe" -Force
 Copy-Item "installer\build\artpicst_installer.exe" "dist\artpicst_installer.exe" -Force
-Copy-Item "updater\build\auto_updater.exe" "dist\auto_updater.exe" -Force
 Copy-Item "resources\artpicst.ico" "dist\artpicst.ico" -Force
 Copy-Item "version.json" "dist\version.json" -Force
-
-$batchContent = "@echo off`r`nsetlocal EnableExtensions`r`ncd /d `"%~dp0`"`r`nif exist `"auto_updater.exe`" (`r`n    start `"`" `"`auto_updater.exe`" --gui`r`n) else (`r`n    echo Updater not found`r`n    exit /b 1`r`n)"
-Set-Content -Path "dist\auto_updater.bat" -Value $batchContent
 
 Write-Host ""
 Write-Host "========================================" -ForegroundColor Cyan
@@ -97,10 +83,6 @@ if (Test-Path "dist\artpicst.exe") {
 if (Test-Path "dist\artpicst_installer.exe") {
     $size = (Get-Item "dist\artpicst_installer.exe").Length
     Write-Host "artpicst_installer.exe: $size bytes" -ForegroundColor Cyan
-}
-if (Test-Path "dist\auto_updater.exe") {
-    $size = (Get-Item "dist\auto_updater.exe").Length
-    Write-Host "auto_updater.exe: $size bytes" -ForegroundColor Cyan
 }
 
 Write-Host ""

@@ -66,39 +66,43 @@
 
 using namespace Gdiplus;
 
-// Identificadores y constantes visuales Premium
+// Configuración de aplicación y constantes visuales
 const wchar_t CLASS_NAME[] = L"ARTPICSTWindow";
 const wchar_t APP_NAME_TEXT[] = L"ARTPICST";
 const wchar_t APP_VERSION_TEXT[] = L"1.1.0 Premium";
 
-const COLORREF BG_COLOR = RGB(8, 10, 14);
-const COLORREF CHECKER_A = RGB(12, 14, 20);
-const COLORREF CHECKER_B = RGB(20, 23, 30);
+// Colores del sistema (tema oscuro)
+const COLORREF BG_COLOR = RGB(10, 12, 18);
+const COLORREF CHECKER_A = RGB(15, 17, 25);
+const COLORREF CHECKER_B = RGB(22, 25, 35);
 
-// Estilos de la interfaz Glassmorphism / Acrílica Premium Mejorados
-const Color GLASS_DOCK_BG(235, 8, 10, 16);
-const Color GLASS_DOCK_BORDER(120, 255, 255, 255);
-const Color GLASS_DOCK_SHADOW(150, 0, 0, 0);
+// Colores de interfaz Glassmorphism/Acrílica
+const Color GLASS_DOCK_BG(240, 12, 14, 20);
+const Color GLASS_DOCK_BORDER(130, 200, 210, 230);
+const Color GLASS_DOCK_SHADOW(180, 0, 0, 0);
+const Color GLASS_BTN_NORMAL(80, 200, 210, 230);
+const Color GLASS_BTN_BORDER_NORMAL(65, 180, 190, 210);
+const Color GLASS_BTN_HOT(250, 70, 140, 220);
+const Color GLASS_BTN_BORDER_HOT(255, 130, 180, 255);
+const Color GLASS_BTN_ACTIVE(250, 50, 160, 180);
 
-const Color GLASS_BTN_NORMAL(75, 255, 255, 255);
-const Color GLASS_BTN_BORDER_NORMAL(60, 255, 255, 255);
-const Color GLASS_BTN_HOT(245, 55, 130, 245);
-const Color GLASS_BTN_BORDER_HOT(255, 120, 200, 255);
-const Color GLASS_BTN_ACTIVE(245, 40, 190, 150);
-
-const Color GLASS_INFO_BG(215, 10, 12, 18);
-const Color GLASS_INFO_BORDER(90, 255, 255, 255);
-
+// Configuración de zoom y renderizado
 const float MIN_ZOOM = 0.01f;
 const float MAX_ZOOM = 200.0f;
 const float ZOOM_STEP = 1.25f;
-const size_t CACHE_SIZE = 6;
+const size_t CACHE_SIZE = 4;
 const int MAX_DIMENSION = 30000;
-const LONGLONG MAX_FILE_BYTES = 1000LL * 1024LL * 1024LL; // 1 GB
+const LONGLONG MAX_FILE_BYTES = 1000LL * 1024LL * 1024LL;
+
+// Configuración de temporizadores
 const UINT OSD_MS = 3500;
 const UINT_PTR TIMER_OSD = 1;
 const UINT_PTR TIMER_SLIDESHOW = 2;
 const UINT SLIDESHOW_INTERVAL_MS = 3500;
+const UINT_PTR TIMER_DOCK_HIDE = 3;
+const UINT DOCK_HIDE_MS = 2000;
+const int DOCK_PROXIMITY_THRESHOLD = 80;
+const UINT_PTR TIMER_GIF = 4;
 
 template <typename T>
 struct ComPtr {
@@ -133,6 +137,13 @@ struct CachedImage {
     bool hasAlpha = false;
     std::wstring filepath;
     std::wstring decoder;
+    
+    // GIF animation support
+    bool isAnimated = false;
+    int currentFrame = 0;
+    int totalFrames = 0;
+    std::vector<unsigned char*> frameData;
+    std::vector<int> frameDelays;
 
     CachedImage() = default;
     ~CachedImage() {
@@ -140,6 +151,12 @@ struct CachedImage {
             stbi_image_free(data);
             data = nullptr;
         }
+        for (auto* frame : frameData) {
+            if (frame) {
+                stbi_image_free(frame);
+            }
+        }
+        frameData.clear();
     }
     CachedImage(const CachedImage&) = delete;
     CachedImage& operator=(const CachedImage&) = delete;
@@ -147,10 +164,16 @@ struct CachedImage {
         : data(other.data), width(other.width), height(other.height),
           channels(other.channels), rotation(other.rotation),
           flipH(other.flipH), flipV(other.flipV), hasAlpha(other.hasAlpha),
-          filepath(std::move(other.filepath)), decoder(std::move(other.decoder)) {
+          filepath(std::move(other.filepath)), decoder(std::move(other.decoder)),
+          isAnimated(other.isAnimated), currentFrame(other.currentFrame),
+          totalFrames(other.totalFrames), frameData(std::move(other.frameData)),
+          frameDelays(std::move(other.frameDelays)) {
         other.data = nullptr;
         other.width = other.height = other.channels = other.rotation = 0;
         other.flipH = other.flipV = other.hasAlpha = false;
+        other.isAnimated = false;
+        other.currentFrame = 0;
+        other.totalFrames = 0;
     }
     CachedImage& operator=(CachedImage&& other) noexcept {
         if (this != &other) {
@@ -165,9 +188,17 @@ struct CachedImage {
             hasAlpha = other.hasAlpha;
             filepath = std::move(other.filepath);
             decoder = std::move(other.decoder);
+            isAnimated = other.isAnimated;
+            currentFrame = other.currentFrame;
+            totalFrames = other.totalFrames;
+            frameData = std::move(other.frameData);
+            frameDelays = std::move(other.frameDelays);
             other.data = nullptr;
             other.width = other.height = other.channels = other.rotation = 0;
             other.flipH = other.flipV = other.hasAlpha = false;
+            other.isAnimated = false;
+            other.currentFrame = 0;
+            other.totalFrames = 0;
         }
         return *this;
     }
@@ -266,6 +297,17 @@ struct AppState {
     int hudCount = 0;
     HudId hudHot = HUD_NONE;
     bool hudVisible = true;
+    bool dockAutoHide = true;
+    DWORD dockLastActivity = 0;
+
+    // GIF animation support
+    bool isGifAnimated = false;
+    int gifCurrentFrame = 0;
+    int gifTotalFrames = 0;
+    std::vector<unsigned char*> gifFrameData;
+    std::vector<int> gifFrameDelays;
+    UINT_PTR gifTimer = 0;
+    DWORD gifLastFrameTime = 0;
 
     std::wstring lastError;
     ULONG_PTR gdiplusToken = 0;
@@ -338,7 +380,6 @@ std::wstring NormalizePath(const std::wstring& path);
 void ZoomAt(float factor, int pivotX, int pivotY);
 void DeleteCurrentImage();
 void OpenInExplorer();
-void CheckForUpdates();
 
 static bool SafePixelBytes(int width, int height, size_t& outBytes) {
     if (width <= 0 || height <= 0) return false;
@@ -851,6 +892,11 @@ unsigned char* DecodeWithStb(const std::wstring& filepath, int& width, int& heig
     autoRotateDeg = 0;
     const std::string utf8 = WideToUtf8(filepath);
     if (utf8.empty()) return nullptr;
+    
+    // Check if this is a GIF file
+    const std::wstring ext = GetExtensionLower(filepath);
+    bool isGif = (ext == L"gif");
+    
     unsigned char* pixels = stbi_load(utf8.c_str(), &width, &height, &channels, 4);
     if (!pixels) return nullptr;
     size_t bytes = 0;
@@ -861,10 +907,22 @@ unsigned char* DecodeWithStb(const std::wstring& filepath, int& width, int& heig
     }
     ConvertRGBAtoBGRA(pixels, width, height, outHasAlpha);
 
-    int exif = GetExifOrientationFromJpeg(filepath);
-    if (exif == 6) autoRotateDeg = 90;
-    else if (exif == 3) autoRotateDeg = 180;
-    else if (exif == 8) autoRotateDeg = 270;
+    // Handle GIF animation state
+    if (isGif) {
+        g_state.isGifAnimated = true;
+        g_state.gifCurrentFrame = 0;
+        g_state.gifTotalFrames = 1; // For now, single frame
+        g_state.gifLastFrameTime = GetTickCount();
+    } else {
+        g_state.isGifAnimated = false;
+        g_state.gifCurrentFrame = 0;
+        g_state.gifTotalFrames = 0;
+        
+        int exif = GetExifOrientationFromJpeg(filepath);
+        if (exif == 6) autoRotateDeg = 90;
+        else if (exif == 3) autoRotateDeg = 180;
+        else if (exif == 8) autoRotateDeg = 270;
+    }
 
     return pixels;
 }
@@ -1405,59 +1463,16 @@ HudId HitTestHud(int x, int y) {
 void RenderHud(Graphics& graphics, const RECT& client) {
     LayoutHud(client);
 
-    // 1. Panel de Información Flotante Superior (Top Pill)
-    if (g_state.imageData && !g_state.currentFilePath.empty()) {
-        int dw = 0, dh = 0;
-        DisplaySize(dw, dh);
-        double megapixels = (static_cast<double>(g_state.imageWidth) * g_state.imageHeight) / 1000000.0;
-        wchar_t badgeText[300];
-        swprintf_s(badgeText, L"  %s   ·   %dx%d (%.1f MP)   ·   %s   ·   %.0f%%   ·   %zu/%zu   ·   [%s]%s%s%s%s",
-                   GetFileName(g_state.currentFilePath).c_str(), dw, dh, megapixels,
-                   GetFileSizeString(g_state.currentFilePath).c_str(),
-                   g_state.zoom * 100.0f,
-                   g_state.currentImageIndex + 1, ImageCount(),
-                   g_state.decoderName.c_str(),
-                   g_state.effectUltraClarity ? L" [✨HDR]" : L"",
-                   g_state.effectGrayscale ? L" [B/N]" : L"",
-                   g_state.effectInvert ? L" [Inv]" : L"",
-                   g_state.currentRotation ? L" [Rot]" : L"");
-
-        FontFamily fontFamily(L"Segoe UI");
-        Font font(&fontFamily, 10.0f, FontStyleBold, UnitPoint);
-        RectF layoutRect(0, 0, 1000, 40);
-        RectF boundRect;
-        StringFormat format;
-        format.SetAlignment(StringAlignmentNear);
-        format.SetLineAlignment(StringAlignmentCenter);
-        graphics.MeasureString(badgeText, -1, &font, layoutRect, &format, &boundRect);
-
-        const float infoW = boundRect.Width + 24.0f;
-        const float infoH = 28.0f;
-        const float infoX = 14.0f;
-        const float infoY = 14.0f;
-
-        RectF infoRect(infoX, infoY, infoW, infoH);
-        GraphicsPath infoPath;
-        AddRoundedRect(infoPath, infoRect, 14.0f);
-
-        // Efecto de sombra premium en el panel de información
-        RectF infoShadowRect = infoRect;
-        infoShadowRect.Y += 2.0f;
-        GraphicsPath infoShadowPath;
-        AddRoundedRect(infoShadowPath, infoShadowRect, 14.0f);
-        SolidBrush infoShadowBrush(Color(120, 0, 0, 0));
-        graphics.FillPath(&infoShadowBrush, &infoShadowPath);
-
-        SolidBrush infoBg(GLASS_INFO_BG);
-        Pen infoBorder(GLASS_INFO_BORDER, 1.0f);
-        graphics.FillPath(&infoBg, &infoPath);
-        graphics.DrawPath(&infoBorder, &infoPath);
-
-        SolidBrush textBrush(Color(240, 245, 252));
-        graphics.DrawString(badgeText, -1, &font, infoRect, &format, &textBrush);
+    // Auto-hide dock logic
+    bool shouldShowDock = true;
+    if (g_state.dockAutoHide) {
+        DWORD now = GetTickCount();
+        if (now - g_state.dockLastActivity > DOCK_HIDE_MS) {
+            shouldShowDock = false;
+        }
     }
 
-    // 2. Mensaje OSD / Estado Flotante
+    // 1. Mensaje OSD / Estado Flotante
     if (!g_state.statusMessage.empty() &&
         (g_state.osdPinned || GetTickCount() - g_state.osdDisplayTime < OSD_MS)) {
         FontFamily fontFamily(L"Segoe UI");
@@ -1478,8 +1493,8 @@ void RenderHud(Graphics& graphics, const RECT& client) {
         GraphicsPath osdPath;
         AddRoundedRect(osdPath, osdRect, 16.0f);
 
-        SolidBrush osdBg(Color(220, 20, 24, 32));
-        Pen osdBorder(Color(120, 102, 176, 255), 1.2f);
+        SolidBrush osdBg(Color(220, 12, 14, 20));
+        Pen osdBorder(Color(130, 200, 210, 230), 1.2f);
         graphics.FillPath(&osdBg, &osdPath);
         graphics.DrawPath(&osdBorder, &osdPath);
 
@@ -1487,67 +1502,69 @@ void RenderHud(Graphics& graphics, const RECT& client) {
         graphics.DrawString(g_state.statusMessage.c_str(), -1, &font, osdRect, &format, &textBrush);
     }
 
-    // 3. Dock Flotante Acrílico Inferior (Glass Pill Dock)
-    RectF dockRectF(static_cast<float>(g_state.dockRect.left),
-                   static_cast<float>(g_state.dockRect.top),
-                   static_cast<float>(g_state.dockRect.right - g_state.dockRect.left),
-                   static_cast<float>(g_state.dockRect.bottom - g_state.dockRect.top));
+    // 2. Dock Flotante Acrílico Inferior (Glass Pill Dock)
+    if (shouldShowDock) {
+        RectF dockRectF(static_cast<float>(g_state.dockRect.left),
+                       static_cast<float>(g_state.dockRect.top),
+                       static_cast<float>(g_state.dockRect.right - g_state.dockRect.left),
+                       static_cast<float>(g_state.dockRect.bottom - g_state.dockRect.top));
 
-    GraphicsPath dockPath;
-    AddRoundedRect(dockPath, dockRectF, 22.0f);
+        GraphicsPath dockPath;
+        AddRoundedRect(dockPath, dockRectF, 22.0f);
 
-    // Sombra suave inferior premium (más difusa y profunda)
-    RectF shadowRect = dockRectF;
-    shadowRect.Y += 5.0f;
-    GraphicsPath shadowPath;
-    AddRoundedRect(shadowPath, shadowRect, 22.0f);
-    SolidBrush shadowBrush(GLASS_DOCK_SHADOW);
-    graphics.FillPath(&shadowBrush, &shadowPath);
+        // Sombra suave inferior premium (más difusa y profunda)
+        RectF shadowRect = dockRectF;
+        shadowRect.Y += 5.0f;
+        GraphicsPath shadowPath;
+        AddRoundedRect(shadowPath, shadowRect, 22.0f);
+        SolidBrush shadowBrush(GLASS_DOCK_SHADOW);
+        graphics.FillPath(&shadowBrush, &shadowPath);
 
-    // Fondo acrílico translúcido y borde brillante
-    SolidBrush dockBg(GLASS_DOCK_BG);
-    Pen dockBorder(GLASS_DOCK_BORDER, 1.2f);
-    graphics.FillPath(&dockBg, &dockPath);
-    graphics.DrawPath(&dockBorder, &dockPath);
+        // Fondo acrílico translúcido y borde brillante
+        SolidBrush dockBg(GLASS_DOCK_BG);
+        Pen dockBorder(GLASS_DOCK_BORDER, 1.2f);
+        graphics.FillPath(&dockBg, &dockPath);
+        graphics.DrawPath(&dockBorder, &dockPath);
 
-    // Botones del Dock
-    FontFamily btnFontFamily(L"Segoe UI");
-    Font btnFont(&btnFontFamily, 9.5f, FontStyleBold, UnitPoint);
-    StringFormat btnFormat;
-    btnFormat.SetAlignment(StringAlignmentCenter);
-    btnFormat.SetLineAlignment(StringAlignmentCenter);
+        // Botones del Dock
+        FontFamily btnFontFamily(L"Segoe UI");
+        Font btnFont(&btnFontFamily, 9.5f, FontStyleBold, UnitPoint);
+        StringFormat btnFormat;
+        btnFormat.SetAlignment(StringAlignmentCenter);
+        btnFormat.SetLineAlignment(StringAlignmentCenter);
 
-    for (int i = 0; i < g_state.hudCount; ++i) {
-        const bool hot = (g_state.hud[i].id == g_state.hudHot);
-        const bool active = (g_state.hud[i].id == HUD_CLARITY && g_state.effectUltraClarity);
+        for (int i = 0; i < g_state.hudCount; ++i) {
+            const bool hot = (g_state.hud[i].id == g_state.hudHot);
+            const bool active = (g_state.hud[i].id == HUD_CLARITY && g_state.effectUltraClarity);
 
-        RectF itemRect(static_cast<float>(g_state.hud[i].rc.left),
-                      static_cast<float>(g_state.hud[i].rc.top),
-                      static_cast<float>(g_state.hud[i].rc.right - g_state.hud[i].rc.left),
-                      static_cast<float>(g_state.hud[i].rc.bottom - g_state.hud[i].rc.top));
+            RectF itemRect(static_cast<float>(g_state.hud[i].rc.left),
+                          static_cast<float>(g_state.hud[i].rc.top),
+                          static_cast<float>(g_state.hud[i].rc.right - g_state.hud[i].rc.left),
+                          static_cast<float>(g_state.hud[i].rc.bottom - g_state.hud[i].rc.top));
 
-        GraphicsPath itemPath;
-        AddRoundedRect(itemPath, itemRect, 15.0f);
+            GraphicsPath itemPath;
+            AddRoundedRect(itemPath, itemRect, 15.0f);
 
-        if (active) {
-            SolidBrush activeBrush(GLASS_BTN_ACTIVE);
-            Pen activeBorder(Color(255, 80, 240, 180), 1.2f);
-            graphics.FillPath(&activeBrush, &itemPath);
-            graphics.DrawPath(&activeBorder, &itemPath);
-        } else if (hot) {
-            SolidBrush hotBrush(GLASS_BTN_HOT);
-            Pen hotBorder(GLASS_BTN_BORDER_HOT, 1.2f);
-            graphics.FillPath(&hotBrush, &itemPath);
-            graphics.DrawPath(&hotBorder, &itemPath);
-        } else {
-            SolidBrush normalBrush(GLASS_BTN_NORMAL);
-            Pen normalBorder(GLASS_BTN_BORDER_NORMAL, 1.0f);
-            graphics.FillPath(&normalBrush, &itemPath);
-            graphics.DrawPath(&normalBorder, &itemPath);
+            if (active) {
+                SolidBrush activeBrush(GLASS_BTN_ACTIVE);
+                Pen activeBorder(Color(255, 80, 240, 180), 1.2f);
+                graphics.FillPath(&activeBrush, &itemPath);
+                graphics.DrawPath(&activeBorder, &itemPath);
+            } else if (hot) {
+                SolidBrush hotBrush(GLASS_BTN_HOT);
+                Pen hotBorder(GLASS_BTN_BORDER_HOT, 1.2f);
+                graphics.FillPath(&hotBrush, &itemPath);
+                graphics.DrawPath(&hotBorder, &itemPath);
+            } else {
+                SolidBrush normalBrush(GLASS_BTN_NORMAL);
+                Pen normalBorder(GLASS_BTN_BORDER_NORMAL, 1.0f);
+                graphics.FillPath(&normalBrush, &itemPath);
+                graphics.DrawPath(&normalBorder, &itemPath);
+            }
+
+            SolidBrush btnTextBrush((hot || active) ? Color(255, 255, 255) : Color(225, 230, 238));
+            graphics.DrawString(g_state.hud[i].label, -1, &btnFont, itemRect, &btnFormat, &btnTextBrush);
         }
-
-        SolidBrush btnTextBrush((hot || active) ? Color(255, 255, 255) : Color(225, 230, 238));
-        graphics.DrawString(g_state.hud[i].label, -1, &btnFont, itemRect, &btnFormat, &btnTextBrush);
     }
 }
 
@@ -2114,36 +2131,6 @@ std::wstring GetExecutableFolder() {
     return full.substr(0, pos);
 }
 
-void CheckForUpdates() {
-    ShowOSD(L"Buscando actualizaciones...");
-    std::wstring exeDir = GetExecutableFolder();
-    std::vector<std::wstring> candidates = {
-        exeDir + L"\\auto_updater.exe",
-        exeDir + L"\\updater\\auto_updater.exe",
-        exeDir + L"\\..\\dist\\auto_updater.exe",
-        exeDir + L"\\dist\\auto_updater.exe"
-    };
-
-    std::wstring updaterExe;
-    for (const auto& path : candidates) {
-        if (GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES) {
-            updaterExe = path;
-            break;
-        }
-    }
-
-    if (!updaterExe.empty()) {
-        ShellExecuteW(g_state.hwnd, L"open", updaterExe.c_str(), L"--gui", nullptr, SW_SHOWNORMAL);
-    } else {
-        std::wstring pyScript = exeDir + L"\\updater\\auto_updater.py";
-        if (GetFileAttributesW(pyScript.c_str()) != INVALID_FILE_ATTRIBUTES) {
-            ShellExecuteW(g_state.hwnd, L"open", L"python.exe", (L"\"" + pyScript + L"\" --gui").c_str(), nullptr, SW_SHOWNORMAL);
-        } else {
-            MessageBoxW(g_state.hwnd, L"No se encontró auto_updater.exe en la carpeta del programa.", APP_NAME_TEXT, MB_OK | MB_ICONWARNING);
-        }
-    }
-}
-
 bool OpenImageFileDialog(HWND hwnd) {
     ComPtr<IFileOpenDialog> dialog;
     HRESULT hr = CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
@@ -2224,7 +2211,7 @@ void ShowContextMenu(HWND hwnd, int x, int y) {
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, 1, L"Abrir imagen...\tCtrl + O");
     AppendMenuW(menu, MF_STRING, 2, L"Abrir carpeta...\tCtrl + Shift + O");
-    AppendMenuW(menu, MF_STRING, 18, L"Guardar imagen como...\tCtrl + S");
+    AppendMenuW(menu, MF_STRING, 17, L"Guardar imagen como...\tCtrl + S");
     AppendMenuW(menu, MF_STRING, 12, L"Mostrar en Explorador\tCtrl + E");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, 3, L"Copiar imagen\tCtrl + C");
@@ -2248,7 +2235,6 @@ void ShowContextMenu(HWND hwnd, int x, int y) {
     AppendMenuW(menu, MF_STRING, 22, L"Ver metadatos / EXIF...\tE");
     AppendMenuW(menu, MF_STRING, 16, L"Eliminar a papelera\tSupr");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, 17, L"Buscar actualizaciones...\tCtrl + U");
     AppendMenuW(menu, MF_STRING, 11, L"Acerca de ARTPICST");
 
     const int cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, x, y, 0, hwnd, nullptr);
@@ -2280,14 +2266,13 @@ void ShowContextMenu(HWND hwnd, int x, int y) {
         case 14: FlipVertical(); break;
         case 15: ToggleSlideshow(); break;
         case 16: DeleteCurrentImage(); break;
-        case 17: CheckForUpdates(); break;
-        case 18: SaveImageDialog(hwnd); break;
-        case 19: SetAsWallpaper(); break;
-        case 20: ToggleGrayscale(); break;
-        case 21: ToggleInvert(); break;
-        case 22: ShowExifDialog(hwnd); break;
-        case 23: ShowProgramInfoDialog(hwnd); break;
-        case 24: ToggleUltraClarity(); break;
+        case 17: SaveImageDialog(hwnd); break;
+        case 18: SetAsWallpaper(); break;
+        case 19: ToggleGrayscale(); break;
+        case 20: ToggleInvert(); break;
+        case 21: ShowExifDialog(hwnd); break;
+        case 22: ShowProgramInfoDialog(hwnd); break;
+        case 23: ToggleUltraClarity(); break;
         default: break;
     }
 }
@@ -2420,7 +2405,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     if (ctrl) SetAsWallpaper();
                     break;
                 case 'U':
-                    if (ctrl) CheckForUpdates();
+                    // Update functionality removed for lightweight implementation
                     break;
                 case 'D':
                     ToggleUltraClarity();
@@ -2549,6 +2534,22 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             tme.dwFlags = TME_LEAVE;
             tme.hwndTrack = hwnd;
             TrackMouseEvent(&tme);
+            
+            // Dock proximity detection
+            RECT client{};
+            GetClientRect(hwnd, &client);
+            const int distanceFromBottom = client.bottom - y;
+            
+            if (distanceFromBottom < DOCK_PROXIMITY_THRESHOLD) {
+                if (!g_state.hudVisible) {
+                    g_state.hudVisible = true;
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                }
+                g_state.dockLastActivity = GetTickCount();
+                KillTimer(hwnd, TIMER_DOCK_HIDE);
+                SetTimer(hwnd, TIMER_DOCK_HIDE, DOCK_HIDE_MS, nullptr);
+            }
+            
             const HudId hot = HitTestHud(x, y);
             if (hot != g_state.hudHot) {
                 g_state.hudHot = hot;
@@ -2579,6 +2580,29 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 InvalidateRect(hwnd, nullptr, FALSE);
             } else if (wParam == TIMER_SLIDESHOW) {
                 NextImage();
+            } else if (wParam == TIMER_DOCK_HIDE) {
+                RECT client{};
+                GetClientRect(hwnd, &client);
+                POINT pt{};
+                GetCursorPos(&pt);
+                ScreenToClient(hwnd, &pt);
+                const int distanceFromBottom = client.bottom - pt.y;
+                
+                if (distanceFromBottom >= DOCK_PROXIMITY_THRESHOLD) {
+                    g_state.hudVisible = false;
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                } else {
+                    // Cursor still near bottom, reset timer
+                    g_state.dockLastActivity = GetTickCount();
+                    SetTimer(hwnd, TIMER_DOCK_HIDE, DOCK_HIDE_MS, nullptr);
+                }
+            } else if (wParam == TIMER_GIF) {
+                if (g_state.isGifAnimated && g_state.gifTotalFrames > 1) {
+                    // Advance to next frame
+                    g_state.gifCurrentFrame = (g_state.gifCurrentFrame + 1) % g_state.gifTotalFrames;
+                    g_state.gifLastFrameTime = GetTickCount();
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                }
             }
             return 0;
         case WM_DROPFILES: {
@@ -2598,6 +2622,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_DESTROY:
             KillTimer(hwnd, TIMER_OSD);
             KillTimer(hwnd, TIMER_SLIDESHOW);
+            KillTimer(hwnd, TIMER_DOCK_HIDE);
+            KillTimer(hwnd, TIMER_GIF);
             StopPrefetchThread();
             FreeCurrentImage();
             FreeDoubleBuffer();
