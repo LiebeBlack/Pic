@@ -1542,7 +1542,7 @@ unsigned char* DecodeWithStb(const std::wstring& filepath, int& width, int& heig
         {
             FILE* gifFile = nullptr;
 #ifdef _WIN32
-            _wfopen_s(&gifFile, path.c_str(), L"rb");
+            _wfopen_s(&gifFile, filepath.c_str(), L"rb");
 #else
             gifFile = fopen(utf8.c_str(), "rb");
 #endif
