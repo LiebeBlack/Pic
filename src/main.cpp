@@ -480,8 +480,10 @@ LRESULT CALLBACK ThemedDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
             HDC hdc = BeginPaint(hwnd, &ps);
             
             Graphics graphics(hdc);
-            graphics.SetCompositingQuality(CompositingQualityHighQuality);
-            graphics.SetSmoothingMode(SmoothingModeHighQuality);
+            // Configuración de calidad MÁXIMA para diálogos
+            graphics.SetCompositingQuality(CompositingQualityAssumeLinear);
+            graphics.SetSmoothingMode(SmoothingModeAntiAlias);
+            graphics.SetPixelOffsetMode(PixelOffsetModeHighQuality);
             graphics.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
             
             RECT client;
@@ -1664,6 +1666,11 @@ HudId HitTestHud(int x, int y) {
 void RenderHud(Graphics& graphics, const RECT& client) {
     LayoutHud(client);
 
+    // Configuración de calidad MÁXIMA para UI
+    graphics.SetCompositingQuality(CompositingQualityAssumeLinear);
+    graphics.SetSmoothingMode(SmoothingModeAntiAlias);
+    graphics.SetPixelOffsetMode(PixelOffsetModeHighQuality);
+
     // Auto-hide dock logic
     bool shouldShowDock = true;
     if (g_state.dockAutoHide) {
@@ -2141,7 +2148,13 @@ bool CopyImageToClipboard() {
     if (g_state.currentRotation != 0 || g_state.currentFlipH || g_state.currentFlipV) {
         if (rotated.GetLastStatus() != Ok) return false;
         Graphics g(&rotated);
+        
+        // Configuración de calidad MÁXIMA para portapapeles
+        g.SetCompositingQuality(CompositingQualityAssumeLinear);
         g.SetInterpolationMode(InterpolationModeHighQualityBicubic);
+        g.SetSmoothingMode(SmoothingModeAntiAlias);
+        g.SetPixelOffsetMode(PixelOffsetModeHighQuality);
+        
         g.TranslateTransform(static_cast<REAL>(boxW) * 0.5f, static_cast<REAL>(boxH) * 0.5f);
         g.RotateTransform(static_cast<REAL>(g_state.currentRotation));
         if (g_state.currentFlipH || g_state.currentFlipV) {
@@ -2162,7 +2175,7 @@ bool CopyImageToClipboard() {
     EmptyClipboard();
     SetClipboardData(CF_BITMAP, hBitmap);
     CloseClipboard();
-    ShowOSD(L"Imagen copiada al portapapeles");
+    ShowOSD(L"Imagen copiada al portapapeles (Calidad Máxima)");
     InvalidateRect(g_state.hwnd, nullptr, FALSE);
     return true;
 }
