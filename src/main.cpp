@@ -73,22 +73,66 @@ using namespace Gdiplus;
 // Configuración de aplicación y constantes visuales
 const wchar_t CLASS_NAME[] = L"ARTPICSTWindow";
 const wchar_t APP_NAME_TEXT[] = L"ARTPICST";
-const wchar_t APP_VERSION_TEXT[] = L"1.1.0 Premium";
+const wchar_t APP_VERSION_TEXT[] = L"1.1.0 Premium AI";
 
-// Colores del sistema (tema oscuro)
-const COLORREF BG_COLOR = RGB(10, 12, 18);
-const COLORREF CHECKER_A = RGB(15, 17, 25);
-const COLORREF CHECKER_B = RGB(22, 25, 35);
+// Sistema de temas inteligente
+enum class ThemeMode {
+    Auto,           // Detectar automáticamente del sistema
+    Dark,           // Forzar tema oscuro
+    Light           // Forzar tema claro
+};
 
-// Colores de interfaz Glassmorphism/Acrílica
-const Color GLASS_DOCK_BG(240, 12, 14, 20);
-const Color GLASS_DOCK_BORDER(130, 200, 210, 230);
-const Color GLASS_DOCK_SHADOW(180, 0, 0, 0);
-const Color GLASS_BTN_NORMAL(80, 200, 210, 230);
-const Color GLASS_BTN_BORDER_NORMAL(65, 180, 190, 210);
-const Color GLASS_BTN_HOT(250, 70, 140, 220);
-const Color GLASS_BTN_BORDER_HOT(255, 130, 180, 255);
-const Color GLASS_BTN_ACTIVE(250, 50, 160, 180);
+// Sistema de tamaño adaptativo
+enum class UISize {
+    Small,          // Para pantallas pequeñas
+    Medium,         // Tamaño estándar
+    Large           // Para pantallas grandes
+};
+
+// Colores del sistema (tema oscuro - por defecto)
+const COLORREF BG_COLOR_DARK = RGB(10, 12, 18);
+const COLORREF CHECKER_A_DARK = RGB(15, 17, 25);
+const COLORREF CHECKER_B_DARK = RGB(22, 25, 35);
+
+// Colores del sistema (tema claro)
+const COLORREF BG_COLOR_LIGHT = RGB(245, 245, 250);
+const COLORREF CHECKER_A_LIGHT = RGB(235, 235, 240);
+const COLORREF CHECKER_B_LIGHT = RGB(225, 225, 230);
+
+// Colores actuales (se establecen dinámicamente)
+COLORREF BG_COLOR = BG_COLOR_DARK;
+COLORREF CHECKER_A = CHECKER_A_DARK;
+COLORREF CHECKER_B = CHECKER_B_DARK;
+
+// Colores de interfaz Glassmorphism/Acrílica (tema oscuro)
+const Color GLASS_DOCK_BG_DARK(240, 12, 14, 20);
+const Color GLASS_DOCK_BORDER_DARK(130, 200, 210, 230);
+const Color GLASS_DOCK_SHADOW_DARK(180, 0, 0, 0);
+const Color GLASS_BTN_NORMAL_DARK(80, 200, 210, 230);
+const Color GLASS_BTN_BORDER_NORMAL_DARK(65, 180, 190, 210);
+const Color GLASS_BTN_HOT_DARK(250, 70, 140, 220);
+const Color GLASS_BTN_BORDER_HOT_DARK(255, 130, 180, 255);
+const Color GLASS_BTN_ACTIVE_DARK(250, 50, 160, 180);
+
+// Colores de interfaz Glassmorphism/Acrílica (tema claro)
+const Color GLASS_DOCK_BG_LIGHT(250, 245, 240, 230);
+const Color GLASS_DOCK_BORDER_LIGHT(100, 120, 140, 150);
+const Color GLASS_DOCK_SHADOW_LIGHT(150, 0, 0, 0);
+const Color GLASS_BTN_NORMAL_LIGHT(150, 170, 190, 200);
+const Color GLASS_BTN_BORDER_NORMAL_LIGHT(130, 150, 170, 180);
+const Color GLASS_BTN_HOT_LIGHT(200, 100, 50, 80);
+const Color GLASS_BTN_BORDER_HOT_LIGHT(180, 130, 80, 100);
+const Color GLASS_BTN_ACTIVE_LIGHT(180, 80, 40, 60);
+
+// Colores actuales de interfaz (se establecen dinámicamente)
+Color GLASS_DOCK_BG = GLASS_DOCK_BG_DARK;
+Color GLASS_DOCK_BORDER = GLASS_DOCK_BORDER_DARK;
+Color GLASS_DOCK_SHADOW = GLASS_DOCK_SHADOW_DARK;
+Color GLASS_BTN_NORMAL = GLASS_BTN_NORMAL_DARK;
+Color GLASS_BTN_BORDER_NORMAL = GLASS_BTN_BORDER_NORMAL_DARK;
+Color GLASS_BTN_HOT = GLASS_BTN_HOT_DARK;
+Color GLASS_BTN_BORDER_HOT = GLASS_BTN_BORDER_HOT_DARK;
+Color GLASS_BTN_ACTIVE = GLASS_BTN_ACTIVE_DARK;
 
 // Configuración de zoom y renderizado
 const float MIN_ZOOM = 0.01f;
@@ -103,6 +147,16 @@ const bool ENABLE_ULTRA_QUALITY_RENDERING = true;
 const bool ENABLE_ADAPTIVE_SHARPNESS = true;
 const bool ENABLE_AUTO_CONTRAST = true;
 const bool ENABLE_GAMMA_CORRECTION = true;
+
+// Sistema de tamaño UI adaptativo
+const int UI_SCALE_SMALL = 80;      // 80% del tamaño normal
+const int UI_SCALE_MEDIUM = 100;    // 100% del tamaño normal
+const int UI_SCALE_LARGE = 120;    // 120% del tamaño normal
+
+// Estado de tema y tamaño
+ThemeMode g_currentTheme = ThemeMode::Auto;
+UISize g_currentUISize = UISize::Medium;
+int g_uiScale = UI_SCALE_MEDIUM;
 
 // Configuración de temporizadores
 const UINT OSD_MS = 3500;
@@ -265,6 +319,10 @@ struct AppState {
     DWORD osdDisplayTime = 0;
     std::wstring statusMessage;
     bool isSlideshowActive = false;
+    
+    // Sistema de tema inteligente
+    bool darkModeDetected = false;
+    bool themeInitialized = false;
 
     bool isFullscreen = false;
     WindowMode windowMode = WindowMode::Normal;
@@ -319,6 +377,27 @@ bool LoadImageByIndex(size_t index);
 void RequestPrefetch(size_t targetIndex);
 void StartPrefetchThread();
 void StopPrefetchThread();
+
+// Funciones de sistema inteligente
+bool DetectSystemDarkMode();
+void ApplyTheme(ThemeMode theme);
+void InitializeIntelligentTheme();
+void DetectOptimalUISize();
+void ApplyUISize(UISize size);
+void InitializeIntelligentUI();
+
+// Funciones de texto inteligente
+struct TextSizeInfo {
+    float optimalFontSize;
+    int optimalWidth;
+    int optimalHeight;
+    int lineCount;
+    bool needsScrolling;
+};
+
+TextSizeInfo CalculateOptimalTextSize(const wchar_t* text, int maxWidth, int maxHeight, const wchar_t* fontName = L"Segoe UI");
+void CalculateDialogSize(const wchar_t* title, const wchar_t* message, UINT buttons, int& outWidth, int& outHeight);
+float GetAdaptiveFontSize(const wchar_t* text, int availableWidth, int availableHeight, const wchar_t* fontName = L"Segoe UI");
 void ConvertRGBAtoBGRA(unsigned char* pixels, int width, int height, bool& outHasAlpha);
 void EnsureImageVisible();
 void FitImageToWindow(int windowWidth, int windowHeight);
@@ -497,43 +576,56 @@ LRESULT CALLBACK ThemedDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
             Pen borderPen(Color(255, 80, 200, 210), 1.0f);
             graphics.DrawRectangle(&borderPen, 0, 0, client.right - 1, client.bottom - 1);
             
-            // Title
-            Gdiplus::FontFamily titleFamily(L"Segoe UI");
-            Gdiplus::Font titleFont(&titleFamily, 16.0f, FontStyleBold, UnitPoint);
-            StringFormat titleFormat;
-            titleFormat.SetAlignment(StringAlignmentCenter);
-            titleFormat.SetLineAlignment(StringAlignmentNear);
-            
-            SolidBrush titleBrush(Color(255, 242, 245, 250));
-            RectF titleRect(0.0f, 20.0f, static_cast<float>(client.right), 40.0f);
-            graphics.DrawString(g_dialogState.title.c_str(), -1, &titleFont, titleRect, &titleFormat, &titleBrush);
-            
-            // Message
-            Gdiplus::Font messageFont(&titleFamily, 11.0f, FontStyleRegular, UnitPoint);
-            StringFormat messageFormat;
-            messageFormat.SetAlignment(StringAlignmentCenter);
-            messageFormat.SetLineAlignment(StringAlignmentCenter);
-            
-            SolidBrush messageBrush(Color(255, 200, 210, 220));
-            RectF messageRect(40.0f, 80.0f, static_cast<float>(client.right - 80), static_cast<float>(client.bottom - 160));
-            graphics.DrawString(g_dialogState.message.c_str(), -1, &messageFont, messageRect, &messageFormat, &messageBrush);
-            
-            // Icon
-            if (g_dialogState.icon == MB_ICONERROR) {
-                SolidBrush iconBrush(Color(255, 255, 100, 100));
-                graphics.FillEllipse(&iconBrush, 30, 30, 40, 40);
-            } else if (g_dialogState.icon == MB_ICONWARNING) {
-                SolidBrush iconBrush(Color(255, 255, 200, 100));
-                graphics.FillEllipse(&iconBrush, 30, 30, 40, 40);
-            } else if (g_dialogState.icon == MB_ICONQUESTION) {
-                SolidBrush iconBrush(Color(255, 100, 200, 255));
-                graphics.FillEllipse(&iconBrush, 30, 30, 40, 40);
-            } else {
-                SolidBrush iconBrush(Color(255, 100, 255, 150));
-                graphics.FillEllipse(&iconBrush, 30, 30, 40, 40);
+            // Title - Tamaño INTELIGENTE adaptativo
+            if (!g_dialogState.title.empty()) {
+                float titleFontSize = GetAdaptiveFontSize(g_dialogState.title.c_str(), client.right, 60, L"Segoe UI");
+                Gdiplus::FontFamily titleFamily(L"Segoe UI");
+                Gdiplus::Font titleFont(&titleFamily, titleFontSize, FontStyleBold, UnitPoint);
+                StringFormat titleFormat;
+                titleFormat.SetAlignment(StringAlignmentCenter);
+                titleFormat.SetLineAlignment(StringAlignmentNear);
+                titleFormat.SetTrimming(StringTrimmingEllipsisCharacter);
+                
+                SolidBrush titleBrush(Color(255, 242, 245, 250));
+                RectF titleRect(0.0f, 20.0f, static_cast<float>(client.right), 50.0f);
+                graphics.DrawString(g_dialogState.title.c_str(), -1, &titleFont, titleRect, &titleFormat, &titleBrush);
             }
             
-            // Draw buttons
+            // Message - Tamaño INTELIGENTE adaptativo
+            if (!g_dialogState.message.empty()) {
+                float messageFontSize = GetAdaptiveFontSize(g_dialogState.message.c_str(), client.right - 80, client.bottom - 150, L"Segoe UI");
+                Gdiplus::FontFamily messageFamily(L"Segoe UI");
+                Gdiplus::Font messageFont(&messageFamily, messageFontSize, FontStyleRegular, UnitPoint);
+                StringFormat messageFormat;
+                messageFormat.SetAlignment(StringAlignmentCenter);
+                messageFormat.SetLineAlignment(StringAlignmentCenter);
+                messageFormat.SetTrimming(StringTrimmingEllipsisWord);
+                
+                SolidBrush messageBrush(Color(255, 200, 210, 220));
+                RectF messageRect(40.0f, 80.0f, static_cast<float>(client.right - 80), static_cast<float>(client.bottom - 140));
+                graphics.DrawString(g_dialogState.message.c_str(), -1, &messageFont, messageRect, &messageFormat, &messageBrush);
+            }
+            
+            // Icon - Tamaño adaptativo
+            int iconSize = 40 * g_uiScale / 100;
+            int iconX = 30 * g_uiScale / 100;
+            int iconY = 30 * g_uiScale / 100;
+            
+            if (g_dialogState.icon == MB_ICONERROR) {
+                SolidBrush iconBrush(Color(255, 255, 100, 100));
+                graphics.FillEllipse(&iconBrush, static_cast<float>(iconX), static_cast<float>(iconY), static_cast<float>(iconSize), static_cast<float>(iconSize));
+            } else if (g_dialogState.icon == MB_ICONWARNING) {
+                SolidBrush iconBrush(Color(255, 255, 200, 100));
+                graphics.FillEllipse(&iconBrush, static_cast<float>(iconX), static_cast<float>(iconY), static_cast<float>(iconSize), static_cast<float>(iconSize));
+            } else if (g_dialogState.icon == MB_ICONQUESTION) {
+                SolidBrush iconBrush(Color(255, 100, 200, 255));
+                graphics.FillEllipse(&iconBrush, static_cast<float>(iconX), static_cast<float>(iconY), static_cast<float>(iconSize), static_cast<float>(iconSize));
+            } else {
+                SolidBrush iconBrush(Color(255, 100, 255, 150));
+                graphics.FillEllipse(&iconBrush, static_cast<float>(iconX), static_cast<float>(iconY), static_cast<float>(iconSize), static_cast<float>(iconSize));
+            }
+            
+            // Draw buttons - Tamaño adaptativo
             int buttonWidth = 100;
             int buttonHeight = 32;
             int buttonY = client.bottom - 50;
@@ -658,9 +750,9 @@ int ShowThemedMessageBox(HWND parent, const wchar_t* title, const wchar_t* messa
     g_dialogState.icon = icon;
     g_dialogState.result = IDOK;
     
-    // Calculate dialog size
-    int width = 400;
-    int height = 250;
+    // Calcular tamaño de diálogo INTELIGENTE según contenido
+    int width = 0, height = 0;
+    CalculateDialogSize(title, message, buttons, width, height);
     
     // Center dialog on parent or screen
     RECT parentRect;
@@ -677,18 +769,24 @@ int ShowThemedMessageBox(HWND parent, const wchar_t* title, const wchar_t* messa
     int y = parentRect.top + (parentRect.bottom - parentRect.top - height) / 2;
     
     HWND hwnd = CreateWindowExW(
-        WS_EX_APPWINDOW | WS_EX_DLGMODALFRAME,
+        WS_EX_APPWINDOW | WS_EX_DLGMODALFRAME | WS_EX_TOPMOST,
         DIALOG_CLASS,
         title,
-        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
         x, y, width, height,
         parent, nullptr, GetModuleHandle(nullptr), nullptr
     );
     
     if (!hwnd) return IDOK;
     
+    // Asegurar que el diálogo sea visible y tenga el foco
     EnableWindow(parent ? parent : GetActiveWindow(), FALSE);
-    ShowWindow(hwnd, SW_SHOW);
+    ShowWindow(hwnd, SW_SHOWNORMAL);
+    SetForegroundWindow(hwnd);
+    UpdateWindow(hwnd);
+    
+    // Forzar redibujado inmediato
+    InvalidateRect(hwnd, nullptr, TRUE);
     UpdateWindow(hwnd);
     
     MSG msg;
@@ -706,6 +804,305 @@ int ShowThemedMessageBox(HWND parent, const wchar_t* title, const wchar_t* messa
 // Inicialización de GDI+
 bool InitGDIPlus() {
     return GdiplusStartup(&g_state.gdiplusToken, &g_state.gdiplusStartupInput, nullptr) == Ok;
+}
+
+// Sistema de tema inteligente
+bool DetectSystemDarkMode() {
+    // Detectar tema del sistema usando configuración de Windows
+    DWORD darkMode = 0;
+    DWORD size = sizeof(darkMode);
+    HKEY hKey;
+    
+    // Intentar leer configuración de tema de apps
+    if (RegOpenKeyExA(HKEY_CURRENT_USER, "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+        if (RegQueryValueExA(hKey, "AppsUseLightTheme", nullptr, nullptr, reinterpret_cast<LPBYTE>(&darkMode), &size) == ERROR_SUCCESS) {
+            RegCloseKey(hKey);
+            return darkMode == 0; // 0 = oscuro, 1 = claro
+        }
+        RegCloseKey(hKey);
+    }
+    
+    // Fallback: detectar usando registry del sistema
+    if (RegOpenKeyExA(HKEY_CURRENT_USER, "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+        if (RegQueryValueExA(hKey, "SystemUsesLightTheme", nullptr, nullptr, reinterpret_cast<LPBYTE>(&darkMode), &size) == ERROR_SUCCESS) {
+            RegCloseKey(hKey);
+            return darkMode == 0;
+        }
+        RegCloseKey(hKey);
+    }
+    
+    // Default: modo oscuro
+    return true;
+}
+
+void ApplyTheme(ThemeMode theme) {
+    bool useDarkTheme = false;
+    
+    switch (theme) {
+        case ThemeMode::Auto:
+            useDarkTheme = DetectSystemDarkMode();
+            break;
+        case ThemeMode::Dark:
+            useDarkTheme = true;
+            break;
+        case ThemeMode::Light:
+            useDarkTheme = false;
+            break;
+    }
+    
+    g_state.darkModeDetected = useDarkTheme;
+    
+    if (useDarkTheme) {
+        // Aplicar tema oscuro
+        BG_COLOR = BG_COLOR_DARK;
+        CHECKER_A = CHECKER_A_DARK;
+        CHECKER_B = CHECKER_B_DARK;
+        GLASS_DOCK_BG = GLASS_DOCK_BG_DARK;
+        GLASS_DOCK_BORDER = GLASS_DOCK_BORDER_DARK;
+        GLASS_DOCK_SHADOW = GLASS_DOCK_SHADOW_DARK;
+        GLASS_BTN_NORMAL = GLASS_BTN_NORMAL_DARK;
+        GLASS_BTN_BORDER_NORMAL = GLASS_BTN_BORDER_NORMAL_DARK;
+        GLASS_BTN_HOT = GLASS_BTN_HOT_DARK;
+        GLASS_BTN_BORDER_HOT = GLASS_BTN_BORDER_HOT_DARK;
+        GLASS_BTN_ACTIVE = GLASS_BTN_ACTIVE_DARK;
+    } else {
+        // Aplicar tema claro
+        BG_COLOR = BG_COLOR_LIGHT;
+        CHECKER_A = CHECKER_A_LIGHT;
+        CHECKER_B = CHECKER_B_LIGHT;
+        GLASS_DOCK_BG = GLASS_DOCK_BG_LIGHT;
+        GLASS_DOCK_BORDER = GLASS_DOCK_BORDER_LIGHT;
+        GLASS_DOCK_SHADOW = GLASS_DOCK_SHADOW_LIGHT;
+        GLASS_BTN_NORMAL = GLASS_BTN_NORMAL_LIGHT;
+        GLASS_BTN_BORDER_NORMAL = GLASS_BTN_BORDER_NORMAL_LIGHT;
+        GLASS_BTN_HOT = GLASS_BTN_HOT_LIGHT;
+        GLASS_BTN_BORDER_HOT = GLASS_BTN_BORDER_HOT_LIGHT;
+        GLASS_BTN_ACTIVE = GLASS_BTN_ACTIVE_LIGHT;
+    }
+    
+    // Actualizar brush de clase si existe
+    if (g_state.classBrush) {
+        DeleteObject(g_state.classBrush);
+        g_state.classBrush = CreateSolidBrush(BG_COLOR);
+    }
+}
+
+void InitializeIntelligentTheme() {
+    if (!g_state.themeInitialized) {
+        g_currentTheme = ThemeMode::Auto;
+        ApplyTheme(g_currentTheme);
+        g_state.themeInitialized = true;
+    }
+}
+
+// Sistema de tamaño UI adaptativo
+void DetectOptimalUISize() {
+    int screenWidth = GetSystemMetrics(SM_CXSCREEN);
+    int screenHeight = GetSystemMetrics(SM_CYSCREEN);
+    
+    // Calcular DPI de pantalla
+    HDC hdc = GetDC(nullptr);
+    int dpiX = GetDeviceCaps(hdc, LOGPIXELSX);
+    ReleaseDC(nullptr, hdc);
+    
+    // Determinar tamaño óptimo basado en resolución y DPI
+    if (screenWidth >= 2560 && screenHeight >= 1440) {
+        // Pantallas 4K o grandes
+        g_currentUISize = UISize::Large;
+    } else if (screenWidth <= 1366 || screenHeight <= 768) {
+        // Pantallas pequeñas
+        g_currentUISize = UISize::Small;
+    } else {
+        // Pantallas estándar
+        g_currentUISize = UISize::Medium;
+    }
+    
+    // Ajustar según DPI alto
+    if (dpiX >= 144) {
+        // High DPI (150% o más)
+        if (g_currentUISize == UISize::Small) {
+            g_currentUISize = UISize::Medium;
+        } else if (g_currentUISize == UISize::Medium) {
+            g_currentUISize = UISize::Large;
+        }
+    }
+}
+
+void ApplyUISize(UISize size) {
+    switch (size) {
+        case UISize::Small:
+            g_uiScale = UI_SCALE_SMALL;
+            break;
+        case UISize::Medium:
+            g_uiScale = UI_SCALE_MEDIUM;
+            break;
+        case UISize::Large:
+            g_uiScale = UI_SCALE_LARGE;
+            break;
+    }
+}
+
+void InitializeIntelligentUI() {
+    // Inicializar tema inteligente
+    InitializeIntelligentTheme();
+    
+    // Detectar y aplicar tamaño óptimo
+    DetectOptimalUISize();
+    ApplyUISize(g_currentUISize);
+}
+
+// Sistema de texto inteligente
+TextSizeInfo CalculateOptimalTextSize(const wchar_t* text, int maxWidth, int maxHeight, const wchar_t* fontName) {
+    TextSizeInfo info = { 0 };
+    info.needsScrolling = false;
+    
+    if (!text || !text[0]) {
+        info.optimalFontSize = 11.0f;
+        info.optimalWidth = 400;
+        info.optimalHeight = 200;
+        info.lineCount = 0;
+        return info;
+    }
+    
+    // Crear contexto temporal para medición
+    HDC hdc = GetDC(nullptr);
+    if (!hdc) {
+        info.optimalFontSize = 11.0f;
+        info.optimalWidth = 400;
+        info.optimalHeight = 200;
+        info.lineCount = 1;
+        return info;
+    }
+    
+    // Inicializar GDI+ temporalmente si no está inicializado
+    ULONG_PTR gdiplusToken = 0;
+    GdiplusStartupInput gdiplusStartupInput;
+    gdiplusStartupInput.GdiplusVersion = 1;
+    bool gdiplusInitialized = (GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, nullptr) == Ok);
+    
+    if (gdiplusInitialized) {
+        Graphics graphics(hdc);
+        
+        // Calcular longitud del texto y estimar líneas
+        size_t textLength = wcslen(text);
+        int estimatedLines = 1;
+        for (size_t i = 0; i < textLength; i++) {
+            if (text[i] == L'\n') estimatedLines++;
+        }
+        
+        // Ajustar tamaño de fuente según longitud del texto
+        float fontSize = 11.0f; // Base
+        if (textLength < 50) {
+            fontSize = 14.0f; // Texto corto - fuente más grande
+        } else if (textLength < 150) {
+            fontSize = 12.0f; // Texto medio
+        } else if (textLength < 300) {
+            fontSize = 11.0f; // Texto largo
+        } else {
+            fontSize = 10.0f; // Texto muy largo - fuente más pequeña
+        }
+        
+        // Ajustar según escala UI
+        fontSize = fontSize * g_uiScale / 100.0f;
+        
+        // Medir texto con diferentes tamaños
+        FontFamily fontFamily(fontName);
+        Font font(&fontFamily, fontSize, FontStyleRegular, UnitPoint);
+        StringFormat format;
+        format.SetAlignment(StringAlignmentCenter);
+        format.SetLineAlignment(StringAlignmentCenter);
+        format.SetTrimming(StringTrimmingEllipsisCharacter);
+        
+        RectF layoutRect(0.0f, 0.0f, static_cast<float>(maxWidth), static_cast<float>(maxHeight));
+        RectF boundsRect;
+        
+        if (graphics.MeasureString(text, -1, &font, layoutRect, &format, &boundsRect) == Ok) {
+            info.optimalWidth = static_cast<int>(boundsRect.Width + 80); // Padding
+            info.optimalHeight = static_cast<int>(boundsRect.Height + 100); // Espacio para título y botones
+            info.lineCount = estimatedLines;
+            
+            // Verificar si necesita scrolling
+            if (boundsRect.Height > maxHeight - 100) {
+                info.needsScrolling = true;
+                info.optimalHeight = maxHeight;
+            }
+            
+            // Ajustar ancho mínimo y máximo
+            info.optimalWidth = std::max(400, std::min(info.optimalWidth, 800));
+            info.optimalHeight = std::max(250, std::min(info.optimalHeight, 600));
+        } else {
+            // Fallback si falla la medición
+            info.optimalWidth = 500;
+            info.optimalHeight = 300 + (estimatedLines * 20);
+            info.lineCount = estimatedLines;
+        }
+        
+        info.optimalFontSize = fontSize;
+        
+        GdiplusShutdown(gdiplusToken);
+    } else {
+        // Fallback sin GDI+
+        info.optimalFontSize = 11.0f * g_uiScale / 100.0f;
+        info.optimalWidth = 500;
+        info.optimalHeight = 300;
+        info.lineCount = 1;
+    }
+    
+    ReleaseDC(nullptr, hdc);
+    return info;
+}
+
+void CalculateDialogSize(const wchar_t* title, const wchar_t* message, UINT buttons, int& outWidth, int& outHeight) {
+    // Calcular tamaño basado en contenido
+    TextSizeInfo titleInfo = CalculateOptimalTextSize(title, 700, 100, L"Segoe UI");
+    TextSizeInfo messageInfo = CalculateOptimalTextSize(message, 700, 400, L"Segoe UI");
+    
+    // Combinar tamaños
+    outWidth = std::max(titleInfo.optimalWidth, messageInfo.optimalWidth);
+    outHeight = titleInfo.optimalHeight + messageInfo.optimalHeight + 80; // Espacio para botones
+    
+    // Ajustar según tipo de botones
+    if (buttons == MB_YESNO) {
+        outWidth = std::max(outWidth, 500); // Mínimo para dos botones
+    }
+    
+    // Ajustar según escala UI
+    outWidth = outWidth * g_uiScale / 100;
+    outHeight = outHeight * g_uiScale / 100;
+    
+    // Límites razonables
+    outWidth = std::max(400, std::min(outWidth, 900));
+    outHeight = std::max(250, std::min(outHeight, 700));
+}
+
+float GetAdaptiveFontSize(const wchar_t* text, int availableWidth, int availableHeight, const wchar_t* fontName) {
+    if (!text || !text[0]) return 11.0f;
+    
+    size_t textLength = wcslen(text);
+    float baseSize = 11.0f;
+    
+    // Ajustar según longitud del texto
+    if (textLength < 30) {
+        baseSize = 14.0f;
+    } else if (textLength < 100) {
+        baseSize = 12.0f;
+    } else if (textLength < 200) {
+        baseSize = 11.0f;
+    } else {
+        baseSize = 10.0f;
+    }
+    
+    // Ajustar según espacio disponible
+    if (availableWidth < 400) {
+        baseSize *= 0.9f;
+    } else if (availableWidth > 600) {
+        baseSize *= 1.1f;
+    }
+    
+    // Ajustar según escala UI
+    baseSize = baseSize * g_uiScale / 100.0f;
+    
+    return baseSize;
 }
 
 // Gestión de buffers y recursos
@@ -1130,16 +1527,101 @@ unsigned char* DecodeWithStb(const std::wstring& filepath, int& width, int& heig
     }
     ConvertRGBAtoBGRA(pixels, width, height, outHasAlpha);
 
-    // Handle GIF animation state
+    // Handle GIF animation state - Cargar GIF con animación real
     if (isGif) {
-        g_state.isGifAnimated = true;
-        g_state.gifCurrentFrame = 0;
-        g_state.gifTotalFrames = 1; // For now, single frame
-        g_state.gifLastFrameTime = GetTickCount();
+        // Intentar cargar animación GIF real usando stb_image
+        int* delays = nullptr;
+        int frameCount = 0;
+        int tempWidth, tempHeight, tempChannels;
+        
+        // Cargar GIF animado (stb_load_gif es más específico para GIFs)
+        unsigned char** frames = stbi_load_gif(utf8.c_str(), &tempWidth, &tempHeight, &tempChannels, &delays, &frameCount, 4);
+        
+        if (frames && frameCount > 1) {
+            width = tempWidth;
+            height = tempHeight;
+            channels = tempChannels;
+            
+            // GIF animado con múltiples frames
+            g_state.isGifAnimated = true;
+            g_state.gifCurrentFrame = 0;
+            g_state.gifTotalFrames = frameCount;
+            g_state.gifLastFrameTime = GetTickCount();
+            
+            // Copiar delays
+            g_state.gifFrameDelays.clear();
+            for (int i = 0; i < frameCount; i++) {
+                g_state.gifFrameDelays.push_back(delays[i] ? delays[i] : 100); // Default 100ms
+            }
+            
+            // Copiar frames
+            g_state.gifFrameData.clear();
+            for (int i = 0; i < frameCount; i++) {
+                size_t frameBytes = width * height * 4;
+                unsigned char* frameCopy = new unsigned char[frameBytes];
+                memcpy(frameCopy, frames[i], frameBytes);
+                ConvertRGBAtoBGRA(frameCopy, width, height, outHasAlpha);
+                g_state.gifFrameData.push_back(frameCopy);
+            }
+            
+            // Usar el primer frame como imagen principal
+            size_t bytes = 0;
+            if (!SafePixelBytes(width, height, bytes)) {
+                // Limpiar memoria en caso de error
+                for (auto frame : g_state.gifFrameData) {
+                    delete[] frame;
+                }
+                g_state.gifFrameData.clear();
+                g_state.gifFrameDelays.clear();
+                g_state.isGifAnimated = false;
+                stbi_image_free(frames);
+                free(delays);
+                return nullptr;
+            }
+            
+            unsigned char* firstFrameCopy = new unsigned char[bytes];
+            memcpy(firstFrameCopy, g_state.gifFrameData[0], bytes);
+            
+            // Liberar memoria de stbi
+            stbi_image_free(frames);
+            free(delays);
+            
+            return firstFrameCopy;
+        } else {
+            // GIF no animado o error, cargar como imagen estática con stb_load normal
+            g_state.isGifAnimated = false;
+            g_state.gifCurrentFrame = 0;
+            g_state.gifTotalFrames = 0;
+            g_state.gifFrameData.clear();
+            g_state.gifFrameDelays.clear();
+            
+            if (frames) {
+                stbi_image_free(frames);
+            }
+            if (delays) {
+                free(delays);
+            }
+            
+            // Cargar como imagen estática normal
+            unsigned char* staticPixels = stbi_load(utf8.c_str(), &width, &height, &channels, 4);
+            if (!staticPixels) return nullptr;
+            
+            size_t bytes = 0;
+            if (!SafePixelBytes(width, height, bytes)) {
+                stbi_image_free(staticPixels);
+                width = height = channels = 0;
+                return nullptr;
+            }
+            ConvertRGBAtoBGRA(staticPixels, width, height, outHasAlpha);
+            
+            return staticPixels;
+        }
     } else {
         g_state.isGifAnimated = false;
         g_state.gifCurrentFrame = 0;
         g_state.gifTotalFrames = 0;
+        g_state.gifFrameData.clear();
+        g_state.gifFrameDelays.clear();
         
         int exif = GetExifOrientationFromJpeg(filepath);
         if (exif == 6) autoRotateDeg = 90;
@@ -1162,6 +1644,16 @@ unsigned char* DecodeWithWic(const std::wstring& filepath, int& width, int& heig
     hr = factory->CreateDecoderFromFilename(filepath.c_str(), nullptr, GENERIC_READ,
                                             WICDecodeMetadataCacheOnDemand, &decoder);
     if (FAILED(hr) || !decoder) return nullptr;
+
+    // Verificar si es GIF animado
+    GUID containerFormat;
+    hr = decoder->GetContainerFormat(&containerFormat);
+    bool isGif = (hr == Ok && containerFormat == GUID_ContainerFormatGif);
+    
+    // Si es GIF animado, intentar cargar como estático por ahora (stb maneja animación mejor)
+    if (isGif) {
+        return nullptr; // Dejar que stb maneje los GIFs
+    }
 
     ComPtr<IWICBitmapFrameDecode> frame;
     hr = decoder->GetFrame(0, &frame);
@@ -1380,6 +1872,15 @@ bool LoadImageFromPath(const std::wstring& filepath) {
 
     ApplyLoadedImage(pixels, width, height, channels, autoRotate, false, false, hasAlpha, filepath, decoder);
     StoreCurrentInCache();
+    
+    // Iniciar timer de animación GIF si está animado
+    if (g_state.isGifAnimated && g_state.gifTotalFrames > 1 && !g_state.gifFrameDelays.empty()) {
+        int firstDelay = g_state.gifFrameDelays[0];
+        if (firstDelay < 50) firstDelay = 100;
+        g_state.gifLastFrameTime = GetTickCount();
+        SetTimer(g_state.hwnd, TIMER_GIF, firstDelay, nullptr);
+    }
+    
     return true;
 }
 
@@ -1860,22 +2361,32 @@ void RenderImage() {
     SolidBrush bgBrush(Color(255, GetRValue(BG_COLOR), GetGValue(BG_COLOR), GetBValue(BG_COLOR)));
     graphics.FillRectangle(&bgBrush, 0, 0, rect.right, rect.bottom);
 
-    Bitmap bitmap(g_state.imageWidth, g_state.imageHeight,
-                  g_state.imageWidth * 4, PixelFormat32bppARGB, g_state.imageData);
+    // Usar frame actual de GIF si está animado
+    unsigned char* currentImageData = g_state.imageData;
+    if (g_state.isGifAnimated && !g_state.gifFrameData.empty() && g_state.gifCurrentFrame < g_state.gifFrameData.size()) {
+        currentImageData = g_state.gifFrameData[g_state.gifCurrentFrame];
+    }
 
-    // Selección inteligente de modo de interpolación para máxima calidad
+    Bitmap bitmap(g_state.imageWidth, g_state.imageHeight,
+                  g_state.imageWidth * 4, PixelFormat32bppARGB, currentImageData);
+
+    // Selección INTELIGENTE de modo de interpolación según tipo de imagen y zoom
     const bool pixelPerfectZoom = std::fabs(g_state.zoom - std::round(g_state.zoom)) < 0.01f && g_state.zoom >= 1.0f;
+    const bool isVectorLike = (g_state.imageWidth < 512 && g_state.imageHeight < 512); // Imágenes pequeñas tipo icono
     
     if (pixelPerfectZoom) {
         graphics.SetInterpolationMode(InterpolationModeNearestNeighbor);
-    } else if (g_state.zoom > 1.0f) {
-        // Para zoom > 1.0, usar interpolación bicúbica de alta calidad
+    } else if (g_state.zoom > 2.0f) {
+        // Zoom muy alto: usar interpolación de máxima calidad
         graphics.SetInterpolationMode(InterpolationModeHighQualityBicubic);
-    } else if (g_state.zoom < 0.5f) {
-        // Para zoom muy pequeño, usar interpolación de alta calidad con suavizado
+    } else if (g_state.zoom > 1.0f && isVectorLike) {
+        // Zoom moderado en imágenes pequeñas: bicúbico
+        graphics.SetInterpolationMode(InterpolationModeHighQualityBicubic);
+    } else if (g_state.zoom < 0.25f) {
+        // Zoom muy bajo: usar interpolación de alta calidad
         graphics.SetInterpolationMode(InterpolationModeHighQualityBicubic);
     } else {
-        // Para zoom normal, usar interpolación de alta calidad
+        // Zoom normal: bicúbico de alta calidad
         graphics.SetInterpolationMode(InterpolationModeHighQualityBicubic);
     }
     
@@ -1902,15 +2413,24 @@ void RenderImage() {
     ImageAttributes imgAttr;
     imgAttr.SetWrapMode(WrapModeClamp);
 
-    // Aplicar mejora automática de calidad si está habilitada
+    // Mejora INTELIGENTE adaptativa según tipo de imagen
     if (ENABLE_ULTRA_QUALITY_RENDERING && !g_state.effectGrayscale && !g_state.effectInvert && !g_state.effectUltraClarity) {
-        // Matriz de mejora automática (contraste sutil + claridad)
-        const float c = 1.03f; // Contraste mejorado
-        const float t = (1.0f - c) / 2.0f;
+        // Detectar tipo de imagen para optimización
+        const bool isDarkImage = (g_state.imageWidth * g_state.imageHeight > 1000000); // Imágenes grandes suelen ser fotos
+        const bool isPhoto = (!g_state.hasAlpha && g_state.imageWidth > 1024 && g_state.imageHeight > 1024);
+        
+        float contrastBoost = 1.03f;
+        if (isPhoto) {
+            contrastBoost = 1.02f; // Mejora sutil para fotos
+        } else if (isDarkImage) {
+            contrastBoost = 1.04f; // Mayor contraste para imágenes oscuras
+        }
+        
+        const float t = (1.0f - contrastBoost) / 2.0f;
         ColorMatrix autoEnhanceMatrix = {
-            c,     0.0f,  0.0f,  0.0f, 0.0f,
-            0.0f,  c,     0.0f,  0.0f, 0.0f,
-            0.0f,  0.0f,  c,     0.0f, 0.0f,
+            contrastBoost,     0.0f,  0.0f,  0.0f, 0.0f,
+            0.0f,  contrastBoost,     0.0f,  0.0f, 0.0f,
+            0.0f,  0.0f,  contrastBoost,     0.0f, 0.0f,
             0.0f,  0.0f,  0.0f,  1.0f, 0.0f,
             t,     t,     t,     0.0f, 1.0f
         };
@@ -1937,7 +2457,7 @@ void RenderImage() {
         imgAttr.SetColorMatrix(&invMatrix, ColorMatrixFlagsDefault, ColorAdjustTypeBitmap);
     } else if (g_state.effectUltraClarity) {
         // Matriz Ultra-Claridad HDR MEJORADA (Realce de micro-contraste y detalles finos)
-        const float c = 1.10f; // Aumentado para mayor claridad
+        const float c = 1.12f; // Aumentado para mayor claridad HDR
         const float t = (1.0f - c) / 2.0f;
         ColorMatrix clarityMatrix = {
             c,     0.0f,  0.0f,  0.0f, 0.0f,
@@ -2870,11 +3390,25 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     SetTimer(hwnd, TIMER_DOCK_HIDE, DOCK_HIDE_MS, nullptr);
                 }
             } else if (wParam == TIMER_GIF) {
-                if (g_state.isGifAnimated && g_state.gifTotalFrames > 1) {
-                    // Advance to next frame
-                    g_state.gifCurrentFrame = (g_state.gifCurrentFrame + 1) % g_state.gifTotalFrames;
-                    g_state.gifLastFrameTime = GetTickCount();
-                    InvalidateRect(hwnd, nullptr, FALSE);
+                if (g_state.isGifAnimated && g_state.gifTotalFrames > 1 && !g_state.gifFrameDelays.empty()) {
+                    DWORD currentTime = GetTickCount();
+                    DWORD elapsed = currentTime - g_state.gifLastFrameTime;
+                    
+                    // Obtener delay del frame actual
+                    int currentDelay = g_state.gifFrameDelays[g_state.gifCurrentFrame];
+                    if (currentDelay < 50) currentDelay = 100; // Mínimo 50ms
+                    
+                    if (elapsed >= static_cast<DWORD>(currentDelay)) {
+                        // Avanzar al siguiente frame
+                        g_state.gifCurrentFrame = (g_state.gifCurrentFrame + 1) % g_state.gifTotalFrames;
+                        g_state.gifLastFrameTime = currentTime;
+                        InvalidateRect(hwnd, nullptr, FALSE);
+                        
+                        // Programar siguiente timer con el delay del nuevo frame
+                        int nextDelay = g_state.gifFrameDelays[g_state.gifCurrentFrame];
+                        if (nextDelay < 50) nextDelay = 100;
+                        SetTimer(hwnd, TIMER_GIF, nextDelay, nullptr);
+                    }
                 }
             }
             return 0;
@@ -3067,6 +3601,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
         if (SUCCEEDED(g_state.comHr)) CoUninitialize();
         return 1;
     }
+    
+    // Inicializar sistemas inteligentes
+    InitializeIntelligentUI();
 
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
