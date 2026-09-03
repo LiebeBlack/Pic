@@ -13,6 +13,7 @@
 #include <shlwapi.h>
 #include <shellapi.h>
 #include <shlobj.h>
+#include <shobjidl.h>
 #include <comdef.h>
 #include <gdiplus.h>
 #include <dwmapi.h>
@@ -20,6 +21,7 @@
 #include <vector>
 #include <memory>
 #include <algorithm>
+#include <cstring>
 #include <fstream>
 #include <sstream>
 
@@ -31,12 +33,17 @@
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "gdi32.lib")
+#pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "uuid.lib")
 
 using namespace Gdiplus;
 
 const wchar_t APP_NAME[] = L"ARTPICST";
 const wchar_t APP_VERSION[] = L"1.2.0";
 const wchar_t CLASS_NAME[] = L"ARTPICSTInstallerWindow";
+const wchar_t UNINSTALL_SWITCH[] = L"--uninstall";
+const wchar_t UNINSTALL_REG_KEY[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\ARTPICST";
+const wchar_t APP_URL[] = L"https://github.com/LiebeBlack/Pic";
 
 // Colores premium
 const Color BG_COLOR(255, 8, 10, 14);
@@ -60,10 +67,12 @@ struct InstallerState {
     HINSTANCE hInstance = nullptr;
     InstallStep currentStep = InstallStep::Welcome;
     std::wstring installPath;
+    std::wstring installStatus = L"Preparando la instalación...";
     bool createDesktopShortcut = true;
     bool createStartMenuShortcut = true;
     bool registerFileAssociations = true;
     bool isInstalling = false;
+    bool installSucceeded = false;
     int installProgress = 0;
     GdiplusStartupInput gdiplusStartupInput;
     ULONG_PTR gdiplusToken = 0;
@@ -71,13 +80,220 @@ struct InstallerState {
 
 InstallerState g_state;
 
-std::wstring GetDefaultInstallPath() {
-    wchar_t programFiles[MAX_PATH];
-    if (SHGetFolderPathW(NULL, CSIDL_PROGRAM_FILES, NULL, 0, programFiles) == S_OK) {
-        return std::wstring(programFiles) + L"\\" + APP_NAME;
-    }
-    return L"C:\\Program Files\\" + std::wstring(APP_NAME);
+// ============================================================================
+// Utilidades de sistema de archivos y registro
+// ============================================================================
+
+std::wstring GetModulePath() {
+    wchar_t path[MAX_PATH] = {};
+    DWORD len = GetModuleFileNameW(nullptr, path, MAX_PATH);
+    if (len == 0 || len >= MAX_PATH) return {};
+    return path;
 }
+
+std::wstring GetModuleFolder() {
+    std::wstring full = GetModulePath();
+    size_t pos = full.find_last_of(L'\\');
+    if (pos == std::wstring::npos) return {};
+    return full.substr(0, pos);
+}
+
+std::wstring GetShellFolder(int csidl) {
+    wchar_t buf[MAX_PATH] = {};
+    if (SUCCEEDED(SHGetFolderPathW(nullptr, csidl | CSIDL_FLAG_CREATE, nullptr, 0, buf))) {
+        return buf;
+    }
+    return {};
+}
+
+std::wstring GetDefaultInstallPath() {
+    // Instalación por usuario (sin necesidad de administrador)
+    std::wstring localAppData = GetShellFolder(CSIDL_LOCAL_APPDATA);
+    if (!localAppData.empty()) {
+        return localAppData + L"\\Programs\\" + APP_NAME;
+    }
+    std::wstring profile = GetShellFolder(CSIDL_PROFILE);
+    if (!profile.empty()) {
+        return profile + L"\\" + APP_NAME;
+    }
+    return L"C:\\" + std::wstring(APP_NAME);
+}
+
+bool CopyFileIfExists(const std::wstring& src, const std::wstring& dst) {
+    if (src.empty() || dst.empty()) return false;
+    if (GetFileAttributesW(src.c_str()) == INVALID_FILE_ATTRIBUTES) return false;
+    return CopyFileW(src.c_str(), dst.c_str(), FALSE) != FALSE;
+}
+
+bool SetRegStringValue(HKEY root, const std::wstring& key, const std::wstring& name, const std::wstring& value) {
+    HKEY hKey = nullptr;
+    if (RegCreateKeyExW(root, key.c_str(), 0, nullptr, REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr, &hKey, nullptr) != ERROR_SUCCESS) return false;
+    const DWORD bytes = static_cast<DWORD>((value.size() + 1) * sizeof(wchar_t));
+    const LSTATUS result = RegSetValueExW(hKey, name.empty() ? nullptr : name.c_str(), 0, REG_SZ,
+                                          reinterpret_cast<const BYTE*>(value.c_str()), bytes);
+    RegCloseKey(hKey);
+    return result == ERROR_SUCCESS;
+}
+
+bool SetRegDwordValue(HKEY root, const std::wstring& key, const std::wstring& name, DWORD value) {
+    HKEY hKey = nullptr;
+    if (RegCreateKeyExW(root, key.c_str(), 0, nullptr, REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr, &hKey, nullptr) != ERROR_SUCCESS) return false;
+    const LSTATUS result = RegSetValueExW(hKey, name.c_str(), 0, REG_DWORD,
+                                          reinterpret_cast<const BYTE*>(&value), sizeof(value));
+    RegCloseKey(hKey);
+    return result == ERROR_SUCCESS;
+}
+
+bool ReadRegStringValue(HKEY root, const std::wstring& key, const std::wstring& name, std::wstring& outValue) {
+    HKEY hKey = nullptr;
+    if (RegOpenKeyExW(root, key.c_str(), 0, KEY_READ, &hKey) != ERROR_SUCCESS) return false;
+    wchar_t buffer[512] = {};
+    DWORD size = sizeof(buffer);
+    const LSTATUS result = RegQueryValueExW(hKey, name.empty() ? nullptr : name.c_str(), nullptr, nullptr,
+                                            reinterpret_cast<LPBYTE>(buffer), &size);
+    RegCloseKey(hKey);
+    if (result != ERROR_SUCCESS) return false;
+    outValue = buffer;
+    return true;
+}
+
+bool CreateShortcut(const std::wstring& lnkPath, const std::wstring& target, const std::wstring& args, const std::wstring& workDir) {
+    IShellLinkW* link = nullptr;
+    HRESULT hr = CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER,
+                                  IID_IShellLinkW, reinterpret_cast<void**>(&link));
+    if (FAILED(hr) || !link) return false;
+
+    bool ok = false;
+    link->SetPath(target.c_str());
+    link->SetWorkingDirectory(workDir.c_str());
+    if (!args.empty()) link->SetArguments(args.c_str());
+
+    IPersistFile* persist = nullptr;
+    if (SUCCEEDED(link->QueryInterface(IID_IPersistFile, reinterpret_cast<void**>(&persist)))) {
+        ok = SUCCEEDED(persist->Save(lnkPath.c_str(), TRUE));
+        persist->Release();
+    }
+    link->Release();
+    return ok;
+}
+
+// ============================================================================
+// Registro de asociaciones de archivo (por usuario, sin administrador)
+// ============================================================================
+
+bool RegisterFileAssociations(const std::wstring& exePath) {
+    if (exePath.empty()) return false;
+    const std::wstring fileType = L"ARTPICST.Image";
+    const std::wstring command = L"\"" + exePath + L"\" \"%1\"";
+    const std::wstring base = L"Software\\Classes\\" + fileType;
+    const std::vector<std::wstring> extensions = {
+        L".png", L".jpg", L".jpeg", L".bmp", L".gif", L".tif", L".tiff",
+        L".webp", L".ico", L".heic", L".heif", L".avif", L".jfif"
+    };
+
+    bool ok = true;
+    ok = ok && SetRegStringValue(HKEY_CURRENT_USER, base, L"", L"ARTPICST Image");
+    ok = ok && SetRegStringValue(HKEY_CURRENT_USER, base, L"Content Type", L"image/*");
+    ok = ok && SetRegStringValue(HKEY_CURRENT_USER, base, L"FriendlyTypeName", L"ARTPICST Image");
+    ok = ok && SetRegStringValue(HKEY_CURRENT_USER, base + L"\\DefaultIcon", L"", L"\"" + exePath + L"\",0");
+    ok = ok && SetRegStringValue(HKEY_CURRENT_USER, base + L"\\shell\\open\\command", L"", command);
+    ok = ok && SetRegStringValue(HKEY_CURRENT_USER, base + L"\\shell\\open", L"MuiVerb", L"Abrir");
+    ok = ok && SetRegStringValue(HKEY_CURRENT_USER, base + L"\\shell\\open", L"Icon", L"\"" + exePath + L"\",0");
+    ok = ok && SetRegStringValue(HKEY_CURRENT_USER, L"Software\\Classes\\Applications\\artpicst.exe", L"FriendlyAppName", L"ARTPICST");
+    ok = ok && SetRegStringValue(HKEY_CURRENT_USER, L"Software\\Classes\\Applications\\artpicst.exe\\shell\\open\\command", L"", command);
+    ok = ok && SetRegStringValue(HKEY_CURRENT_USER, L"Software\\Classes\\Applications\\artpicst.exe\\shell\\open", L"MuiVerb", L"Abrir");
+    ok = ok && SetRegStringValue(HKEY_CURRENT_USER, L"Software\\Classes\\Applications\\artpicst.exe\\shell\\open", L"Icon", L"\"" + exePath + L"\",0");
+    for (const auto& ext : extensions) {
+        ok = ok && SetRegStringValue(HKEY_CURRENT_USER, L"Software\\Classes\\" + ext, L"", fileType);
+    }
+    return ok;
+}
+
+void RemoveAssociationIfOurs(const std::wstring& ext) {
+    const std::wstring key = L"Software\\Classes\\" + ext;
+    std::wstring value;
+    if (ReadRegStringValue(HKEY_CURRENT_USER, key, L"", value) && value == L"ARTPICST.Image") {
+        RegDeleteTreeW(HKEY_CURRENT_USER, key.c_str());
+    }
+}
+
+bool WriteUninstallEntry(const std::wstring& installDir) {
+    const std::wstring uninstallCmd = L"\"" + installDir + L"\\artpicst_installer.exe\" " + UNINSTALL_SWITCH;
+    bool ok = true;
+    ok = ok && SetRegStringValue(HKEY_CURRENT_USER, UNINSTALL_REG_KEY, L"DisplayName", APP_NAME);
+    ok = ok && SetRegStringValue(HKEY_CURRENT_USER, UNINSTALL_REG_KEY, L"DisplayVersion", APP_VERSION);
+    ok = ok && SetRegStringValue(HKEY_CURRENT_USER, UNINSTALL_REG_KEY, L"Publisher", APP_NAME);
+    ok = ok && SetRegStringValue(HKEY_CURRENT_USER, UNINSTALL_REG_KEY, L"DisplayIcon", installDir + L"\\artpicst.exe,0");
+    ok = ok && SetRegStringValue(HKEY_CURRENT_USER, UNINSTALL_REG_KEY, L"UninstallString", uninstallCmd);
+    ok = ok && SetRegStringValue(HKEY_CURRENT_USER, UNINSTALL_REG_KEY, L"InstallLocation", installDir);
+    ok = ok && SetRegStringValue(HKEY_CURRENT_USER, UNINSTALL_REG_KEY, L"URLInfoAbout", APP_URL);
+    ok = ok && SetRegDwordValue(HKEY_CURRENT_USER, UNINSTALL_REG_KEY, L"NoModify", 1);
+    ok = ok && SetRegDwordValue(HKEY_CURRENT_USER, UNINSTALL_REG_KEY, L"NoRepair", 1);
+    return ok;
+}
+
+// ============================================================================
+// Desinstalación
+// ============================================================================
+
+void PerformUninstall() {
+    const std::wstring installDir = GetModuleFolder();
+    const std::wstring selfPath = GetModulePath();
+
+    // Accesos directos
+    const std::wstring desktop = GetShellFolder(CSIDL_DESKTOPDIRECTORY);
+    const std::wstring programs = GetShellFolder(CSIDL_PROGRAMS);
+    if (!desktop.empty()) DeleteFileW((desktop + L"\\ARTPICST.lnk").c_str());
+    if (!programs.empty()) {
+        const std::wstring menuDir = programs + L"\\ARTPICST";
+        DeleteFileW((menuDir + L"\\ARTPICST.lnk").c_str());
+        DeleteFileW((menuDir + L"\\Uninstall ARTPICST.lnk").c_str());
+        RemoveDirectoryW(menuDir.c_str());
+    }
+
+    // Registro
+    RegDeleteTreeW(HKEY_CURRENT_USER, UNINSTALL_REG_KEY);
+    RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\Classes\\ARTPICST.Image");
+    RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\Classes\\Applications\\artpicst.exe");
+    const std::vector<std::wstring> extensions = {
+        L".png", L".jpg", L".jpeg", L".bmp", L".gif", L".tif", L".tiff",
+        L".webp", L".ico", L".heic", L".heif", L".avif", L".jfif"
+    };
+    for (const auto& ext : extensions) {
+        RemoveAssociationIfOurs(ext);
+    }
+
+    // Archivos (el propio desinstalador se renombra y elimina al final)
+    DeleteFileW((installDir + L"\\artpicst.exe").c_str());
+    DeleteFileW((installDir + L"\\artpicst.ico").c_str());
+    DeleteFileW((installDir + L"\\README.md").c_str());
+    DeleteFileW((installDir + L"\\version.json").c_str());
+
+    // Renombrar el ejecutable en ejecución y programar la limpieza final
+    wchar_t tempDir[MAX_PATH] = {};
+    GetTempPathW(MAX_PATH, tempDir);
+    std::wstring movedSelf = std::wstring(tempDir) + L"artpicst_uninstaller_" + std::to_wstring(GetCurrentProcessId()) + L".exe";
+    if (!selfPath.empty()) MoveFileW(selfPath.c_str(), movedSelf.c_str());
+
+    std::wstring cmd = L"/c ping 127.0.0.1 -n 3 >nul & del /f /q \"" + movedSelf + L"\" & rd /s /q \"" + installDir + L"\"";
+    std::vector<wchar_t> cmdBuf(cmd.begin(), cmd.end());
+    cmdBuf.push_back(L'\0');
+
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    if (CreateProcessW(nullptr, cmdBuf.data(), nullptr, nullptr, FALSE,
+                       CREATE_NO_WINDOW | DETACHED_PROCESS, nullptr, nullptr, &si, &pi)) {
+        if (pi.hProcess) CloseHandle(pi.hProcess);
+        if (pi.hThread) CloseHandle(pi.hThread);
+    }
+
+    SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
+}
+
+// ============================================================================
+// Interfaz gráfica
+// ============================================================================
 
 void DrawRoundedRect(Graphics& g, const RectF& rect, float radius, const Color& fillColor, const Color& borderColor, float borderWidth = 1.0f) {
     GraphicsPath path;
@@ -240,10 +456,10 @@ void RenderInstall(Graphics& g, const RECT& client) {
     DrawProgress(g, progressRect, g_state.installProgress);
     
     // Status text
-    wchar_t statusText[256];
-    swprintf_s(statusText, L"Progreso: %d%%", g_state.installProgress);
+    wchar_t statusText[512];
+    swprintf_s(statusText, L"%s\n\nProgreso: %d%%", g_state.installStatus.c_str(), g_state.installProgress);
     
-    RectF statusRect(0.0f, centerY, static_cast<REAL>(client.right), 30.0f);
+    RectF statusRect(0.0f, centerY - 10.0f, static_cast<REAL>(client.right), 50.0f);
     g.DrawString(statusText, -1, &textFont, statusRect, &format, &textBrush);
 }
 
@@ -260,15 +476,31 @@ void RenderComplete(Graphics& g, const RECT& client) {
     
     SolidBrush textBrush(TEXT_COLOR);
     
-    RectF titleRect(0.0f, centerY - 100.0f, static_cast<REAL>(client.right), 50.0f);
-    g.DrawString(L"¡Instalación Completada!", -1, &titleFont, titleRect, &format, &textBrush);
-    
-    const wchar_t* completeText = L"ARTPICST se ha instalado correctamente en tu sistema.\n\n"
-        L"Puedes iniciar la aplicación desde el menú de inicio\n"
-        L"o haciendo clic en el botón de abajo.";
-    
-    RectF textRect(0.0f, centerY - 30.0f, static_cast<REAL>(client.right), 60.0f);
-    g.DrawString(completeText, -1, &textFont, textRect, &format, &textBrush);
+    if (g_state.installSucceeded) {
+        RectF titleRect(0.0f, centerY - 100.0f, static_cast<REAL>(client.right), 50.0f);
+        g.DrawString(L"¡Instalación Completada!", -1, &titleFont, titleRect, &format, &textBrush);
+        
+        const wchar_t* completeText = L"ARTPICST se ha instalado correctamente en tu sistema.\n\n"
+            L"Ubicación de instalación:\n"
+            L"%s\n\n"
+            L"Puedes iniciar la aplicación desde el menú de inicio\n"
+            L"o haciendo clic en el botón de abajo.";
+        wchar_t buffer[1024];
+        swprintf_s(buffer, completeText, g_state.installPath.c_str());
+        
+        RectF textRect(0.0f, centerY - 30.0f, static_cast<REAL>(client.right), 100.0f);
+        g.DrawString(buffer, -1, &textFont, textRect, &format, &textBrush);
+    } else {
+        RectF titleRect(0.0f, centerY - 100.0f, static_cast<REAL>(client.right), 50.0f);
+        g.DrawString(L"Error en la Instalación", -1, &titleFont, titleRect, &format, &textBrush);
+        
+        const wchar_t* errorText = L"No se pudo completar la instalación.\n\n"
+            L"Asegúrate de que el instalador se encuentre junto a\n"
+            L"artpicst.exe en la misma carpeta e inténtalo de nuevo.";
+        
+        RectF textRect(0.0f, centerY - 30.0f, static_cast<REAL>(client.right), 60.0f);
+        g.DrawString(errorText, -1, &textFont, textRect, &format, &textBrush);
+    }
 }
 
 void RenderWindow(Graphics& g, const RECT& client) {
@@ -319,8 +551,8 @@ void RenderWindow(Graphics& g, const RECT& client) {
             // No buttons during installation
             break;
         case InstallStep::Complete:
-            DrawButton(g, RectF(static_cast<REAL>(client.right) - buttonWidth - 20.0f, buttonY, buttonWidth, buttonHeight), 
-                      L"Iniciar App", false, true);
+            DrawButton(g, RectF(static_cast<REAL>(client.right) - buttonWidth - 20.0f, buttonY, buttonWidth, buttonHeight),
+                      g_state.installSucceeded ? L"Iniciar App" : L"Cerrar", false, true);
             break;
     }
     
@@ -329,22 +561,86 @@ void RenderWindow(Graphics& g, const RECT& client) {
     DrawButton(g, cancelRect, L"Cancelar", false, g_state.currentStep != InstallStep::Install);
 }
 
+// ============================================================================
+// Instalación real
+// ============================================================================
+
 void PerformInstallation() {
     g_state.isInstalling = true;
     g_state.currentStep = InstallStep::Install;
-    InvalidateRect(g_state.hwnd, NULL, FALSE);
-    
-    // Simulate installation steps
-    for (int i = 0; i <= 100; i += 5) {
-        g_state.installProgress = i;
-        InvalidateRect(g_state.hwnd, NULL, FALSE);
+    g_state.installProgress = 0;
+    InvalidateRect(g_state.hwnd, nullptr, FALSE);
+
+    const std::wstring srcDir = GetModuleFolder();
+    const std::wstring dst = g_state.installPath;
+    const std::wstring selfPath = GetModulePath();
+
+    auto step = [](int progress, const wchar_t* status) {
+        g_state.installProgress = progress;
+        g_state.installStatus = status;
+        InvalidateRect(g_state.hwnd, nullptr, FALSE);
         UpdateWindow(g_state.hwnd);
-        Sleep(100);
+        Sleep(60);
+    };
+
+    bool ok = true;
+
+    step(5, L"Preparando el directorio de instalación...");
+    if (dst.empty()) {
+        ok = false;
+    } else if (!CreateDirectoryW(dst.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS) {
+        ok = false;
     }
-    
+
+    if (ok) {
+        step(20, L"Copiando el programa principal...");
+        ok = CopyFileIfExists(srcDir + L"\\artpicst.exe", dst + L"\\artpicst.exe");
+    }
+
+    if (ok) {
+        step(35, L"Copiando recursos y documentación...");
+        CopyFileIfExists(srcDir + L"\\artpicst.ico", dst + L"\\artpicst.ico");
+        CopyFileIfExists(srcDir + L"\\README.md", dst + L"\\README.md");
+        CopyFileIfExists(srcDir + L"\\version.json", dst + L"\\version.json");
+        ok = !selfPath.empty() && CopyFileW(selfPath.c_str(), (dst + L"\\artpicst_installer.exe").c_str(), FALSE) != FALSE;
+    }
+
+    if (ok) {
+        step(55, L"Creando accesos directos...");
+        const std::wstring desktop = GetShellFolder(CSIDL_DESKTOPDIRECTORY);
+        const std::wstring programs = GetShellFolder(CSIDL_PROGRAMS);
+        if (g_state.createDesktopShortcut && !desktop.empty()) {
+            CreateShortcut(desktop + L"\\ARTPICST.lnk", dst + L"\\artpicst.exe", L"", dst);
+        }
+        if (g_state.createStartMenuShortcut && !programs.empty()) {
+            const std::wstring menuDir = programs + L"\\ARTPICST";
+            CreateDirectoryW(menuDir.c_str(), nullptr);
+            CreateShortcut(menuDir + L"\\ARTPICST.lnk", dst + L"\\artpicst.exe", L"", dst);
+            CreateShortcut(menuDir + L"\\Uninstall ARTPICST.lnk", dst + L"\\artpicst_installer.exe", UNINSTALL_SWITCH, dst);
+        }
+    }
+
+    if (ok) {
+        step(70, L"Registrando asociaciones de archivo...");
+        ok = !g_state.registerFileAssociations || RegisterFileAssociations(dst + L"\\artpicst.exe");
+    }
+
+    if (ok) {
+        step(85, L"Registrando el desinstalador...");
+        ok = WriteUninstallEntry(dst);
+    }
+
+    if (ok) {
+        step(100, L"Instalación completada.");
+    } else {
+        step(100, L"Error: no se pudo completar la instalación.");
+    }
+
     g_state.isInstalling = false;
+    g_state.installSucceeded = ok;
     g_state.currentStep = InstallStep::Complete;
-    InvalidateRect(g_state.hwnd, NULL, FALSE);
+    InvalidateRect(g_state.hwnd, nullptr, FALSE);
+    UpdateWindow(g_state.hwnd);
 }
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -406,14 +702,17 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         PerformInstallation();
                         break;
                     case InstallStep::Complete:
-                        // Launch application
-                        ShellExecuteW(NULL, L"open", L"artpicst.exe", NULL, g_state.installPath.c_str(), SW_SHOW);
+                        if (g_state.installSucceeded) {
+                            // Launch application
+                            ShellExecuteW(nullptr, L"open", (g_state.installPath + L"\\artpicst.exe").c_str(),
+                                          nullptr, g_state.installPath.c_str(), SW_SHOWNORMAL);
+                        }
                         PostMessage(hwnd, WM_CLOSE, 0, 0);
                         break;
                     default:
                         break;
                 }
-                InvalidateRect(hwnd, NULL, FALSE);
+                InvalidateRect(hwnd, nullptr, FALSE);
             }
             
             // Back button
@@ -423,7 +722,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 
                 if (g_state.currentStep == InstallStep::License) {
                     g_state.currentStep = InstallStep::Welcome;
-                    InvalidateRect(hwnd, NULL, FALSE);
+                    InvalidateRect(hwnd, nullptr, FALSE);
                 }
             }
             
@@ -446,21 +745,55 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine, int nCmdShow) {
     (void)hPrevInstance;
-    (void)pCmdLine;
+
+    // Detectar modo desinstalación (--uninstall)
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    bool uninstallRequested = false;
+    if (argv) {
+        for (int i = 1; i < argc; ++i) {
+            if (wcscmp(argv[i], UNINSTALL_SWITCH) == 0) {
+                uninstallRequested = true;
+                break;
+            }
+        }
+        LocalFree(argv);
+    }
+
+    if (uninstallRequested) {
+        const int answer = MessageBoxW(nullptr,
+            L"¿Desea desinstalar ARTPICST?\n\nSe eliminarán los archivos, accesos directos y asociaciones de archivo.",
+            L"Desinstalar ARTPICST", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2);
+        if (answer == IDYES) {
+            PerformUninstall();
+            MessageBoxW(nullptr, L"ARTPICST ha sido desinstalado correctamente.",
+                        L"Desinstalación completada", MB_OK | MB_ICONINFORMATION);
+        }
+        return 0;
+    }
+
     g_state.hInstance = hInstance;
-    
+    (void)pCmdLine;
+
+    // Inicializar COM (necesario para crear accesos directos)
+    HRESULT comHr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    const bool comOk = SUCCEEDED(comHr);
+
     // Initialize GDI+
-    GdiplusStartup(&g_state.gdiplusToken, &g_state.gdiplusStartupInput, NULL);
-    
+    GdiplusStartup(&g_state.gdiplusToken, &g_state.gdiplusStartupInput, nullptr);
+
     // Register window class
     WNDCLASSEXW wc = {0};
     wc.cbSize = sizeof(wc);
     wc.style = CS_HREDRAW | CS_VREDRAW;
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInstance;
-    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
     wc.lpszClassName = CLASS_NAME;
+    wc.hIcon = LoadIconW(hInstance, MAKEINTRESOURCEW(101));
+    if (!wc.hIcon) wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    wc.hIconSm = wc.hIcon;
     
     RegisterClassExW(&wc);
     
@@ -472,11 +805,12 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
         CW_USEDEFAULT, CW_USEDEFAULT,
         600, 500,
-        NULL, NULL, hInstance, NULL
+        nullptr, nullptr, hInstance, nullptr
     );
     
     if (!hwnd) {
         GdiplusShutdown(g_state.gdiplusToken);
+        if (comOk) CoUninitialize();
         return 1;
     }
     
@@ -485,17 +819,18 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
     GetWindowRect(hwnd, &rect);
     int screenWidth = GetSystemMetrics(SM_CXSCREEN);
     int screenHeight = GetSystemMetrics(SM_CYSCREEN);
-    SetWindowPos(hwnd, NULL, (screenWidth - rect.right) / 2, (screenHeight - rect.bottom) / 2, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+    SetWindowPos(hwnd, nullptr, (screenWidth - rect.right) / 2, (screenHeight - rect.bottom) / 2, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
     
     ShowWindow(hwnd, nCmdShow);
     UpdateWindow(hwnd);
     
     MSG msg;
-    while (GetMessage(&msg, NULL, 0, 0)) {
+    while (GetMessage(&msg, nullptr, 0, 0)) {
         TranslateMessage(&msg);
         DispatchMessage(&msg);
     }
     
     GdiplusShutdown(g_state.gdiplusToken);
-    return (int)msg.wParam;
+    if (comOk) CoUninitialize();
+    return static_cast<int>(msg.wParam);
 }
