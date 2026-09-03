@@ -474,6 +474,8 @@ bool SaveImageDialog(HWND hwnd);
 void SetAsWallpaper();
 void ShowExifDialog(HWND hwnd);
 void ShowProgramInfoDialog(HWND hwnd);
+void ShowAboutDialog(HWND hwnd);
+void ToggleTheme();
 void LayoutHud(const RECT& client);
 HudId HitTestHud(int x, int y);
 void InvokeHud(HudId id);
@@ -643,114 +645,147 @@ LRESULT CALLBACK ThemedDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
             RECT client;
             GetClientRect(hwnd, &client);
             
-            SolidBrush bgBrush(Color(255, 32, 32, 32));
+            const bool isDark = g_state.darkModeDetected;
+            Color bgCol = isDark ? Color(255, 24, 25, 28) : Color(255, 246, 248, 250);
+            Color borderCol = isDark ? Color(255, 48, 52, 60) : Color(255, 218, 222, 228);
+            Color titleCol = isDark ? Color(255, 245, 248, 252) : Color(255, 26, 28, 32);
+            Color textCol = isDark ? Color(255, 215, 220, 228) : Color(255, 48, 52, 60);
+
+            SolidBrush bgBrush(bgCol);
             graphics.FillRectangle(&bgBrush, 0, 0, client.right, client.bottom);
             
-            Pen borderPen(Color(255, 64, 64, 64), 1.0f);
+            Pen borderPen(borderCol, 1.0f);
             graphics.DrawRectangle(&borderPen, 0, 0, client.right - 1, client.bottom - 1);
             
-            // Title - Tamaño INTELIGENTE adaptativo
+            // Icon - Elegante y estilizado con símbolo vectorial centrado
+            const int iconSize = 34 * g_uiScale / 100;
+            const int iconX = 26 * g_uiScale / 100;
+            const int iconY = 22 * g_uiScale / 100;
+            RectF iconRect(static_cast<float>(iconX), static_cast<float>(iconY), static_cast<float>(iconSize), static_cast<float>(iconSize));
+            
+            Color iconBg;
+            const wchar_t* iconSymbol = L"i";
+            Color iconSymbolCol(255, 255, 255, 255);
+            
+            if (g_dialogState.icon == MB_ICONERROR) {
+                iconBg = Color(255, 220, 48, 54);
+                iconSymbol = L"✕";
+            } else if (g_dialogState.icon == MB_ICONWARNING) {
+                iconBg = Color(255, 225, 145, 10);
+                iconSymbol = L"!";
+            } else if (g_dialogState.icon == MB_ICONQUESTION) {
+                iconBg = Color(255, 0, 120, 215);
+                iconSymbol = L"?";
+            } else {
+                iconBg = Color(255, 0, 120, 215);
+                iconSymbol = L"i";
+            }
+            
+            SolidBrush iconBrush(iconBg);
+            graphics.FillEllipse(&iconBrush, iconRect);
+
+            Gdiplus::FontFamily iconFamily(L"Segoe UI");
+            Gdiplus::Font iconSymbolFont(&iconFamily, 12.0f, FontStyleBold, UnitPoint);
+            StringFormat iconFormat;
+            iconFormat.SetAlignment(StringAlignmentCenter);
+            iconFormat.SetLineAlignment(StringAlignmentCenter);
+            SolidBrush symbolBrush(iconSymbolCol);
+            graphics.DrawString(iconSymbol, -1, &iconSymbolFont, iconRect, &iconFormat, &symbolBrush);
+
+            // Title
             if (!g_dialogState.title.empty()) {
-                float titleFontSize = GetAdaptiveFontSize(g_dialogState.title.c_str(), client.right, 60, L"Segoe UI");
+                float titleFontSize = GetAdaptiveFontSize(g_dialogState.title.c_str(), client.right - 120, 50, L"Segoe UI");
                 Gdiplus::FontFamily titleFamily(L"Segoe UI");
                 Gdiplus::Font titleFont(&titleFamily, titleFontSize, FontStyleBold, UnitPoint);
                 StringFormat titleFormat;
-                titleFormat.SetAlignment(StringAlignmentCenter);
-                titleFormat.SetLineAlignment(StringAlignmentNear);
+                titleFormat.SetAlignment(StringAlignmentNear);
+                titleFormat.SetLineAlignment(StringAlignmentCenter);
                 titleFormat.SetTrimming(StringTrimmingEllipsisCharacter);
                 
-                SolidBrush titleBrush(Color(255, 250, 250, 250));
-                RectF titleRect(0.0f, 20.0f, static_cast<float>(client.right), 50.0f);
+                SolidBrush titleBrush(titleCol);
+                const float titleX = static_cast<float>(iconX + iconSize + 14);
+                RectF titleRect(titleX, static_cast<float>(iconY - 4), static_cast<float>(client.right - titleX - 20), static_cast<float>(iconSize + 8));
                 graphics.DrawString(g_dialogState.title.c_str(), -1, &titleFont, titleRect, &titleFormat, &titleBrush);
             }
-            
-            // Message - Tamaño INTELIGENTE adaptativo
+
+            // Separador horizontal sutil
+            Pen sepPen(borderCol, 1.0f);
+            const float sepY = static_cast<float>(iconY + iconSize + 14);
+            graphics.DrawLine(&sepPen, 24.0f, sepY, static_cast<float>(client.right - 24), sepY);
+
+            // Message - Presentación legible
             if (!g_dialogState.message.empty()) {
-                float messageFontSize = GetAdaptiveFontSize(g_dialogState.message.c_str(), client.right - 80, client.bottom - 150, L"Segoe UI");
+                const bool hasNewlines = (g_dialogState.message.find(L'\n') != std::wstring::npos);
+                float messageFontSize = GetAdaptiveFontSize(g_dialogState.message.c_str(), client.right - 60, client.bottom - 160, L"Segoe UI");
                 Gdiplus::FontFamily messageFamily(L"Segoe UI");
                 Gdiplus::Font messageFont(&messageFamily, messageFontSize, FontStyleRegular, UnitPoint);
                 StringFormat messageFormat;
-                messageFormat.SetAlignment(StringAlignmentCenter);
-                messageFormat.SetLineAlignment(StringAlignmentCenter);
+                messageFormat.SetAlignment(hasNewlines ? StringAlignmentNear : StringAlignmentCenter);
+                messageFormat.SetLineAlignment(hasNewlines ? StringAlignmentNear : StringAlignmentCenter);
                 messageFormat.SetTrimming(StringTrimmingEllipsisWord);
                 
-                SolidBrush messageBrush(Color(255, 200, 200, 200));
-                RectF messageRect(40.0f, 80.0f, static_cast<float>(client.right - 80), static_cast<float>(client.bottom - 140));
+                SolidBrush messageBrush(textCol);
+                RectF messageRect(28.0f, sepY + 14.0f, static_cast<float>(client.right - 56), static_cast<float>(client.bottom - sepY - 74.0f));
                 graphics.DrawString(g_dialogState.message.c_str(), -1, &messageFont, messageRect, &messageFormat, &messageBrush);
             }
             
-            // Icon - Tamaño adaptativo
-            int iconSize = 40 * g_uiScale / 100;
-            int iconX = 30 * g_uiScale / 100;
-            int iconY = 30 * g_uiScale / 100;
+            // Buttons - Diseño refinado
+            const int buttonWidth = 110;
+            const int buttonHeight = 32;
+            const int buttonY = client.bottom - 46;
             
-            if (g_dialogState.icon == MB_ICONERROR) {
-                SolidBrush iconBrush(Color(255, 255, 100, 100));
-                graphics.FillEllipse(&iconBrush, static_cast<float>(iconX), static_cast<float>(iconY), static_cast<float>(iconSize), static_cast<float>(iconSize));
-            } else if (g_dialogState.icon == MB_ICONWARNING) {
-                SolidBrush iconBrush(Color(255, 255, 200, 100));
-                graphics.FillEllipse(&iconBrush, static_cast<float>(iconX), static_cast<float>(iconY), static_cast<float>(iconSize), static_cast<float>(iconSize));
-            } else if (g_dialogState.icon == MB_ICONQUESTION) {
-                SolidBrush iconBrush(Color(255, 100, 200, 255));
-                graphics.FillEllipse(&iconBrush, static_cast<float>(iconX), static_cast<float>(iconY), static_cast<float>(iconSize), static_cast<float>(iconSize));
-            } else {
-                SolidBrush iconBrush(Color(255, 100, 255, 150));
-                graphics.FillEllipse(&iconBrush, static_cast<float>(iconX), static_cast<float>(iconY), static_cast<float>(iconSize), static_cast<float>(iconSize));
-            }
-            
-            // Draw buttons - Tamaño adaptativo
-            int buttonWidth = 100;
-            int buttonHeight = 32;
-            int buttonY = client.bottom - 50;
-            
+            Color btnPrimaryBg(255, 0, 120, 215);
+            Color btnPrimaryBorder(255, 96, 180, 242);
+            Color btnSecondaryBg = isDark ? Color(255, 48, 50, 60) : Color(255, 230, 234, 240);
+            Color btnSecondaryBorder = isDark ? Color(255, 72, 76, 88) : Color(255, 190, 196, 206);
+            Color btnSecondaryText = isDark ? Color(255, 240, 244, 250) : Color(255, 30, 32, 38);
+
+            Gdiplus::FontFamily btnFamily(L"Segoe UI");
+            Gdiplus::Font buttonFont(&btnFamily, 10.5f, FontStyleBold, UnitPoint);
+            StringFormat buttonFormat;
+            buttonFormat.SetAlignment(StringAlignmentCenter);
+            buttonFormat.SetLineAlignment(StringAlignmentCenter);
+
             if (g_dialogState.buttons == MB_YESNO) {
-                int yesX = client.right / 2 - buttonWidth - 10;
-                int noX = client.right / 2 + 10;
+                const int yesX = client.right / 2 - buttonWidth - 10;
+                const int noX = client.right / 2 + 10;
                 
-                // Yes button
-                SolidBrush yesBrush(Color(255, 0, 120, 215));
-                graphics.FillRectangle(&yesBrush, static_cast<float>(yesX), static_cast<float>(buttonY), static_cast<float>(buttonWidth), static_cast<float>(buttonHeight));
-                Pen yesBorder(Color(255, 96, 180, 242), 1.0f);
-                graphics.DrawRectangle(&yesBorder, static_cast<float>(yesX), static_cast<float>(buttonY), static_cast<float>(buttonWidth), static_cast<float>(buttonHeight));
+                // Yes button (Primary)
+                GraphicsPath yesPath;
+                RectF yesRect(static_cast<float>(yesX), static_cast<float>(buttonY), static_cast<float>(buttonWidth), static_cast<float>(buttonHeight));
+                AddRoundedRect(yesPath, yesRect, 6.0f);
+                SolidBrush yesBrush(btnPrimaryBg);
+                Pen yesBorder(btnPrimaryBorder, 1.0f);
+                graphics.FillPath(&yesBrush, &yesPath);
+                graphics.DrawPath(&yesBorder, &yesPath);
                 
-                // No button
-                SolidBrush noBrush(Color(255, 55, 55, 55));
-                graphics.FillRectangle(&noBrush, static_cast<float>(noX), static_cast<float>(buttonY), static_cast<float>(buttonWidth), static_cast<float>(buttonHeight));
-                Pen noBorder(Color(255, 80, 80, 80), 1.0f);
-                graphics.DrawRectangle(&noBorder, static_cast<float>(noX), static_cast<float>(buttonY), static_cast<float>(buttonWidth), static_cast<float>(buttonHeight));
+                // No button (Secondary)
+                GraphicsPath noPath;
+                RectF noRect(static_cast<float>(noX), static_cast<float>(buttonY), static_cast<float>(buttonWidth), static_cast<float>(buttonHeight));
+                AddRoundedRect(noPath, noRect, 6.0f);
+                SolidBrush noBrush(btnSecondaryBg);
+                Pen noBorder(btnSecondaryBorder, 1.0f);
+                graphics.FillPath(&noBrush, &noPath);
+                graphics.DrawPath(&noBorder, &noPath);
                 
-                // Button text
-                Gdiplus::FontFamily btnFamily(L"Segoe UI");
-                Gdiplus::Font buttonFont(&btnFamily, 11.0f, FontStyleRegular, UnitPoint);
-                StringFormat buttonFormat;
-                buttonFormat.SetAlignment(StringAlignmentCenter);
-                buttonFormat.SetLineAlignment(StringAlignmentCenter);
+                SolidBrush yesTextBrush(Color(255, 255, 255, 255));
+                graphics.DrawString(L"Sí", -1, &buttonFont, yesRect, &buttonFormat, &yesTextBrush);
                 
-                SolidBrush buttonTextBrush(Color(255, 242, 245, 250));
-                RectF yesTextRect(static_cast<float>(yesX), static_cast<float>(buttonY), static_cast<float>(buttonWidth), static_cast<float>(buttonHeight));
-                graphics.DrawString(L"Sí", -1, &buttonFont, yesTextRect, &buttonFormat, &buttonTextBrush);
-                
-                RectF noTextRect(static_cast<float>(noX), static_cast<float>(buttonY), static_cast<float>(buttonWidth), static_cast<float>(buttonHeight));
-                graphics.DrawString(L"No", -1, &buttonFont, noTextRect, &buttonFormat, &buttonTextBrush);
+                SolidBrush noTextBrush(btnSecondaryText);
+                graphics.DrawString(L"No", -1, &buttonFont, noRect, &buttonFormat, &noTextBrush);
             } else {
-                int okX = client.right / 2 - buttonWidth / 2;
+                const int okX = (client.right - buttonWidth) / 2;
                 
-                // OK button
-                SolidBrush okBrush(Color(255, 0, 120, 215));
-                graphics.FillRectangle(&okBrush, static_cast<float>(okX), static_cast<float>(buttonY), static_cast<float>(buttonWidth), static_cast<float>(buttonHeight));
-                Pen okBorder(Color(255, 96, 180, 242), 1.0f);
-                graphics.DrawRectangle(&okBorder, static_cast<float>(okX), static_cast<float>(buttonY), static_cast<float>(buttonWidth), static_cast<float>(buttonHeight));
+                GraphicsPath okPath;
+                RectF okRect(static_cast<float>(okX), static_cast<float>(buttonY), static_cast<float>(buttonWidth), static_cast<float>(buttonHeight));
+                AddRoundedRect(okPath, okRect, 6.0f);
+                SolidBrush okBrush(btnPrimaryBg);
+                Pen okBorder(btnPrimaryBorder, 1.0f);
+                graphics.FillPath(&okBrush, &okPath);
+                graphics.DrawPath(&okBorder, &okPath);
                 
-                // Button text
-                Gdiplus::FontFamily btnFamily(L"Segoe UI");
-                Gdiplus::Font buttonFont(&btnFamily, 11.0f, FontStyleRegular, UnitPoint);
-                StringFormat buttonFormat;
-                buttonFormat.SetAlignment(StringAlignmentCenter);
-                buttonFormat.SetLineAlignment(StringAlignmentCenter);
-                
-                SolidBrush buttonTextBrush(Color(255, 242, 245, 250));
-                RectF okTextRect(static_cast<float>(okX), static_cast<float>(buttonY), static_cast<float>(buttonWidth), static_cast<float>(buttonHeight));
-                graphics.DrawString(L"Aceptar", -1, &buttonFont, okTextRect, &buttonFormat, &buttonTextBrush);
+                SolidBrush okTextBrush(Color(255, 255, 255, 255));
+                graphics.DrawString(L"Aceptar", -1, &buttonFont, okRect, &buttonFormat, &okTextBrush);
             }
             
             EndPaint(hwnd, &ps);
@@ -767,9 +802,9 @@ LRESULT CALLBACK ThemedDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
             RECT client;
             GetClientRect(hwnd, &client);
             
-            int buttonWidth = 100;
+            int buttonWidth = 110;
             int buttonHeight = 32;
-            int buttonY = client.bottom - 50;
+            int buttonY = client.bottom - 46;
             
             // Check button clicks
             if (g_dialogState.buttons == MB_YESNO) {
@@ -784,7 +819,7 @@ LRESULT CALLBACK ThemedDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
                     DestroyWindow(hwnd);
                 }
             } else {
-                int okX = client.right / 2 - buttonWidth / 2;
+                int okX = (client.right - buttonWidth) / 2;
                 if (x >= okX && x <= okX + buttonWidth && y >= buttonY && y <= buttonY + buttonHeight) {
                     g_dialogState.result = IDOK;
                     DestroyWindow(hwnd);
@@ -2189,7 +2224,7 @@ void LayoutHud(const RECT& client) {
 
     struct ItemDef { HudId id; const wchar_t* label; int w; } items[] = {
         { HUD_PREV, L"◀", 32 }, { HUD_NEXT, L"▶", 32 }, { HUD_FIT, L"Ajustar", 60 },
-        { HUD_ONE, L"1:1", 44 }, { HUD_CLARITY, L"✨ Claridad", 74 }, { HUD_ROT, L"Rotar", 50 },
+        { HUD_ONE, L"1:1", 44 }, { HUD_CLARITY, L"Claridad", 68 }, { HUD_ROT, L"Rotar", 50 },
         { HUD_FLIP, L"Voltear", 56 }, { HUD_WALLPAPER, L"Fondo", 52 }, { HUD_SAVE, L"Guardar", 60 },
         { HUD_FULL, g_state.isFullscreen ? L"Ventana" : L"Pantalla", 68 }, { HUD_OPEN, L"Abrir", 50 }
     };
@@ -2265,12 +2300,16 @@ void RenderHud(Graphics& graphics, const RECT& client) {
         GraphicsPath osdPath;
         AddRoundedRect(osdPath, osdRect, 8.0f);
 
-        SolidBrush osdBg(Color(245, 24, 25, 30));
-        Pen osdBorder(Color(255, 60, 62, 74), 1.0f);
+        Color osdBgColor = g_state.darkModeDetected ? Color(245, 24, 25, 30) : Color(245, 255, 255, 255);
+        Color osdBorderColor = g_state.darkModeDetected ? Color(255, 60, 62, 74) : Color(255, 210, 214, 222);
+        Color osdTextColor = g_state.darkModeDetected ? Color(245, 248, 252) : Color(255, 30, 32, 38);
+
+        SolidBrush osdBg(osdBgColor);
+        Pen osdBorder(osdBorderColor, 1.0f);
         graphics.FillPath(&osdBg, &osdPath);
         graphics.DrawPath(&osdBorder, &osdPath);
 
-        SolidBrush textBrush(Color(255, 255, 255));
+        SolidBrush textBrush(osdTextColor);
         graphics.DrawString(g_state.statusMessage.c_str(), -1, &font, osdRect, &format, &textBrush);
     }
 
@@ -2334,7 +2373,8 @@ void RenderHud(Graphics& graphics, const RECT& client) {
                 graphics.DrawPath(&normalBorder, &itemPath);
             }
 
-            SolidBrush btnTextBrush((hot || active) ? Color(255, 255, 255) : Color(255, 230, 235, 242));
+            Color btnNormalTextColor = g_state.darkModeDetected ? Color(255, 230, 235, 242) : Color(255, 30, 32, 38);
+            SolidBrush btnTextBrush((hot || active) ? Color(255, 255, 255) : btnNormalTextColor);
             graphics.DrawString(g_state.hud[i].label, -1, &btnFont, itemRect, &btnFormat, &btnTextBrush);
         }
     }
@@ -2376,11 +2416,13 @@ void RenderEmptyState(Graphics& graphics, const RECT& clientRect) {
     RectF titleRect(0.0f, clientRect.bottom * 0.38f - 30.0f, static_cast<float>(clientRect.right), 50.0f);
     RectF hintRect(0.0f, clientRect.bottom * 0.38f + 25.0f, static_cast<float>(clientRect.right), 40.0f);
 
-    SolidBrush titleBrush(Color(245, 248, 252));
-    SolidBrush hintBrush(Color(160, 170, 185));
+    Color titleColor = g_state.darkModeDetected ? Color(245, 248, 252) : Color(30, 32, 38);
+    Color hintColor = g_state.darkModeDetected ? Color(160, 170, 185) : Color(110, 118, 130);
+    SolidBrush titleBrush(titleColor);
+    SolidBrush hintBrush(hintColor);
 
     graphics.DrawString(L"ARTPICST", -1, &titleFont, titleRect, &format, &titleBrush);
-    graphics.DrawString(L"Arrastra una imagen aquí  ·  Ctrl + O abrir  ·  F11 pantalla completa  ·  F1 info/atajos",
+    graphics.DrawString(L"Arrastre una imagen aquí  ·  Ctrl + O para abrir  ·  F11 pantalla completa  ·  F1 para ayuda",
                         -1, &hintFont, hintRect, &format, &hintBrush);
 }
 
@@ -2667,7 +2709,62 @@ void ShowExifDialog(HWND hwnd) {
     wchar_t zoomBuf[64];
     swprintf_s(zoomBuf, L"• Zoom actual en pantalla: %.1f%%\n", g_state.zoom * 100.0f);
     info += zoomBuf;
-    ShowThemedMessageBox(hwnd, L"Metadatos de Imagen — ARTPICST", info.c_str(), MB_OK, MB_ICONINFORMATION);
+    ShowThemedMessageBox(hwnd, L"Propiedades y Metadatos — ARTPICST", info.c_str(), MB_OK, MB_ICONINFORMATION);
+}
+
+void ShowProgramInfoDialog(HWND hwnd) {
+    std::wstring info = L"Guía de Controles, Atajos de Teclado y Funciones:\n\n";
+    info += L"• Navegación entre imágenes:\n";
+    info += L"    Flecha Derecha / Espacio : Imagen siguiente\n";
+    info += L"    Flecha Izquierda / Retroceso : Imagen anterior\n";
+    info += L"    Inicio / Fin : Primera / última imagen de la carpeta\n";
+    info += L"    Botones laterales del ratón : Anterior / siguiente\n\n";
+    info += L"• Zoom y visualización:\n";
+    info += L"    Rueda del ratón / Teclas + y - : Acercar / alejar\n";
+    info += L"    F : Ajustar imagen a las dimensiones de la ventana\n";
+    info += L"    1 o 0 / Botón central : Escala nativa 1:1 (100%)\n";
+    info += L"    Clic izquierdo y arrastrar : Desplazar imagen panorámica\n";
+    info += L"    F11 / Doble clic : Activar o desactivar pantalla completa\n\n";
+    info += L"• Manipulación y filtros:\n";
+    info += L"    R / Shift + R : Girar 90° horario / antihorario\n";
+    info += L"    H / V : Volteo horizontal / vertical\n";
+    info += L"    D : Alternar filtro de Ultra-Claridad\n";
+    info += L"    G : Alternar filtro de escala de grises (B/N)\n";
+    info += L"    N : Alternar inversión cromática (Negativo)\n";
+    info += L"    T : Alternar tema visual (Oscuro / Claro)\n\n";
+    info += L"• Archivos y portapapeles:\n";
+    info += L"    Ctrl + O / Ctrl + Shift + O : Abrir imagen / carpeta\n";
+    info += L"    Ctrl + S : Guardar imagen exportada con calidad máxima\n";
+    info += L"    Ctrl + C / Ctrl + Shift + C : Copiar imagen / copiar ruta\n";
+    info += L"    Ctrl + E : Mostrar ubicación en el Explorador de archivos\n";
+    info += L"    Ctrl + W : Establecer como fondo de escritorio de Windows\n";
+    info += L"    Supr : Mover imagen actual a la Papelera de reciclaje\n";
+    info += L"    E / Ctrl + I : Consultar metadatos y propiedades EXIF\n";
+    info += L"    F5 : Iniciar o detener presentación automática\n";
+    info += L"    Esc : Cerrar visor o salir de pantalla completa";
+    ShowThemedMessageBox(hwnd, L"Guía de Funciones y Atajos — ARTPICST", info.c_str(), MB_OK, MB_ICONINFORMATION);
+}
+
+void ShowAboutDialog(HWND hwnd) {
+    std::wstring about = L"ARTPICST — Visor de Imágenes Profesional\n\n";
+    about += L"Versión: 1.2.0 (Compilación Estable)\n";
+    about += L"Arquitectura: Nativo C++17 para Windows (x64)\n\n";
+    about += L"Características principales:\n";
+    about += L"• Motores de descodificación de alto rendimiento: stb_image, WIC y GDI+.\n";
+    about += L"• Soporte para más de 30 formatos: PNG, JPG, BMP, GIF animado, WebP, TIFF, AVIF, HEIC, RAW, HDR, PSD, ICO, etc.\n";
+    about += L"• Gestión inteligente de memoria con caché LRU y liberación dinámica de recursos.\n";
+    about += L"• Interfaz moderna adaptativa compatible con modo oscuro/claro y escalado de alto DPI en Windows 11, 10, 8.1 y 7.\n\n";
+    about += L"Licencia: Software libre y de código abierto.\n";
+    about += L"Repositorio oficial: https://github.com/LiebeBlack/Pic\n";
+    about += L"Copyright © 2026 ARTPICST. Todos los derechos reservados.";
+    ShowThemedMessageBox(hwnd, L"Acerca de ARTPICST", about.c_str(), MB_OK, MB_ICONINFORMATION);
+}
+
+void ToggleTheme() {
+    ThemeMode nextTheme = (g_state.darkModeDetected) ? ThemeMode::Light : ThemeMode::Dark;
+    ApplyTheme(nextTheme);
+    ShowOSD(g_state.darkModeDetected ? L"Tema: Modo Oscuro" : L"Tema: Modo Claro");
+    InvalidateRect(g_state.hwnd, nullptr, FALSE);
 }
 
 bool CopyPathToClipboard() {
