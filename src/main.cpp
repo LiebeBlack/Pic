@@ -173,6 +173,8 @@ const UINT_PTR TIMER_DOCK_HIDE = 3;
 const UINT DOCK_HIDE_MS = 2000;
 const int DOCK_PROXIMITY_THRESHOLD = 80;
 const UINT_PTR TIMER_GIF = 4;
+const UINT_PTR TIMER_ZOOM = 5;
+const DWORD ZOOM_ANIM_MS = 110;   // Duración de la animación de zoom suave
 
 template <typename T>
 struct ComPtr {
@@ -349,6 +351,16 @@ struct AppState {
     int dragStartX = 0, dragStartY = 0;
     float dragStartOffsetX = 0.0f, dragStartOffsetY = 0.0f;
 
+    // Sincronización de fotogramas GIF (evita deriva de tiempo)
+    DWORD gifLastTick = 0;
+
+    // Animación de zoom suave (interpolada por temporizador)
+    bool zoomAnimActive = false;
+    float zoomAnimStart = 0.0f, zoomAnimTarget = 0.0f;
+    float zoomAnimImageX = 0.0f, zoomAnimImageY = 0.0f;
+    float zoomAnimStartOffsetX = 0.0f, zoomAnimStartOffsetY = 0.0f;
+    DWORD zoomAnimStartTime = 0;
+
     // Sistema de caché
     std::unordered_map<std::wstring, std::list<CachedImage>::iterator> cacheIndex;
     std::list<CachedImage> imageCache;
@@ -413,6 +425,41 @@ AppState g_state;
 // Se activa cuando un argumento de línea de comandos (--register/--unregister)
 // ya completó su trabajo y la aplicación debe salir sin crear la ventana.
 bool g_exitAfterCommandLine = false;
+
+// Recursos GDI+ reutilizables: se crean UNA sola vez tras iniciar GDI+
+// y se destruyen antes de GdiplusShutdown. Evita crear fuentes y formatos
+// en cada fotograma (muy costoso) y no deja fugas de memoria.
+struct UiResources {
+    std::unique_ptr<FontFamily> segoeFamily;
+    std::unique_ptr<Font> hudBtnFont;      // Botones del dock
+    std::unique_ptr<Font> osdFont;         // Mensajes OSD
+    std::unique_ptr<Font> emptyTitleFont;  // Pantalla vacía
+    std::unique_ptr<Font> emptyHintFont;   // Pantalla vacía
+    std::unique_ptr<StringFormat> centerFormat;
+
+    void Init() {
+        if (segoeFamily) return;
+        segoeFamily = std::make_unique<FontFamily>(L"Segoe UI");
+        hudBtnFont = std::make_unique<Font>(segoeFamily.get(), 9.5f, FontStyleBold, UnitPoint);
+        osdFont = std::make_unique<Font>(segoeFamily.get(), 10.5f, FontStyleBold, UnitPoint);
+        emptyTitleFont = std::make_unique<Font>(segoeFamily.get(), 28.0f, FontStyleBold, UnitPoint);
+        emptyHintFont = std::make_unique<Font>(segoeFamily.get(), 11.5f, FontStyleRegular, UnitPoint);
+        centerFormat = std::make_unique<StringFormat>();
+        centerFormat->SetAlignment(StringAlignmentCenter);
+        centerFormat->SetLineAlignment(StringAlignmentCenter);
+    }
+
+    void Shutdown() {
+        centerFormat.reset();
+        emptyHintFont.reset();
+        emptyTitleFont.reset();
+        osdFont.reset();
+        hudBtnFont.reset();
+        segoeFamily.reset();
+    }
+};
+
+UiResources g_ui;
 
 std::wstring GetFileName(const std::wstring& filepath);
 std::wstring GetFileSizeString(const std::wstring& filepath);
@@ -488,6 +535,7 @@ std::string WideToUtf8(const std::wstring& value);
 void ApplyWindowMode(HWND hwnd, WindowMode mode);
 std::wstring NormalizePath(const std::wstring& path);
 void ZoomAt(float factor, int pivotX, int pivotY);
+void CancelZoomAnimation();
 void DeleteCurrentImage();
 void OpenInExplorer();
 
@@ -629,6 +677,7 @@ void StopGifTimer() {
 void StartGifTimer() {
     StopGifTimer();
     if (!g_state.hwnd || !g_state.gif.animated()) return;
+    g_state.gifLastTick = GetTickCount();
     SetTimer(g_state.hwnd, TIMER_GIF, static_cast<UINT>(g_state.gif.delayAt(g_state.gif.current)), nullptr);
 }
 
@@ -919,7 +968,9 @@ int ShowThemedMessageBox(HWND parent, const wchar_t* title, const wchar_t* messa
 
 // Inicialización de GDI+
 bool InitGDIPlus() {
-    return GdiplusStartup(&g_state.gdiplusToken, &g_state.gdiplusStartupInput, nullptr) == Ok;
+    const bool ok = GdiplusStartup(&g_state.gdiplusToken, &g_state.gdiplusStartupInput, nullptr) == Ok;
+    if (ok) g_ui.Init();
+    return ok;
 }
 
 // Sistema de tema inteligente
@@ -1234,6 +1285,7 @@ void CleanupGDIPlus() {
     }
     FreeCurrentImage();
     FreeDoubleBuffer();
+    g_ui.Shutdown();
     if (g_state.gdiplusToken) {
         GdiplusShutdown(g_state.gdiplusToken);
         g_state.gdiplusToken = 0;
@@ -2134,6 +2186,7 @@ void ToggleInvert() {
 
 void EnsureImageVisible() {
     if (!g_state.imageData || !g_state.hwnd) return;
+    if (g_state.zoomAnimActive) return; // no interfiere con la animación de zoom
     RECT client{};
     GetClientRect(g_state.hwnd, &client);
     const int windowWidth = client.right - client.left;
@@ -2151,6 +2204,7 @@ void EnsureImageVisible() {
 
 void FitImageToWindow(int windowWidth, int windowHeight) {
     if (!g_state.imageData || windowWidth <= 0 || windowHeight <= 0) return;
+    CancelZoomAnimation();
     int imageWidth = 0, imageHeight = 0;
     DisplaySize(imageWidth, imageHeight);
     const float scaleX = static_cast<float>(windowWidth) / static_cast<float>(imageWidth);
@@ -2164,6 +2218,7 @@ void FitImageToWindow(int windowWidth, int windowHeight) {
 
 void ActualSize() {
     if (!g_state.imageData || !g_state.hwnd) return;
+    CancelZoomAnimation();
     RECT client{};
     GetClientRect(g_state.hwnd, &client);
     g_state.fitMode = false;
@@ -2177,6 +2232,12 @@ void ActualSize() {
     InvalidateRect(g_state.hwnd, nullptr, FALSE);
 }
 
+void CancelZoomAnimation() {
+    if (!g_state.zoomAnimActive) return;
+    g_state.zoomAnimActive = false;
+    if (g_state.hwnd) KillTimer(g_state.hwnd, TIMER_ZOOM);
+}
+
 void ZoomAt(float factor, int pivotX, int pivotY) {
     if (!g_state.imageData || !g_state.hwnd) return;
     const float oldZoom = g_state.zoom;
@@ -2185,13 +2246,18 @@ void ZoomAt(float factor, int pivotX, int pivotY) {
     if (std::fabs(newZoom - 1.0f) < 0.04f) newZoom = 1.0f;
     if (newZoom == oldZoom) return;
     g_state.fitMode = false;
-    const float imageX = (static_cast<float>(pivotX) - g_state.offsetX) / oldZoom;
-    const float imageY = (static_cast<float>(pivotY) - g_state.offsetY) / oldZoom;
-    g_state.zoom = newZoom;
-    g_state.offsetX = static_cast<float>(pivotX) - imageX * g_state.zoom;
-    g_state.offsetY = static_cast<float>(pivotY) - imageY * g_state.zoom;
-    EnsureImageVisible();
-    ShowOSD();
+
+    // Zoom suave: se anima desde el zoom actual hasta el destino manteniendo
+    // el punto bajo el cursor fijo en pantalla (sin saltos bruscos).
+    g_state.zoomAnimStart = oldZoom;
+    g_state.zoomAnimTarget = newZoom;
+    g_state.zoomAnimImageX = (static_cast<float>(pivotX) - g_state.offsetX) / oldZoom;
+    g_state.zoomAnimImageY = (static_cast<float>(pivotY) - g_state.offsetY) / oldZoom;
+    g_state.zoomAnimStartOffsetX = g_state.offsetX;
+    g_state.zoomAnimStartOffsetY = g_state.offsetY;
+    g_state.zoomAnimStartTime = GetTickCount();
+    g_state.zoomAnimActive = true;
+    SetTimer(g_state.hwnd, TIMER_ZOOM, 8, nullptr);
     InvalidateRect(g_state.hwnd, nullptr, FALSE);
 }
 
@@ -2288,15 +2354,12 @@ void RenderHud(Graphics& graphics, const RECT& client) {
     }
 
     // 1. Mensaje OSD / Estado Flotante
-    if (!g_state.statusMessage.empty() &&
+    if (g_ui.osdFont && !g_state.statusMessage.empty() &&
         (g_state.osdPinned || GetTickCount() - g_state.osdDisplayTime < OSD_MS)) {
-        FontFamily fontFamily(L"Segoe UI");
-        Font font(&fontFamily, 10.5f, FontStyleBold, UnitPoint);
+        Font& font = *g_ui.osdFont;
+        StringFormat& format = *g_ui.centerFormat;
         RectF layoutRect(0, 0, 600, 40);
         RectF boundRect;
-        StringFormat format;
-        format.SetAlignment(StringAlignmentCenter);
-        format.SetLineAlignment(StringAlignmentCenter);
         graphics.MeasureString(g_state.statusMessage.c_str(), -1, &font, layoutRect, &format, &boundRect);
 
         const float osdW = boundRect.Width + 30.0f;
@@ -2322,7 +2385,8 @@ void RenderHud(Graphics& graphics, const RECT& client) {
     }
 
     // 2. Dock Flotante Compacto y Ultraligero Inferior
-    if (shouldShowDock) {
+    // (durante el arrastre no se redibuja: se repinta al soltar y ahorra CPU)
+    if (!g_state.isDragging && shouldShowDock && g_ui.hudBtnFont) {
         RectF dockRectF(static_cast<float>(g_state.dockRect.left),
                        static_cast<float>(g_state.dockRect.top),
                        static_cast<float>(g_state.dockRect.right - g_state.dockRect.left),
@@ -2346,11 +2410,8 @@ void RenderHud(Graphics& graphics, const RECT& client) {
         graphics.DrawPath(&dockBorder, &dockPath);
 
         // Botones elegantes estilo Windows 10 / Windows 7 con bordes suaves Windows 11
-        FontFamily btnFontFamily(L"Segoe UI");
-        Font btnFont(&btnFontFamily, 9.5f, FontStyleBold, UnitPoint);
-        StringFormat btnFormat;
-        btnFormat.SetAlignment(StringAlignmentCenter);
-        btnFormat.SetLineAlignment(StringAlignmentCenter);
+        Font& btnFont = *g_ui.hudBtnFont;
+        StringFormat& btnFormat = *g_ui.centerFormat;
 
         for (int i = 0; i < g_state.hudCount; ++i) {
             const bool hot = (g_state.hud[i].id == g_state.hudHot);
@@ -2413,13 +2474,11 @@ void RenderEmptyState(Graphics& graphics, const RECT& clientRect) {
     SolidBrush bgBrush(Color(static_cast<BYTE>(255), static_cast<BYTE>(GetRValue(BG_COLOR)), static_cast<BYTE>(GetGValue(BG_COLOR)), static_cast<BYTE>(GetBValue(BG_COLOR))));
     graphics.FillRectangle(&bgBrush, 0, 0, clientRect.right, clientRect.bottom);
 
-    FontFamily titleFamily(L"Segoe UI");
-    Font titleFont(&titleFamily, 28.0f, FontStyleBold, UnitPoint);
-    Font hintFont(&titleFamily, 11.5f, FontStyleRegular, UnitPoint);
+    if (!g_ui.emptyTitleFont || !g_ui.emptyHintFont) return;
+    Font& titleFont = *g_ui.emptyTitleFont;
+    Font& hintFont = *g_ui.emptyHintFont;
 
-    StringFormat format;
-    format.SetAlignment(StringAlignmentCenter);
-    format.SetLineAlignment(StringAlignmentCenter);
+    StringFormat& format = *g_ui.centerFormat;
 
     RectF titleRect(0.0f, clientRect.bottom * 0.38f - 30.0f, static_cast<float>(clientRect.right), 50.0f);
     RectF hintRect(0.0f, clientRect.bottom * 0.38f + 25.0f, static_cast<float>(clientRect.right), 40.0f);
@@ -2458,9 +2517,11 @@ void RenderImage() {
 
     Graphics graphics(g_state.hdcMem);
     
-    // Configuración de renderizado adaptativo (Bajo CPU durante arrastre, Alta calidad en reposo)
+    // Renderizado adaptativo: durante interacción (arrastre o animación de zoom)
+    // se usa el modo rápido para mantener 60 FPS; en reposo, máxima calidad.
+    const bool interacting = g_state.isDragging || g_state.zoomAnimActive;
     graphics.SetCompositingMode(CompositingModeSourceOver);
-    if (g_state.isDragging) {
+    if (interacting) {
         graphics.SetCompositingQuality(CompositingQualityHighSpeed);
         graphics.SetSmoothingMode(SmoothingModeHighSpeed);
         graphics.SetPixelOffsetMode(PixelOffsetModeHalf);
@@ -2567,14 +2628,17 @@ void RenderImage() {
     graphics.TranslateTransform(-g_state.imageWidth * g_state.zoom * 0.5f,
                                 -g_state.imageHeight * g_state.zoom * 0.5f);
 
+    // Imágenes opacas: copia directa sin blending alfa (más rápido en cada fotograma)
+    if (!g_state.hasAlpha) {
+        graphics.SetCompositingMode(CompositingModeSourceCopy);
+    }
     graphics.DrawImage(&bitmap,
                        RectF(0.0f, 0.0f, g_state.imageWidth * g_state.zoom, g_state.imageHeight * g_state.zoom),
                        0.0f, 0.0f, static_cast<REAL>(g_state.imageWidth), static_cast<REAL>(g_state.imageHeight),
                        UnitPixel, pImgAttr);
-
     graphics.Restore(state);
+    graphics.SetCompositingMode(CompositingModeSourceOver);
 
-    // Renderizar Dock y controles flotantes con transparencia acrílica
     RenderHud(graphics, rect);
 }
 
@@ -3184,6 +3248,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             break;
         case WM_SIZE: {
             if (wParam == SIZE_MINIMIZED) {
+                CancelZoomAnimation();
                 FreeDoubleBuffer();
                 TrimProcessMemory();
                 return 0;
@@ -3401,6 +3466,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (PtInRect(&g_state.dockRect, POINT{ x, y })) {
                 return 0;
             }
+            CancelZoomAnimation();
             g_state.isDragging = true;
             g_state.dragStartX = x;
             g_state.dragStartY = y;
@@ -3498,12 +3564,43 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 }
             } else if (wParam == TIMER_GIF) {
                 if (g_state.gif.animated()) {
-                    g_state.gif.current = (g_state.gif.current + 1) % g_state.gif.frameCount();
+                    // Avance proporcional al tiempo transcurrido: si el sistema va
+                    // retrasado se saltan fotogramas para mantener la animación en sync.
+                    const int frameCount = g_state.gif.frameCount();
+                    const int delay = g_state.gif.delayAt(g_state.gif.current);
+                    const DWORD now = GetTickCount();
+                    int advance = static_cast<int>((now - g_state.gifLastTick) / std::max(delay, 1));
+                    if (advance < 1) advance = 1;
+                    if (advance > frameCount) advance = frameCount;
+                    g_state.gif.current = (g_state.gif.current + advance) % frameCount;
+                    g_state.gifLastTick = now;
                     InvalidateRect(hwnd, nullptr, FALSE);
-                    const int nextDelay = g_state.gif.delayAt(g_state.gif.current);
-                    SetTimer(hwnd, TIMER_GIF, static_cast<UINT>(nextDelay), nullptr);
+                    SetTimer(hwnd, TIMER_GIF, static_cast<UINT>(g_state.gif.delayAt(g_state.gif.current)), nullptr);
                 } else {
                     KillTimer(hwnd, TIMER_GIF);
+                }
+            } else if (wParam == TIMER_ZOOM) {
+                if (!g_state.zoomAnimActive) {
+                    KillTimer(hwnd, TIMER_ZOOM);
+                } else {
+                    const DWORD now = GetTickCount();
+                    float t = static_cast<float>(now - g_state.zoomAnimStartTime) / static_cast<float>(ZOOM_ANIM_MS);
+                    if (t >= 1.0f) t = 1.0f;
+                    // smoothstep: arranque y frenado suaves
+                    const float eased = t * t * (3.0f - 2.0f * t);
+                    g_state.zoom = g_state.zoomAnimStart + (g_state.zoomAnimTarget - g_state.zoomAnimStart) * eased;
+                    g_state.offsetX = g_state.zoomAnimStartOffsetX + g_state.zoomAnimImageX * (g_state.zoomAnimStart - g_state.zoom);
+                    g_state.offsetY = g_state.zoomAnimStartOffsetY + g_state.zoomAnimImageY * (g_state.zoomAnimStart - g_state.zoom);
+                    if (t >= 1.0f) {
+                        g_state.zoom = g_state.zoomAnimTarget;
+                        g_state.zoomAnimActive = false;
+                        KillTimer(hwnd, TIMER_ZOOM);
+                        EnsureImageVisible();
+                        wchar_t zoomText[64];
+                        swprintf_s(zoomText, L"Zoom: %d%%", static_cast<int>(g_state.zoom * 100.0f + 0.5f));
+                        ShowOSD(zoomText);
+                    }
+                    InvalidateRect(hwnd, nullptr, FALSE);
                 }
             }
             return 0;
@@ -3526,6 +3623,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             KillTimer(hwnd, TIMER_SLIDESHOW);
             KillTimer(hwnd, TIMER_DOCK_HIDE);
             KillTimer(hwnd, TIMER_GIF);
+            KillTimer(hwnd, TIMER_ZOOM);
             StopPrefetchThread();
             FreeCurrentImage();
             FreeDoubleBuffer();
