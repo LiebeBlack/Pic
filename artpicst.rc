@@ -3,8 +3,8 @@
 IDI_APP_ICON ICON "resources/artpicst.ico"
 
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION 1,1,0,0
-PRODUCTVERSION 1,1,0,0
+FILEVERSION 1,2,0,0
+PRODUCTVERSION 1,2,0,0
 FILEFLAGSMASK 0x3FL
 FILEFLAGS 0x0L
 FILEOS 0x40004L
@@ -17,12 +17,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "ARTPICST"
             VALUE "FileDescription", "ARTPICST Image Viewer"
-            VALUE "FileVersion", "1.1.0"
+            VALUE "FileVersion", "1.2.0"
             VALUE "InternalName", "artpicst"
             VALUE "LegalCopyright", "Copyright (C) 2026 ARTPICST"
             VALUE "OriginalFilename", "artpicst.exe"
             VALUE "ProductName", "ARTPICST"
-            VALUE "ProductVersion", "1.1.0"
+            VALUE "ProductVersion", "1.2.0"
         END
     END
     BLOCK "VarFileInfo"

@@ -410,6 +410,10 @@ struct AppState {
 
 AppState g_state;
 
+// Se activa cuando un argumento de línea de comandos (--register/--unregister)
+// ya completó su trabajo y la aplicación debe salir sin crear la ventana.
+bool g_exitAfterCommandLine = false;
+
 std::wstring GetFileName(const std::wstring& filepath);
 std::wstring GetFileSizeString(const std::wstring& filepath);
 std::wstring GetExtensionLower(const std::wstring& filename);
@@ -599,6 +603,9 @@ struct ThemedDialogState {
 };
 
 ThemedDialogState g_dialogState;
+
+// Declaración anticipada: AddRoundedRect se define más abajo pero se usa en ThemedDialogProc
+void AddRoundedRect(GraphicsPath& path, const RectF& rect, float radius);
 
 void EnableDarkTitleBar(HWND hwnd, bool dark) {
     if (!hwnd) return;
@@ -2714,8 +2721,8 @@ void ShowExifDialog(HWND hwnd) {
 }
 
 void ToggleTheme() {
-    ThemeMode nextTheme = (g_state.darkModeDetected) ? ThemeMode::Light : ThemeMode::Dark;
-    ApplyTheme(nextTheme);
+    g_currentTheme = (g_state.darkModeDetected) ? ThemeMode::Light : ThemeMode::Dark;
+    ApplyTheme(g_currentTheme);
     ShowOSD(g_state.darkModeDetected ? L"Tema: Modo Oscuro" : L"Tema: Modo Claro");
     InvalidateRect(g_state.hwnd, nullptr, FALSE);
 }
@@ -3148,12 +3155,12 @@ void ShowContextMenu(HWND hwnd, int x, int y) {
         case 15: ToggleSlideshow(); break;
         case 16: DeleteCurrentImage(); break;
         case 17: SaveImageDialog(hwnd); break;
-        case 18: SetAsWallpaper(); break;
-        case 19: ToggleGrayscale(); break;
-        case 20: ToggleInvert(); break;
-        case 21: ShowExifDialog(hwnd); break;
-        case 22: ShowProgramInfoDialog(hwnd); break;
-        case 23: ToggleUltraClarity(); break;
+        case 19: SetAsWallpaper(); break;
+        case 20: ToggleGrayscale(); break;
+        case 21: ToggleInvert(); break;
+        case 22: ShowExifDialog(hwnd); break;
+        case 23: ShowProgramInfoDialog(hwnd); break;
+        case 24: ToggleUltraClarity(); break;
         default: break;
     }
 }
@@ -3608,14 +3615,20 @@ void ParseStartupOptions(std::wstring& outFolder, WindowMode& outMode) {
     for (int i = 1; i < argc; ++i) {
         std::wstring arg = argv[i];
         if (arg == L"--register") {
-            RegisterFileAssociationForCurrentUser();
-            PostQuitMessage(0);
+            const bool ok = RegisterFileAssociationForCurrentUser();
+            if (ok) {
+                LogMessage(L"Asociaciones de archivo registradas (HKCU).");
+            } else {
+                LogMessage(L"Error al registrar las asociaciones de archivo.");
+            }
+            g_exitAfterCommandLine = true;
             LocalFree(argv);
             return;
         }
         if (arg == L"--unregister") {
             UnregisterFileAssociationForCurrentUser();
-            PostQuitMessage(0);
+            LogMessage(L"Asociaciones de archivo eliminadas (HKCU).");
+            g_exitAfterCommandLine = true;
             LocalFree(argv);
             return;
         }
@@ -3722,6 +3735,14 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
     std::wstring folderPath;
     WindowMode startMode = WindowMode::Normal;
     ParseStartupOptions(folderPath, startMode);
+
+    if (g_exitAfterCommandLine) {
+        // Modo consola: --register / --unregister ya hicieron su trabajo.
+        CleanupGDIPlus();
+        if (SUCCEEDED(g_state.comHr)) CoUninitialize();
+        return 0;
+    }
+
     g_state.windowMode = startMode;
     g_state.isFullscreen = (startMode == WindowMode::Fullscreen);
     if (!folderPath.empty()) ScanFolderForImages(folderPath);
