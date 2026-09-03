@@ -51,6 +51,7 @@ copy /y "build\artpicst.exe" "dist\artpicst.exe" >nul
 copy /y "installer\build\artpicst_installer.exe" "dist\artpicst_installer.exe" >nul
 copy /y "resources\artpicst.ico" "dist\artpicst.ico" >nul
 copy /y "version.json" "dist\version.json" >nul
+copy /y "README.md" "dist\README.md" >nul
 
 echo.
 echo ========================================
@@ -62,6 +63,7 @@ echo   - artpicst.exe (Programa principal)
 echo   - artpicst_installer.exe (Instalador premium)
 echo   - artpicst.ico (Icono)
 echo   - version.json (Version info)
+echo   - README.md (Documentacion)
 echo.
 
 :: Mostrar tamaños de archivos

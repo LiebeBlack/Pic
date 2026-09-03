@@ -74,11 +74,58 @@ struct InstallerState {
     bool isInstalling = false;
     bool installSucceeded = false;
     int installProgress = 0;
+    // UI: zona bajo el puntero para efectos hover y cursor de mano
+    int hoverZone = 0;
+    bool mouseTracking = false;
     GdiplusStartupInput gdiplusStartupInput;
     ULONG_PTR gdiplusToken = 0;
 };
 
 InstallerState g_state;
+
+// Zonas hover de la interfaz (coinciden con los botones dibujados)
+enum HoverZone {
+    HOVER_NONE = 0,
+    HOVER_BACK,
+    HOVER_NEXT,
+    HOVER_CANCEL
+};
+
+struct ButtonRects {
+    RectF back;
+    RectF next;
+    RectF cancel;
+};
+
+// Geometría compartida por el dibujado, el clic y el hover (una sola fuente)
+ButtonRects GetButtonRects(const RECT& client) {
+    ButtonRects r;
+    const float buttonHeight = 36.0f;
+    const float buttonWidth = 120.0f;
+    const float buttonY = static_cast<float>(client.bottom) - 60.0f;
+    r.back = RectF(20.0f, buttonY, buttonWidth, buttonHeight);
+    r.next = RectF(static_cast<REAL>(client.right) - buttonWidth - 20.0f, buttonY, buttonWidth, buttonHeight);
+    r.cancel = RectF(static_cast<REAL>(client.right) - 90.0f, 10.0f, 70.0f, 24.0f);
+    return r;
+}
+
+int HoverZoneAt(const RECT& client, int x, int y) {
+    if (g_state.currentStep == InstallStep::Install) return HOVER_NONE;
+    const float fx = static_cast<float>(x);
+    const float fy = static_cast<float>(y);
+    auto hit = [&](const RectF& rc) {
+        return fx >= rc.X && fx <= rc.X + rc.Width && fy >= rc.Y && fy <= rc.Y + rc.Height;
+    };
+    const ButtonRects r = GetButtonRects(client);
+    if (hit(r.cancel)) return HOVER_CANCEL;
+    if (g_state.currentStep == InstallStep::License && hit(r.back)) return HOVER_BACK;
+    if ((g_state.currentStep == InstallStep::Welcome ||
+         g_state.currentStep == InstallStep::License ||
+         g_state.currentStep == InstallStep::Complete) && hit(r.next)) {
+        return HOVER_NEXT;
+    }
+    return HOVER_NONE;
+}
 
 // ============================================================================
 // Utilidades de sistema de archivos y registro
@@ -123,6 +170,30 @@ bool CopyFileIfExists(const std::wstring& src, const std::wstring& dst) {
     if (src.empty() || dst.empty()) return false;
     if (GetFileAttributesW(src.c_str()) == INVALID_FILE_ATTRIBUTES) return false;
     return CopyFileW(src.c_str(), dst.c_str(), FALSE) != FALSE;
+}
+
+// Crea todos los directorios intermedios de una ruta ("C:\A\B\C" -> C, C\A, ...)
+bool CreateDirectoryTree(const std::wstring& path) {
+    if (path.empty()) return false;
+    std::wstring current;
+    size_t start = 0;
+    if (path.size() >= 3 && path[1] == L':' && (path[2] == L'\\' || path[2] == L'/')) {
+        current = path.substr(0, 3); // raíz "X:\"
+        start = 3;
+    }
+    for (size_t i = start; i <= path.size(); ++i) {
+        if (i == path.size() || path[i] == L'\\' || path[i] == L'/') {
+            if (i > start) {
+                current += path.substr(start, i - start);
+                if (!CreateDirectoryW(current.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS) {
+                    return false;
+                }
+                current += L'\\';
+            }
+            start = i + 1; // salta el separador (o segmentos vacíos)
+        }
+    }
+    return true;
 }
 
 bool SetRegStringValue(HKEY root, const std::wstring& key, const std::wstring& name, const std::wstring& value) {
@@ -275,7 +346,11 @@ void PerformUninstall() {
     std::wstring movedSelf = std::wstring(tempDir) + L"artpicst_uninstaller_" + std::to_wstring(GetCurrentProcessId()) + L".exe";
     if (!selfPath.empty()) MoveFileW(selfPath.c_str(), movedSelf.c_str());
 
-    std::wstring cmd = L"/c ping 127.0.0.1 -n 3 >nul & del /f /q \"" + movedSelf + L"\" & rd /s /q \"" + installDir + L"\"";
+    // El propio proceso sigue vivo mientras el usuario confirma el desinstalado;
+    // se reintenta el borrado del ejecutable movido hasta que el proceso termina.
+    std::wstring cmd = L"/c ping 127.0.0.1 -n 2 >nul & del /f /q \"" + movedSelf +
+                       L"\" & if exist \"" + movedSelf + L"\" ping 127.0.0.1 -n 8 >nul & del /f /q \"" +
+                       movedSelf + L"\" & rd /s /q \"" + installDir + L"\"";
     std::vector<wchar_t> cmdBuf(cmd.begin(), cmd.end());
     cmdBuf.push_back(L'\0');
 
@@ -371,11 +446,11 @@ void RenderWelcome(Graphics& g, const RECT& client) {
     RectF subtitleRect(0.0f, centerY - 70.0f, static_cast<REAL>(client.right), 30.0f);
     g.DrawString(L"Visor de imágenes premium con interfaz acrílica moderna", -1, &subtitleFont, subtitleRect, &format, &textBrush);
     
-    // Feature card
-    RectF cardRect(centerX - 200.0f, centerY - 20.0f, 400.0f, 200.0f);
+    // Feature card (compacta: que no se solape con los botones inferiores)
+    RectF cardRect(centerX - 200.0f, centerY - 55.0f, 400.0f, 175.0f);
     DrawRoundedRect(g, cardRect, 16.0f, CARD_BG, CARD_BORDER);
     
-    Gdiplus::Font featureFont(&titleFamily, 11.0f, FontStyleRegular, UnitPoint);
+    Gdiplus::Font featureFont(&titleFamily, 10.5f, FontStyleRegular, UnitPoint);
     SolidBrush featureBrush(Color(255, 200, 210, 220));
     
     const wchar_t* features[] = {
@@ -383,14 +458,14 @@ void RenderWelcome(Graphics& g, const RECT& client) {
         L"• Soporte para más de 30 formatos de imagen",
         L"• Ultra-Claridad HDR y efectos avanzados",
         L"• Navegación fluida con zoom y pan",
-        L"• Rendimiento ultra-ligero y bajo consumo de recursos"
+        L"• Rendimiento ultra-ligero y bajo consumo"
     };
     
-    float featureY = cardRect.Y + 30.0f;
+    float featureY = cardRect.Y + 24.0f;
     for (const wchar_t* feature : features) {
-        RectF featureRect(cardRect.X + 20.0f, featureY, cardRect.Width - 40.0f, 25.0f);
+        RectF featureRect(cardRect.X + 20.0f, featureY, cardRect.Width - 40.0f, 24.0f);
         g.DrawString(feature, -1, &featureFont, featureRect, &format, &featureBrush);
-        featureY += 30.0f;
+        featureY += 27.0f;
     }
 }
 
@@ -400,7 +475,6 @@ void RenderLicense(Graphics& g, const RECT& client) {
     
     Gdiplus::FontFamily titleFamily(L"Segoe UI");
     Gdiplus::Font titleFont(&titleFamily, 24.0f, FontStyleBold, UnitPoint);
-    Gdiplus::Font textFont(&titleFamily, 11.0f, FontStyleRegular, UnitPoint);
     
     StringFormat format;
     format.SetAlignment(StringAlignmentCenter);
@@ -408,15 +482,11 @@ void RenderLicense(Graphics& g, const RECT& client) {
     
     SolidBrush textBrush(TEXT_COLOR);
     
-    RectF titleRect(0.0f, centerY - 150.0f, static_cast<REAL>(client.right), 40.0f);
+    RectF titleRect(0.0f, centerY - 165.0f, static_cast<REAL>(client.right), 40.0f);
     g.DrawString(L"Acuerdo de Licencia", -1, &titleFont, titleRect, &format, &textBrush);
     
-    // License text box
-    RectF licenseBox(centerX - 250, centerY - 100, 500, 200);
-    DrawRoundedRect(g, licenseBox, 12.0f, Color(255, 12, 14, 18), Color(255, 60, 60, 60));
-    
     const wchar_t* licenseText = L"ARTPICST - Visor de Imágenes Premium\n\n"
-        L"Este software es proporcionado tal cual, sin garantía de ningún tipo.\n"
+        L"Este software se proporciona tal cual, sin garantía de ningún tipo.\n"
         L"El usuario es responsable de su uso y consecuencias.\n\n"
         L"Características principales:\n"
         L"- Visualización de imágenes de alta calidad\n"
@@ -425,12 +495,29 @@ void RenderLicense(Graphics& g, const RECT& client) {
         L"- Rendimiento ultra-ligero y optimizado\n\n"
         L"Al continuar con la instalación, aceptas los términos de uso.";
     
+    // Caja de licencia más amplia: todo el texto debe ser legible
+    RectF licenseBox(centerX - 260.0f, centerY - 90.0f, 520.0f, 235.0f);
+    DrawRoundedRect(g, licenseBox, 12.0f, Color(255, 12, 14, 18), Color(255, 60, 60, 60));
+    
     StringFormat textFormat;
     textFormat.SetAlignment(StringAlignmentNear);
     textFormat.SetLineAlignment(StringAlignmentNear);
     
-    RectF textRect(licenseBox.X + 20, licenseBox.Y + 20, licenseBox.Width - 40, licenseBox.Height - 40);
+    RectF textRect(licenseBox.X + 22, licenseBox.Y + 20, licenseBox.Width - 44, licenseBox.Height - 40);
     SolidBrush licenseBrush(Color(255, 180, 190, 200));
+    
+    // Ajuste adaptativo de fuente: si el texto no cabe, se reduce el tamaño
+    // hasta que el acuerdo completo quepa dentro de la caja (nada se recorta).
+    Gdiplus::FontFamily textFamily(L"Segoe UI");
+    float fontSize = 11.0f;
+    for (int attempt = 0; attempt < 6; ++attempt) {
+        Gdiplus::Font probe(&textFamily, fontSize, FontStyleRegular, UnitPoint);
+        RectF measured;
+        g.MeasureString(licenseText, -1, &probe, RectF(0.0f, 0.0f, textRect.Width, 5000.0f), &measured);
+        if (measured.Height <= textRect.Height || fontSize <= 8.5f) break;
+        fontSize -= 0.5f;
+    }
+    Gdiplus::Font textFont(&textFamily, fontSize, FontStyleRegular, UnitPoint);
     g.DrawString(licenseText, -1, &textFont, textRect, &textFormat, &licenseBrush);
 }
 
@@ -528,37 +615,24 @@ void RenderWindow(Graphics& g, const RECT& client) {
             break;
     }
     
-    // Navigation buttons
-    float buttonY = static_cast<float>(client.bottom) - 60.0f;
-    float buttonWidth = 120.0f;
-    float buttonHeight = 36.0f;
+    // Navigation buttons (misma geometría que clic y hover)
+    const ButtonRects r = GetButtonRects(client);
     
-    RectF backButton(20.0f, buttonY, buttonWidth, buttonHeight);
-    RectF nextButton(static_cast<REAL>(client.right) - buttonWidth - 20.0f, buttonY, buttonWidth, buttonHeight);
-    
-    const wchar_t* backText = L"← Atrás";
-    const wchar_t* nextText = L"Siguiente →";
-    
-    switch (g_state.currentStep) {
-        case InstallStep::Welcome:
-            DrawButton(g, nextButton, nextText, false, true);
-            break;
-        case InstallStep::License:
-            DrawButton(g, backButton, backText, false, true);
-            DrawButton(g, nextButton, L"Aceptar", false, true);
-            break;
-        case InstallStep::Install:
-            // No buttons during installation
-            break;
-        case InstallStep::Complete:
-            DrawButton(g, RectF(static_cast<REAL>(client.right) - buttonWidth - 20.0f, buttonY, buttonWidth, buttonHeight),
-                      g_state.installSucceeded ? L"Iniciar App" : L"Cerrar", false, true);
-            break;
+    if (g_state.currentStep == InstallStep::Welcome) {
+        DrawButton(g, r.next, L"Siguiente →", g_state.hoverZone == HOVER_NEXT, true);
+    } else if (g_state.currentStep == InstallStep::License) {
+        DrawButton(g, r.back, L"← Atrás", g_state.hoverZone == HOVER_BACK, true);
+        DrawButton(g, r.next, L"Aceptar", g_state.hoverZone == HOVER_NEXT, true);
+    } else if (g_state.currentStep == InstallStep::Complete) {
+        DrawButton(g, r.next,
+                   g_state.installSucceeded ? L"Iniciar App" : L"Cerrar",
+                   g_state.hoverZone == HOVER_NEXT, true);
     }
+    // InstallStep::Install no dibuja botones
     
-    // Cancel button (top right)
-    RectF cancelRect(static_cast<REAL>(client.right) - 80.0f, 10.0f, 60.0f, 24.0f);
-    DrawButton(g, cancelRect, L"Cancelar", false, g_state.currentStep != InstallStep::Install);
+    // Botón Cancelar (arriba a la derecha) - nunca durante la instalación
+    const bool cancelEnabled = g_state.currentStep != InstallStep::Install;
+    DrawButton(g, r.cancel, L"Cancelar", g_state.hoverZone == HOVER_CANCEL && cancelEnabled, cancelEnabled);
 }
 
 // ============================================================================
@@ -588,7 +662,7 @@ void PerformInstallation() {
     step(5, L"Preparando el directorio de instalación...");
     if (dst.empty()) {
         ok = false;
-    } else if (!CreateDirectoryW(dst.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS) {
+    } else if (!CreateDirectoryTree(dst)) {
         ok = false;
     }
 
@@ -644,7 +718,13 @@ void PerformInstallation() {
 }
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    static HCURSOR s_cursorArrow = LoadCursor(nullptr, IDC_ARROW);
+    static HCURSOR s_cursorHand = LoadCursor(nullptr, IDC_HAND);
     switch (msg) {
+        case WM_CLOSE:
+            // Nunca cerrar a mitad de instalación (evita instalaciones a medias)
+            if (g_state.isInstalling) return 0;
+            return DefWindowProcW(hwnd, msg, wParam, lParam);
         case WM_CREATE: {
             g_state.hwnd = hwnd;
             g_state.installPath = GetDefaultInstallPath();
@@ -674,8 +754,38 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         case WM_ERASEBKGND:
             return TRUE;
+        case WM_MOUSEMOVE: {
+            int x = GET_X_LPARAM(lParam);
+            int y = GET_Y_LPARAM(lParam);
+            if (!g_state.mouseTracking) {
+                TRACKMOUSEEVENT tme{};
+                tme.cbSize = sizeof(tme);
+                tme.dwFlags = TME_LEAVE;
+                tme.hwndTrack = hwnd;
+                TrackMouseEvent(&tme);
+                g_state.mouseTracking = true;
+            }
+            RECT client;
+            GetClientRect(hwnd, &client);
+            const int zone = HoverZoneAt(client, x, y);
+            if (zone != g_state.hoverZone) {
+                g_state.hoverZone = zone;
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+            SetCursor(zone != HOVER_NONE ? s_cursorHand : s_cursorArrow);
+            return 0;
+        }
+        case WM_MOUSELEAVE: {
+            g_state.mouseTracking = false;
+            if (g_state.hoverZone != HOVER_NONE) {
+                g_state.hoverZone = HOVER_NONE;
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+            SetCursor(s_cursorArrow);
+            return 0;
+        }
         case WM_DESTROY:
-            GdiplusShutdown(g_state.gdiplusToken);
+            // GDI+ se apaga una sola vez en wWinMain (evita doble shutdown)
             PostQuitMessage(0);
             return 0;
         case WM_LBUTTONDOWN: {
@@ -685,15 +795,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             RECT client;
             GetClientRect(hwnd, &client);
             
-            float buttonY = static_cast<float>(client.bottom) - 60.0f;
-            float buttonWidth = 120.0f;
-            float buttonHeight = 36.0f;
+            const ButtonRects r = GetButtonRects(client);
+            auto hit = [](const RectF& rc, int px, int py) {
+                return px >= rc.X && px <= rc.X + rc.Width &&
+                       py >= rc.Y && py <= rc.Y + rc.Height;
+            };
             
-            // Next button
-            RectF nextButton(static_cast<REAL>(client.right) - buttonWidth - 20.0f, buttonY, buttonWidth, buttonHeight);
-            if (x >= nextButton.X && x <= nextButton.X + nextButton.Width &&
-                y >= nextButton.Y && y <= nextButton.Y + nextButton.Height) {
-                
+            // Botón inferior derecho: Siguiente / Aceptar / Iniciar App / Cerrar
+            if (g_state.currentStep != InstallStep::Install && hit(r.next, x, y)) {
                 switch (g_state.currentStep) {
                     case InstallStep::Welcome:
                         g_state.currentStep = InstallStep::License;
@@ -715,25 +824,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
             
-            // Back button
-            RectF backButton(20.0f, buttonY, buttonWidth, buttonHeight);
-            if (x >= backButton.X && x <= backButton.X + backButton.Width &&
-                y >= backButton.Y && y <= backButton.Y + backButton.Height) {
-                
-                if (g_state.currentStep == InstallStep::License) {
-                    g_state.currentStep = InstallStep::Welcome;
-                    InvalidateRect(hwnd, nullptr, FALSE);
-                }
+            // Botón inferior izquierdo: Atrás (solo en Licencia)
+            if (g_state.currentStep == InstallStep::License && hit(r.back, x, y)) {
+                g_state.currentStep = InstallStep::Welcome;
+                InvalidateRect(hwnd, nullptr, FALSE);
             }
             
-            // Cancel button
-            RectF cancelRect(static_cast<REAL>(client.right) - 80.0f, 10.0f, 60.0f, 24.0f);
-            if (x >= cancelRect.X && x <= cancelRect.X + cancelRect.Width &&
-                y >= cancelRect.Y && y <= cancelRect.Y + cancelRect.Height) {
-                
-                if (!g_state.isInstalling) {
-                    PostMessage(hwnd, WM_CLOSE, 0, 0);
-                }
+            // Botón Cancelar (arriba a la derecha), nunca durante la instalación
+            if (g_state.currentStep != InstallStep::Install && hit(r.cancel, x, y)) {
+                PostMessage(hwnd, WM_CLOSE, 0, 0);
             }
             
             return 0;
@@ -780,7 +879,11 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
     const bool comOk = SUCCEEDED(comHr);
 
     // Initialize GDI+
-    GdiplusStartup(&g_state.gdiplusToken, &g_state.gdiplusStartupInput, nullptr);
+    if (GdiplusStartup(&g_state.gdiplusToken, &g_state.gdiplusStartupInput, nullptr) != Ok) {
+        if (comOk) CoUninitialize();
+        MessageBoxW(nullptr, L"No se pudo inicializar la interfaz gráfica.", L"ARTPICST", MB_OK | MB_ICONERROR);
+        return 1;
+    }
 
     // Register window class
     WNDCLASSEXW wc = {0};
@@ -795,7 +898,12 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
     if (!wc.hIcon) wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
     wc.hIconSm = wc.hIcon;
     
-    RegisterClassExW(&wc);
+    if (!RegisterClassExW(&wc)) {
+        MessageBoxW(nullptr, L"No se pudo registrar la ventana del instalador.", L"ARTPICST", MB_OK | MB_ICONERROR);
+        GdiplusShutdown(g_state.gdiplusToken);
+        if (comOk) CoUninitialize();
+        return 1;
+    }
     
     // Create window
     HWND hwnd = CreateWindowExW(
@@ -809,6 +917,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
     );
     
     if (!hwnd) {
+        UnregisterClassW(CLASS_NAME, hInstance);
         GdiplusShutdown(g_state.gdiplusToken);
         if (comOk) CoUninitialize();
         return 1;

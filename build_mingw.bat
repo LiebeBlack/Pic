@@ -61,6 +61,7 @@ copy /y "build\artpicst.exe" "dist\artpicst.exe" >nul
 copy /y "installer\build\artpicst_installer.exe" "dist\artpicst_installer.exe" >nul
 copy /y "resources\artpicst.ico" "dist\artpicst.ico" >nul
 copy /y "version.json" "dist\version.json" >nul
+copy /y "README.md" "dist\README.md" >nul
 
 echo.
 echo ========================================

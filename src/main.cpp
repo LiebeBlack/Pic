@@ -395,7 +395,6 @@ struct AppState {
     HudItem hud[12]{};
     int hudCount = 0;
     HudId hudHot = HUD_NONE;
-    bool hudVisible = true;
     bool dockAutoHide = true;
     DWORD dockLastActivity = 0;
 
@@ -638,19 +637,21 @@ std::wstring NormalizePath(const std::wstring& path) {
     return full;
 }
 
-// Sistema de diálogos personalizados con tema
+// Sistema de diálogos personalizados con tema.
+// El estado es PROPIO DE CADA VENTANA (guardado en GWLP_USERDATA): así dos
+// diálogos anidados (p. ej. un error mostrado encima de otro diálogo) no se
+// sobrescriben ni corrompen entre sí.
 struct ThemedDialogState {
-    HWND hwnd = nullptr;
     std::wstring title;
     std::wstring message;
     UINT buttons = MB_OK;
     UINT icon = MB_ICONINFORMATION;
     int result = IDOK;
-    GdiplusStartupInput gdiplusStartupInput;
-    ULONG_PTR gdiplusToken = 0;
 };
 
-ThemedDialogState g_dialogState;
+ThemedDialogState* DialogStateFrom(HWND hwnd) {
+    return reinterpret_cast<ThemedDialogState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+}
 
 // Declaración anticipada: AddRoundedRect se define más abajo pero se usa en ThemedDialogProc
 void AddRoundedRect(GraphicsPath& path, const RectF& rect, float radius);
@@ -683,14 +684,25 @@ void StartGifTimer() {
 
 LRESULT CALLBACK ThemedDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
+        case WM_NCCREATE: {
+            // El estado específico de esta ventana viaja como lpCreateParams
+            auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(cs->lpCreateParams));
+            return DefWindowProcW(hwnd, msg, wParam, lParam);
+        }
         case WM_CREATE: {
-            g_dialogState.hwnd = hwnd;
-            EnableDarkTitleBar(hwnd);
+            // La barra de título debe seguir el tema activo, no forzar oscuro
+            EnableDarkTitleBar(hwnd, g_state.darkModeDetected);
             return 0;
         }
         case WM_PAINT: {
             PAINTSTRUCT ps;
             HDC hdc = BeginPaint(hwnd, &ps);
+            ThemedDialogState* st = DialogStateFrom(hwnd);
+            if (!st) {
+                EndPaint(hwnd, &ps);
+                return 0;
+            }
             
             Graphics graphics(hdc);
             graphics.SetCompositingQuality(CompositingQualityHighSpeed);
@@ -723,13 +735,13 @@ LRESULT CALLBACK ThemedDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
             const wchar_t* iconSymbol = L"i";
             Color iconSymbolCol(255, 255, 255, 255);
             
-            if (g_dialogState.icon == MB_ICONERROR) {
+            if (st->icon == MB_ICONERROR) {
                 iconBg = Color(255, 220, 48, 54);
                 iconSymbol = L"✕";
-            } else if (g_dialogState.icon == MB_ICONWARNING) {
+            } else if (st->icon == MB_ICONWARNING) {
                 iconBg = Color(255, 225, 145, 10);
                 iconSymbol = L"!";
-            } else if (g_dialogState.icon == MB_ICONQUESTION) {
+            } else if (st->icon == MB_ICONQUESTION) {
                 iconBg = Color(255, 0, 120, 215);
                 iconSymbol = L"?";
             } else {
@@ -749,8 +761,8 @@ LRESULT CALLBACK ThemedDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
             graphics.DrawString(iconSymbol, -1, &iconSymbolFont, iconRect, &iconFormat, &symbolBrush);
 
             // Title
-            if (!g_dialogState.title.empty()) {
-                float titleFontSize = GetAdaptiveFontSize(g_dialogState.title.c_str(), client.right - 120, 50, L"Segoe UI");
+            if (!st->title.empty()) {
+                float titleFontSize = GetAdaptiveFontSize(st->title.c_str(), client.right - 120, 50, L"Segoe UI");
                 Gdiplus::FontFamily titleFamily(L"Segoe UI");
                 Gdiplus::Font titleFont(&titleFamily, titleFontSize, FontStyleBold, UnitPoint);
                 StringFormat titleFormat;
@@ -761,7 +773,7 @@ LRESULT CALLBACK ThemedDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
                 SolidBrush titleBrush(titleCol);
                 const float titleX = static_cast<float>(iconX + iconSize + 14);
                 RectF titleRect(titleX, static_cast<float>(iconY - 4), static_cast<float>(client.right - titleX - 20), static_cast<float>(iconSize + 8));
-                graphics.DrawString(g_dialogState.title.c_str(), -1, &titleFont, titleRect, &titleFormat, &titleBrush);
+                graphics.DrawString(st->title.c_str(), -1, &titleFont, titleRect, &titleFormat, &titleBrush);
             }
 
             // Separador horizontal sutil
@@ -770,9 +782,9 @@ LRESULT CALLBACK ThemedDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
             graphics.DrawLine(&sepPen, 24.0f, sepY, static_cast<float>(client.right - 24), sepY);
 
             // Message - Presentación legible
-            if (!g_dialogState.message.empty()) {
-                const bool hasNewlines = (g_dialogState.message.find(L'\n') != std::wstring::npos);
-                float messageFontSize = GetAdaptiveFontSize(g_dialogState.message.c_str(), client.right - 60, client.bottom - 160, L"Segoe UI");
+            if (!st->message.empty()) {
+                const bool hasNewlines = (st->message.find(L'\n') != std::wstring::npos);
+                float messageFontSize = GetAdaptiveFontSize(st->message.c_str(), client.right - 60, client.bottom - 160, L"Segoe UI");
                 Gdiplus::FontFamily messageFamily(L"Segoe UI");
                 Gdiplus::Font messageFont(&messageFamily, messageFontSize, FontStyleRegular, UnitPoint);
                 StringFormat messageFormat;
@@ -782,7 +794,7 @@ LRESULT CALLBACK ThemedDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
                 
                 SolidBrush messageBrush(textCol);
                 RectF messageRect(28.0f, sepY + 14.0f, static_cast<float>(client.right - 56), static_cast<float>(client.bottom - sepY - 74.0f));
-                graphics.DrawString(g_dialogState.message.c_str(), -1, &messageFont, messageRect, &messageFormat, &messageBrush);
+                graphics.DrawString(st->message.c_str(), -1, &messageFont, messageRect, &messageFormat, &messageBrush);
             }
             
             // Buttons - Diseño refinado
@@ -802,7 +814,7 @@ LRESULT CALLBACK ThemedDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
             buttonFormat.SetAlignment(StringAlignmentCenter);
             buttonFormat.SetLineAlignment(StringAlignmentCenter);
 
-            if (g_dialogState.buttons == MB_YESNO) {
+            if (st->buttons == MB_YESNO) {
                 const int yesX = client.right / 2 - buttonWidth - 10;
                 const int noX = client.right / 2 + 10;
                 
@@ -852,6 +864,8 @@ LRESULT CALLBACK ThemedDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
         case WM_DESTROY:
             return 0;
         case WM_LBUTTONDOWN: {
+            ThemedDialogState* st = DialogStateFrom(hwnd);
+            if (!st) return DefWindowProcW(hwnd, msg, wParam, lParam);
             int x = GET_X_LPARAM(lParam);
             int y = GET_Y_LPARAM(lParam);
             
@@ -863,21 +877,21 @@ LRESULT CALLBACK ThemedDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
             int buttonY = client.bottom - 46;
             
             // Check button clicks
-            if (g_dialogState.buttons == MB_YESNO) {
+            if (st->buttons == MB_YESNO) {
                 int yesX = client.right / 2 - buttonWidth - 10;
                 int noX = client.right / 2 + 10;
                 
                 if (x >= yesX && x <= yesX + buttonWidth && y >= buttonY && y <= buttonY + buttonHeight) {
-                    g_dialogState.result = IDYES;
+                    st->result = IDYES;
                     DestroyWindow(hwnd);
                 } else if (x >= noX && x <= noX + buttonWidth && y >= buttonY && y <= buttonY + buttonHeight) {
-                    g_dialogState.result = IDNO;
+                    st->result = IDNO;
                     DestroyWindow(hwnd);
                 }
             } else {
                 int okX = (client.right - buttonWidth) / 2;
                 if (x >= okX && x <= okX + buttonWidth && y >= buttonY && y <= buttonY + buttonHeight) {
-                    g_dialogState.result = IDOK;
+                    st->result = IDOK;
                     DestroyWindow(hwnd);
                 }
             }
@@ -905,15 +919,19 @@ int ShowThemedMessageBox(HWND parent, const wchar_t* title, const wchar_t* messa
         classRegistered = true;
     }
     
-    g_dialogState.title = title;
-    g_dialogState.message = message;
-    g_dialogState.buttons = buttons;
-    g_dialogState.icon = icon;
-    g_dialogState.result = IDOK;
+    // Estado PROPIO de esta llamada: viaja como lpCreateParams a la ventana y se
+    // guarda en GWLP_USERDATA. Vive mientras dura este bucle modal, así que los
+    // diálogos anidados no comparten estado.
+    ThemedDialogState state;
+    state.title = title ? title : L"";
+    state.message = message ? message : L"";
+    state.buttons = buttons;
+    state.icon = icon;
+    state.result = IDOK;
     
     // Calcular tamaño de diálogo INTELIGENTE según contenido
     int width = 0, height = 0;
-    CalculateDialogSize(title, message, buttons, width, height);
+    CalculateDialogSize(state.title.c_str(), state.message.c_str(), buttons, width, height);
     
     // Center dialog on parent or screen
     RECT parentRect;
@@ -935,7 +953,7 @@ int ShowThemedMessageBox(HWND parent, const wchar_t* title, const wchar_t* messa
         title,
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
         x, y, width, height,
-        parent, nullptr, GetModuleHandle(nullptr), nullptr
+        parent, nullptr, GetModuleHandle(nullptr), &state
     );
     
     if (!hwnd) return IDOK;
@@ -951,19 +969,26 @@ int ShowThemedMessageBox(HWND parent, const wchar_t* title, const wchar_t* messa
     UpdateWindow(hwnd);
     
     MSG msg{};
-    while (IsWindow(hwnd) && GetMessageW(&msg, nullptr, 0, 0)) {
-        if (msg.message == WM_QUIT) {
+    while (IsWindow(hwnd)) {
+        const int gm = GetMessageW(&msg, nullptr, 0, 0);
+        if (gm == 0) {
+            // GetMessageW devolvió 0 porque consumió un WM_QUIT: reenviarlo
+            // para que el bucle principal de la aplicación termine igualmente.
             PostQuitMessage(static_cast<int>(msg.wParam));
             break;
         }
+        if (gm == -1) break; // error: evitar un bucle infinito
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
     
+    // Si el bucle salió por WM_QUIT, cerrar el diálogo que haya quedado abierto
+    if (IsWindow(hwnd)) DestroyWindow(hwnd);
+    
     EnableWindow(parent ? parent : GetActiveWindow(), TRUE);
     if (parent) SetForegroundWindow(parent);
     
-    return g_dialogState.result;
+    return state.result;
 }
 
 // Inicialización de GDI+
@@ -1327,6 +1352,19 @@ bool TryCopyFromCache(const std::wstring& filepath, CachedImage& outCopy) {
     return true;
 }
 
+// Elimina una entrada de la caché (requiere que cacheMutex esté tomado).
+// Borra tanto el nodo de la lista LRU como su entrada en cacheIndex.
+static void EraseCacheEntry(std::list<CachedImage>::iterator it) {
+    if (it == g_state.imageCache.end()) return;
+    size_t bytes = 0;
+    if (SafePixelBytes(it->width, it->height, bytes)) {
+        if (g_state.cacheMemoryBytes >= bytes) g_state.cacheMemoryBytes -= bytes;
+        else g_state.cacheMemoryBytes = 0;
+    }
+    g_state.cacheIndex.erase(CacheKey(it->filepath));
+    g_state.imageCache.erase(it);
+}
+
 void AddToCache(const std::wstring& filepath, unsigned char* data, int width, int height,
                 int channels, int rotation, bool flipH, bool flipV, bool hasAlpha, const std::wstring& decoder) {
     if (!data) return;
@@ -1340,25 +1378,14 @@ void AddToCache(const std::wstring& filepath, unsigned char* data, int width, in
     auto it = g_state.cacheIndex.find(key);
     if (it != g_state.cacheIndex.end()) {
         if (it->second != g_state.imageCache.end()) {
-            size_t oldBytes = 0;
-            if (SafePixelBytes(it->second->width, it->second->height, oldBytes)) {
-                if (g_state.cacheMemoryBytes >= oldBytes) g_state.cacheMemoryBytes -= oldBytes;
-                else g_state.cacheMemoryBytes = 0;
-            }
-            g_state.imageCache.erase(it->second);
+            EraseCacheEntry(it->second); // borra nodo LRU + su índice
+        } else {
+            g_state.cacheIndex.erase(it); // entrada huérfana: solo el índice
         }
-        g_state.cacheIndex.erase(it);
     }
 
     while (!g_state.imageCache.empty() && (g_state.imageCache.size() >= CACHE_SIZE || (g_state.cacheMemoryBytes + bytes) > MAX_CACHE_BYTES)) {
-        auto oldest = g_state.imageCache.begin();
-        size_t oldestBytes = 0;
-        if (SafePixelBytes(oldest->width, oldest->height, oldestBytes)) {
-            if (g_state.cacheMemoryBytes >= oldestBytes) g_state.cacheMemoryBytes -= oldestBytes;
-            else g_state.cacheMemoryBytes = 0;
-        }
-        g_state.cacheIndex.erase(CacheKey(oldest->filepath));
-        g_state.imageCache.pop_front();
+        EraseCacheEntry(g_state.imageCache.begin());
     }
 
     CachedImage cached;
@@ -1388,6 +1415,20 @@ void ClearCache() {
     g_state.cacheIndex.clear();
     g_state.cacheMemoryBytes = 0;
     TrimProcessMemory();
+}
+
+// Descarta de la caché una imagen concreta (p. ej. tras moverla a la papelera)
+// sin vaciar el resto de la caché ni romper el precargado de la siguiente.
+void RemoveFromCache(const std::wstring& filepath) {
+    std::lock_guard<std::mutex> lock(g_state.cacheMutex);
+    auto it = g_state.cacheIndex.find(CacheKey(filepath));
+    if (it != g_state.cacheIndex.end()) {
+        if (it->second != g_state.imageCache.end()) {
+            EraseCacheEntry(it->second);
+        } else {
+            g_state.cacheIndex.erase(it);
+        }
+    }
 }
 
 void FreeCurrentImage() {
@@ -1679,10 +1720,12 @@ void ConvertRGBAtoBGRA(unsigned char* pixels, int width, int height, bool& outHa
     }
 }
 
-unsigned char* DecodeWithStb(const std::wstring& filepath, int& width, int& height, int& channels, bool& outHasAlpha, int& autoRotateDeg, GifAnimation* outGif, bool decodeAnimation) {
+unsigned char* DecodeWithStb(const std::wstring& filepath, int& width, int& height, int& channels, bool& outHasAlpha, int& autoRotateDeg, bool& outFlipH, bool& outFlipV, GifAnimation* outGif, bool decodeAnimation) {
     width = height = channels = 0;
     outHasAlpha = false;
     autoRotateDeg = 0;
+    outFlipH = false;
+    outFlipV = false;
     const std::string utf8 = WideToUtf8(filepath);
     if (utf8.empty()) return nullptr;
 
@@ -1778,10 +1821,22 @@ unsigned char* DecodeWithStb(const std::wstring& filepath, int& width, int& heig
     ConvertRGBAtoBGRA(pixels, width, height, outHasAlpha);
 
     if (!isGif) {
+        // Orientación EXIF completa (rotación + espejos): el motor de renderizado
+        // aplica rotación y volteos por separado, así que cada orientación se
+        // descompone en su equivalente (rotación, flipH, flipV):
+        // 1=normal, 2=espejo H, 3=180°, 4=espejo V, 5=90°+espejo H,
+        // 6=90°, 7=270°+espejo H, 8=270° (mismo resultado que el mapa GDI+).
         const int exif = GetExifOrientationFromJpeg(filepath);
-        if (exif == 6) autoRotateDeg = 90;
-        else if (exif == 3) autoRotateDeg = 180;
-        else if (exif == 8) autoRotateDeg = 270;
+        switch (exif) {
+            case 2: outFlipH = true; break;
+            case 3: autoRotateDeg = 180; break;
+            case 4: outFlipV = true; break;
+            case 5: autoRotateDeg = 90; outFlipH = true; break;
+            case 6: autoRotateDeg = 90; break;
+            case 7: autoRotateDeg = 270; outFlipH = true; break;
+            case 8: autoRotateDeg = 270; break;
+            default: break;
+        }
     }
 
     return pixels;
@@ -1928,17 +1983,21 @@ unsigned char* DecodeWithGdiplus(const std::wstring& filepath, int& width, int& 
     return pixels;
 }
 
-unsigned char* DecodeImageFile(const std::wstring& filepath, int& width, int& height, int& channels, bool& hasAlpha, int& autoRotateDeg, std::wstring& decoder, GifAnimation* outGif, bool decodeAnimation) {
+unsigned char* DecodeImageFile(const std::wstring& filepath, int& width, int& height, int& channels, bool& hasAlpha, int& autoRotateDeg, bool& outFlipH, bool& outFlipV, std::wstring& decoder, GifAnimation* outGif, bool decodeAnimation, bool allowGdiPlus) {
     decoder.clear();
     autoRotateDeg = 0;
-    unsigned char* pixels = DecodeWithStb(filepath, width, height, channels, hasAlpha, autoRotateDeg, outGif, decodeAnimation);
+    outFlipH = false;
+    outFlipV = false;
+    unsigned char* pixels = DecodeWithStb(filepath, width, height, channels, hasAlpha, autoRotateDeg, outFlipH, outFlipV, outGif, decodeAnimation);
     if (pixels) {
         decoder = L"stb";
     } else {
         pixels = DecodeWithWic(filepath, width, height, channels, hasAlpha);
         if (pixels) {
             decoder = L"WIC";
-        } else {
+        } else if (allowGdiPlus) {
+            // GDI+ no es seguro entre hilos: solo se usa desde el hilo de la UI
+            // (el hilo de prefetch pasa allowGdiPlus=false).
             pixels = DecodeWithGdiplus(filepath, width, height, channels, hasAlpha);
             if (pixels) {
                 decoder = L"GDI+";
@@ -2022,17 +2081,17 @@ bool LoadImageFromPath(const std::wstring& filepath) {
     }
 
     int width = 0, height = 0, channels = 0, autoRotate = 0;
-    bool hasAlpha = false;
+    bool hasAlpha = false, autoFlipH = false, autoFlipV = false;
     std::wstring decoder;
     GifAnimation decodedGif;
-    unsigned char* pixels = DecodeImageFile(filepath, width, height, channels, hasAlpha, autoRotate, decoder, &decodedGif, true);
+    unsigned char* pixels = DecodeImageFile(filepath, width, height, channels, hasAlpha, autoRotate, autoFlipH, autoFlipV, decoder, &decodedGif, true, true);
     if (!pixels) {
         std::wstring msg = L"No se pudo cargar: " + GetFileName(filepath);
         HandleError(msg, false);
         return false;
     }
 
-    ApplyLoadedImage(pixels, width, height, channels, autoRotate, false, false, hasAlpha, filepath, decoder);
+    ApplyLoadedImage(pixels, width, height, channels, autoRotate, autoFlipH, autoFlipV, hasAlpha, filepath, decoder);
     g_state.gif = std::move(decodedGif);
     StoreCurrentInCache();
     StartGifTimer();
@@ -2106,15 +2165,17 @@ void PrefetchThreadFunc() {
         if (!ValidateFileIntegrity(filepath)) continue;
         
         int width = 0, height = 0, channels = 0, autoRotate = 0;
-        bool hasAlpha = false;
+        bool hasAlpha = false, autoFlipH = false, autoFlipV = false;
         std::wstring decoder;
-        unsigned char* pixels = DecodeImageFile(filepath, width, height, channels, hasAlpha, autoRotate, decoder, nullptr, false);
+        // allowGdiPlus=false: GDI+ no es seguro entre hilos; el prefetch usa solo
+        // stb/WIC, y los formatos que requieren GDI+ se decodifican al navegar.
+        unsigned char* pixels = DecodeImageFile(filepath, width, height, channels, hasAlpha, autoRotate, autoFlipH, autoFlipV, decoder, nullptr, false, false);
         if (!pixels) continue;
         if (generation != g_state.folderGeneration.load(std::memory_order_relaxed)) {
             FreePixels(pixels);
             continue;
         }
-        AddToCache(filepath, pixels, width, height, channels, autoRotate, false, false, hasAlpha, decoder);
+        AddToCache(filepath, pixels, width, height, channels, autoRotate, autoFlipH, autoFlipV, hasAlpha, decoder);
         
         // Ceder CPU
         std::this_thread::sleep_for(std::chrono::milliseconds(80));
@@ -2336,6 +2397,13 @@ HudId HitTestHud(int x, int y) {
     return HUD_NONE;
 }
 
+// El dock se muestra solo si hubo actividad reciente (el puntero estuvo en la
+// franja inferior). Fuente única de verdad para mostrar/ocultar el dock.
+bool DockShouldShow() {
+    if (!g_state.dockAutoHide) return true;
+    return (GetTickCount() - g_state.dockLastActivity) <= DOCK_HIDE_MS;
+}
+
 void RenderHud(Graphics& graphics, const RECT& client) {
     LayoutHud(client);
 
@@ -2345,13 +2413,7 @@ void RenderHud(Graphics& graphics, const RECT& client) {
     graphics.SetPixelOffsetMode(PixelOffsetModeHighQuality);
 
     // Auto-hide dock logic
-    bool shouldShowDock = true;
-    if (g_state.dockAutoHide) {
-        DWORD now = GetTickCount();
-        if (now - g_state.dockLastActivity > DOCK_HIDE_MS) {
-            shouldShowDock = false;
-        }
-    }
+    const bool shouldShowDock = DockShouldShow();
 
     // 1. Mensaje OSD / Estado Flotante
     if (g_ui.osdFont && !g_state.statusMessage.empty() &&
@@ -2891,7 +2953,7 @@ void ApplyWindowMode(HWND hwnd, WindowMode mode) {
     if (g_state.windowedExStyle) {
         SetWindowLongW(hwnd, GWL_EXSTYLE, g_state.windowedExStyle);
     }
-    EnableDarkTitleBar(hwnd);
+    EnableDarkTitleBar(hwnd, g_state.darkModeDetected);
     g_state.isFullscreen = false;
     g_state.windowMode = mode;
 
@@ -3036,19 +3098,33 @@ void DeleteCurrentImage() {
     int result = SHFileOperationW(&fileOp);
     if (result == 0 && !fileOp.fAnyOperationsAborted) {
         ShowOSD(L"Imagen enviada a la Papelera");
-        std::lock_guard<std::mutex> lock(g_state.filesMutex);
-        auto it = std::find_if(g_state.imageFiles.begin(), g_state.imageFiles.end(),
-                               [&path](const std::wstring& f) { return PathsEqualCaseInsensitive(f, path); });
-        if (it != g_state.imageFiles.end()) {
-            size_t idx = std::distance(g_state.imageFiles.begin(), it);
-            g_state.imageFiles.erase(it);
+        // Quitar de la lista SIN mantener filesMutex mientras se carga la imagen
+        // siguiente: LoadImageFromPath -> UpdateWindowTitle -> ImageCount vuelve a
+        // bloquear filesMutex (mutex no recursivo), lo que antes era un deadlock.
+        std::wstring nextPath;
+        bool removed = false;
+        {
+            std::lock_guard<std::mutex> lock(g_state.filesMutex);
+            auto it = std::find_if(g_state.imageFiles.begin(), g_state.imageFiles.end(),
+                                   [&path](const std::wstring& f) { return PathsEqualCaseInsensitive(f, path); });
+            if (it != g_state.imageFiles.end()) {
+                size_t idx = std::distance(g_state.imageFiles.begin(), it);
+                g_state.imageFiles.erase(it);
+                removed = true;
+                if (!g_state.imageFiles.empty()) {
+                    if (idx >= g_state.imageFiles.size()) idx = g_state.imageFiles.size() - 1;
+                    g_state.currentImageIndex = idx;
+                    nextPath = g_state.imageFiles[idx];
+                }
+            }
+        }
+        if (removed) {
+            // La imagen ya no existe en disco: descartar su copia en caché
+            RemoveFromCache(path);
             if (g_state.imageFiles.empty()) {
                 FreeCurrentImage();
                 UpdateWindowTitle();
-            } else {
-                if (idx >= g_state.imageFiles.size()) idx = g_state.imageFiles.size() - 1;
-                g_state.currentImageIndex = idx;
-                std::wstring nextPath = g_state.imageFiles[idx];
+            } else if (!nextPath.empty()) {
                 LoadImageFromPath(nextPath);
             }
         }
@@ -3235,7 +3311,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_CREATE: {
             g_state.hwnd = hwnd;
             DragAcceptFiles(hwnd, TRUE);
-            EnableDarkTitleBar(hwnd);
+            EnableDarkTitleBar(hwnd, g_state.darkModeDetected);
             RECT client{};
             GetClientRect(hwnd, &client);
             CreateDoubleBuffer(client.right, client.bottom);
@@ -3506,11 +3582,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             const int distanceFromBottom = client.bottom - y;
             
             if (distanceFromBottom < DOCK_PROXIMITY_THRESHOLD) {
-                if (!g_state.hudVisible) {
-                    g_state.hudVisible = true;
-                    InvalidateRect(hwnd, nullptr, FALSE);
-                }
+                const bool wasHidden = !DockShouldShow();
                 g_state.dockLastActivity = GetTickCount();
+                if (wasHidden) InvalidateRect(hwnd, nullptr, FALSE);
                 KillTimer(hwnd, TIMER_DOCK_HIDE);
                 SetTimer(hwnd, TIMER_DOCK_HIDE, DOCK_HIDE_MS, nullptr);
             }
@@ -3556,9 +3630,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 const int distanceFromBottom = client.bottom - pt.y;
                 
                 if (distanceFromBottom >= DOCK_PROXIMITY_THRESHOLD) {
-                    g_state.hudVisible = false;
+                    const bool wasVisible = DockShouldShow();
+                    // Expirar la actividad: el dock queda oculto hasta que el
+                    // puntero vuelva a la franja inferior (equivale a ocultarlo)
+                    g_state.dockLastActivity = GetTickCount() - DOCK_HIDE_MS;
                     KillTimer(hwnd, TIMER_DOCK_HIDE);
-                    InvalidateRect(hwnd, nullptr, FALSE);
+                    if (wasVisible) InvalidateRect(hwnd, nullptr, FALSE);
                 } else {
                     g_state.dockLastActivity = GetTickCount();
                 }
@@ -3609,9 +3686,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             const UINT fileCount = DragQueryFileW(hDrop, 0xFFFFFFFF, nullptr, 0);
             if (fileCount > 0) {
                 const UINT chars = DragQueryFileW(hDrop, 0, nullptr, 0);
-                std::wstring filePath(chars, L'\0');
-                if (DragQueryFileW(hDrop, 0, filePath.data(), chars + 1) > 0) {
-                    if (!filePath.empty() && filePath.back() == L'\0') filePath.pop_back();
+                // El buffer debe alojar chars + el terminador nulo que escribe DragQueryFileW
+                std::wstring filePath(chars + 1, L'\0');
+                const UINT written = DragQueryFileW(hDrop, 0, filePath.data(), chars + 1);
+                if (written > 0) {
+                    filePath.resize(written);
                     OpenPath(filePath);
                 }
             }
@@ -3865,7 +3944,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
         return 1;
     }
 
-    EnableDarkTitleBar(hwnd);
+    EnableDarkTitleBar(hwnd, g_state.darkModeDetected);
     LoadInitialImageSafely();
     ApplyWindowMode(hwnd, startMode);
     ShowWindow(hwnd, g_state.isFullscreen ? SW_SHOW : (nCmdShow > 0 ? nCmdShow : SW_SHOWDEFAULT));
