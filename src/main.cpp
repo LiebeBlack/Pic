@@ -1396,63 +1396,64 @@ void HandleError(const std::wstring& errorMsg, bool showUser) {
 }
 
 void ShowAboutDialog(HWND hwnd) {
-    std::wstring info =
-        std::wstring(APP_NAME_TEXT) + L" v" + APP_VERSION_TEXT + L"\n\n" +
-        L"Visor nativo ultra-ligero para Windows. Interfaz opaca estilo Windows 10 con detalles Win11.\n\n" +
-        L"• Motores: stb_image, WIC y GDI+. Orientación EXIF, GIF animado y más de 30 formatos.\n" +
-        L"• Sin desenfoques ni transparencias pesadas. Caché LRU y reproducción GIF estable.\n\n" +
-        L"© 2026 ARTPICST";
-    ShowThemedMessageBox(hwnd ? hwnd : nullptr, APP_NAME_TEXT, info.c_str(), MB_OK, MB_ICONINFORMATION);
+    std::wstring about = L"ARTPICST — Visor de Imágenes Profesional\n\n";
+    about += L"Versión: ";
+    about += APP_VERSION_TEXT;
+    about += L" (Compilación Estable)\n";
+    about += L"Arquitectura: Nativo C++17 para Windows (x64)\n\n";
+    about += L"Características principales:\n";
+    about += L"  • Motores de descodificación: stb_image, WIC y GDI+.\n";
+    about += L"  • Soporte para más de 30 formatos: PNG, JPG, BMP, GIF,\n";
+    about += L"    WebP, TIFF, AVIF, HEIC, RAW, HDR, PSD, ICO, etc.\n";
+    about += L"  • Caché LRU inteligente y liberación dinámica de recursos.\n";
+    about += L"  • Interfaz adaptativa (modo oscuro/claro) con alto DPI.\n\n";
+    about += L"Licencia: Software libre y de código abierto.\n";
+    about += L"Repositorio: https://github.com/LiebeBlack/Pic\n";
+    about += L"Copyright © 2026 ARTPICST. Todos los derechos reservados.";
+    ShowThemedMessageBox(hwnd ? hwnd : nullptr, L"Acerca de ARTPICST", about.c_str(), MB_OK, MB_ICONINFORMATION);
 }
 
 void ShowProgramInfoDialog(HWND hwnd) {
-    std::wstring info =
-        std::wstring(APP_NAME_TEXT) + L" v" + APP_VERSION_TEXT + L" — Guía Completa de Uso y Controles\n\n"
-        L"⌨️ ATAJOS DE TECLADO:\n"
-        L"• ◀ ▶ : Imagen anterior / siguiente\n"
-        L"• ▲ ▼ : Acercar / alejar zoom\n"
-        L"• Espacio / Retroceso : Imagen siguiente / anterior\n"
-        L"• Inicio / Fin : Primera / última imagen de la carpeta\n"
-        L"• Rueda / '+' / '-' : Acercar y alejar zoom fluido centrado\n"
-        L"• F : Ajustar imagen a toda la pantalla/ventana\n"
-        L"• 1 o 0 : Tamaño real al 100% (píxel a píxel)\n"
-        L"• D : Activar / desactivar modo Ultra-Claridad (Detalles HDR)\n"
-        L"• R / Shift+R : Rotar 90° (horario / antihorario)\n"
-        L"• H / V : Volteo horizontal / vertical\n"
-        L"• G : Alternar escala de grises (Blanco y Negro)\n"
-        L"• N : Alternar colores invertidos (Negativo)\n"
-        L"• F5 : Iniciar o detener presentación (pase de diapositivas)\n"
-        L"• F11 o Doble clic : Pantalla completa (ESC para salir)\n"
-        L"• Supr (Delete) : Enviar imagen a la Papelera de reciclaje\n"
-        L"• E o Ctrl+I : Ver metadatos detallados y propiedades EXIF\n"
-        L"• Ctrl+S : Guardar / Exportar imagen (PNG, JPG, BMP)\n"
-        L"• Ctrl+W : Establecer como fondo de pantalla de Windows\n"
-        L"• Ctrl+E : Mostrar y seleccionar en el Explorador de Windows\n"
-        L"• Ctrl+C / Ctrl+Shift+C : Copiar imagen / copiar ruta completa\n"
-        L"• Ctrl+O / Ctrl+Shift+O : Abrir archivo de imagen / abrir carpeta\n"
-        L"• I : Fijar o alternar barra de información flotante\n\n"
-        L"🖱️ CONTROLES DE RATÓN:\n"
-        L"• Clic izquierdo + Arrastrar : Mover / desplazar imagen (Pan) siempre disponible\n"
-        L"• Rueda del ratón : Zoom inteligente centrado en el cursor\n"
-        L"• Clic central (rueda) : Alternar entre 100% y ajuste\n"
-        L"• Botones laterales X1 / X2 : Imagen anterior / siguiente\n"
-        L"• Doble clic : Pantalla completa\n\n"
-        L"🎛️ BOTONES DEL PANEL FLOTANTE (DOCK):\n"
-        L"• ◀ ▶ : Navegación de imágenes en la carpeta\n"
-        L"• Ajustar : Ajusta la foto al máximo tamaño de la ventana\n"
-        L"• 1:1 : Visualización a resolución nativa\n"
-        L"• Claridad : Modo Ultra-Claridad / realce de detalles finos\n"
-        L"• Rotar / Voltear : Transformaciones geométricas\n"
-        L"• Fondo : Aplica la foto como fondo de escritorio de Windows\n"
-        L"• Guardar : Exporta la foto con transformaciones aplicadas\n"
-        L"• Pantalla : Alterna pantalla completa / ventana\n"
-        L"• Abrir : Diálogo para abrir nueva imagen o carpeta\n\n"
-        L"🚀 MOTORES Y COMPATIBILIDAD:\n"
-        L"• Decodificadores: stb_image, Windows Imaging Component (WIC) y GDI+\n"
-        L"• Formatos: JPG, PNG, WebP, HEIC/HEIF, AVIF, BMP, GIF, TIFF, ICO, TGA, PSD, HDR, RAW y más.\n"
-        L"• Calidad: Anti-aliasing bicúbico, auto-orientación EXIF y transparencia premium.";
+    std::wstring info;
+    info += std::wstring(APP_NAME_TEXT) + L" v" + APP_VERSION_TEXT;
+    info += L" — Guía de Controles, Atajos y Funciones\n\n";
+    info += L"ATAJOS DE TECLADO:\n";
+    info += L"  Flechas Izq / Der : Imagen anterior / siguiente\n";
+    info += L"  Espacio / Retroceso : Imagen siguiente / anterior\n";
+    info += L"  Inicio / Fin : Primera / última imagen\n";
+    info += L"  Rueda / + / - : Acercar / alejar zoom\n";
+    info += L"  F : Ajustar imagen a la ventana\n";
+    info += L"  1 o 0 : Tamaño real al 100%\n";
+    info += L"  D : Alternar modo Ultra-Claridad\n";
+    info += L"  R / Shift+R : Girar 90° horario / antihorario\n";
+    info += L"  H / V : Volteo horizontal / vertical\n";
+    info += L"  G : Alternar escala de grises (B/N)\n";
+    info += L"  N : Alternar inversión cromática (Negativo)\n";
+    info += L"  T : Alternar tema visual (Oscuro / Claro)\n";
+    info += L"  F5 : Iniciar / detener presentación automática\n";
+    info += L"  F11 / Doble clic : Pantalla completa (Esc para salir)\n";
+    info += L"  Supr : Mover imagen a la Papelera de reciclaje\n";
+    info += L"  E / Ctrl+I : Metadatos y propiedades EXIF\n";
+    info += L"  Ctrl+S : Guardar / exportar imagen\n";
+    info += L"  Ctrl+W : Establecer como fondo de escritorio\n";
+    info += L"  Ctrl+E : Mostrar en el Explorador de archivos\n";
+    info += L"  Ctrl+C / Ctrl+Shift+C : Copiar imagen / ruta\n";
+    info += L"  Ctrl+O / Ctrl+Shift+O : Abrir imagen / carpeta\n";
+    info += L"  I : Fijar o alternar barra de información\n\n";
+    info += L"CONTROLES DE RATON:\n";
+    info += L"  Clic izquierdo + arrastrar : Desplazar imagen\n";
+    info += L"  Rueda del ratón : Zoom centrado en el cursor\n";
+    info += L"  Clic central : Alternar entre 100% y ajuste\n";
+    info += L"  Botones laterales X1/X2 : Anterior / siguiente\n";
+    info += L"  Doble clic : Pantalla completa\n\n";
+    info += L"PANEL FLOTANTE (DOCK):\n";
+    info += L"  Ajustar / 1:1 / Claridad / Rotar / Voltear /\n";
+    info += L"  Fondo / Guardar / Pantalla / Abrir\n\n";
+    info += L"FORMATOS COMPATIBLES:\n";
+    info += L"  JPG, PNG, WebP, HEIC, AVIF, BMP, GIF, TIFF,\n";
+    info += L"  ICO, TGA, PSD, HDR, RAW y más de 30 formatos.";
 
-    ShowThemedMessageBox(hwnd, L"Info — ARTPICST (Atajos, Funciones y Controles)", info.c_str(), MB_OK, MB_ICONINFORMATION);
+    ShowThemedMessageBox(hwnd, L"Guía de Funciones y Atajos — ARTPICST", info.c_str(), MB_OK, MB_ICONINFORMATION);
 }
 
 bool IsSupportedImageExtension(const std::wstring& extLower) {
@@ -2710,54 +2711,6 @@ void ShowExifDialog(HWND hwnd) {
     swprintf_s(zoomBuf, L"• Zoom actual en pantalla: %.1f%%\n", g_state.zoom * 100.0f);
     info += zoomBuf;
     ShowThemedMessageBox(hwnd, L"Propiedades y Metadatos — ARTPICST", info.c_str(), MB_OK, MB_ICONINFORMATION);
-}
-
-void ShowProgramInfoDialog(HWND hwnd) {
-    std::wstring info = L"Guía de Controles, Atajos de Teclado y Funciones:\n\n";
-    info += L"• Navegación entre imágenes:\n";
-    info += L"    Flecha Derecha / Espacio : Imagen siguiente\n";
-    info += L"    Flecha Izquierda / Retroceso : Imagen anterior\n";
-    info += L"    Inicio / Fin : Primera / última imagen de la carpeta\n";
-    info += L"    Botones laterales del ratón : Anterior / siguiente\n\n";
-    info += L"• Zoom y visualización:\n";
-    info += L"    Rueda del ratón / Teclas + y - : Acercar / alejar\n";
-    info += L"    F : Ajustar imagen a las dimensiones de la ventana\n";
-    info += L"    1 o 0 / Botón central : Escala nativa 1:1 (100%)\n";
-    info += L"    Clic izquierdo y arrastrar : Desplazar imagen panorámica\n";
-    info += L"    F11 / Doble clic : Activar o desactivar pantalla completa\n\n";
-    info += L"• Manipulación y filtros:\n";
-    info += L"    R / Shift + R : Girar 90° horario / antihorario\n";
-    info += L"    H / V : Volteo horizontal / vertical\n";
-    info += L"    D : Alternar filtro de Ultra-Claridad\n";
-    info += L"    G : Alternar filtro de escala de grises (B/N)\n";
-    info += L"    N : Alternar inversión cromática (Negativo)\n";
-    info += L"    T : Alternar tema visual (Oscuro / Claro)\n\n";
-    info += L"• Archivos y portapapeles:\n";
-    info += L"    Ctrl + O / Ctrl + Shift + O : Abrir imagen / carpeta\n";
-    info += L"    Ctrl + S : Guardar imagen exportada con calidad máxima\n";
-    info += L"    Ctrl + C / Ctrl + Shift + C : Copiar imagen / copiar ruta\n";
-    info += L"    Ctrl + E : Mostrar ubicación en el Explorador de archivos\n";
-    info += L"    Ctrl + W : Establecer como fondo de escritorio de Windows\n";
-    info += L"    Supr : Mover imagen actual a la Papelera de reciclaje\n";
-    info += L"    E / Ctrl + I : Consultar metadatos y propiedades EXIF\n";
-    info += L"    F5 : Iniciar o detener presentación automática\n";
-    info += L"    Esc : Cerrar visor o salir de pantalla completa";
-    ShowThemedMessageBox(hwnd, L"Guía de Funciones y Atajos — ARTPICST", info.c_str(), MB_OK, MB_ICONINFORMATION);
-}
-
-void ShowAboutDialog(HWND hwnd) {
-    std::wstring about = L"ARTPICST — Visor de Imágenes Profesional\n\n";
-    about += L"Versión: 1.2.0 (Compilación Estable)\n";
-    about += L"Arquitectura: Nativo C++17 para Windows (x64)\n\n";
-    about += L"Características principales:\n";
-    about += L"• Motores de descodificación de alto rendimiento: stb_image, WIC y GDI+.\n";
-    about += L"• Soporte para más de 30 formatos: PNG, JPG, BMP, GIF animado, WebP, TIFF, AVIF, HEIC, RAW, HDR, PSD, ICO, etc.\n";
-    about += L"• Gestión inteligente de memoria con caché LRU y liberación dinámica de recursos.\n";
-    about += L"• Interfaz moderna adaptativa compatible con modo oscuro/claro y escalado de alto DPI en Windows 11, 10, 8.1 y 7.\n\n";
-    about += L"Licencia: Software libre y de código abierto.\n";
-    about += L"Repositorio oficial: https://github.com/LiebeBlack/Pic\n";
-    about += L"Copyright © 2026 ARTPICST. Todos los derechos reservados.";
-    ShowThemedMessageBox(hwnd, L"Acerca de ARTPICST", about.c_str(), MB_OK, MB_ICONINFORMATION);
 }
 
 void ToggleTheme() {
