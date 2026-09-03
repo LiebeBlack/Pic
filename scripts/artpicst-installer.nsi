@@ -2,7 +2,7 @@
   !define APP_NAME "ARTPICST"
 !endif
 !ifndef APP_VERSION
-  !define APP_VERSION "1.1.0"
+  !define APP_VERSION "1.2.0"
 !endif
 !ifndef APP_PUBLISHER
   !define APP_PUBLISHER "ARTPICST"

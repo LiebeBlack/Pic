@@ -37,6 +37,7 @@ jobs:
       run: |
         copy build\artpicst.exe dist\artpicst.exe
         copy build\artpicst_installer.exe dist\artpicst_installer.exe
+        copy build\artpicst_installer.exe dist\artpicst-installer.exe
         copy resources\artpicst.ico dist\artpicst.ico
         copy version.json dist\version.json
     
@@ -55,7 +56,7 @@ jobs:
     
     - name: Release
       if: github.event_name == 'release'
-      uses: softprops/action-gh-release@v1
+      uses: softprops/action-gh-release@v2
       with:
         files: |
           dist/artpicst-installer.exe

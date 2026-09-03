@@ -1910,20 +1910,6 @@ bool ApplyLoadedImage(unsigned char* pixels, int width, int height, int channels
     return true;
 }
 
-void StopGifTimer() {
-    if (g_state.hwnd) {
-        KillTimer(g_state.hwnd, TIMER_GIF);
-    }
-}
-
-void StartGifTimer() {
-    StopGifTimer();
-    if (g_state.hwnd && g_state.gif.animated()) {
-        const int firstDelay = g_state.gif.delayAt(g_state.gif.current);
-        SetTimer(g_state.hwnd, TIMER_GIF, static_cast<UINT>(firstDelay), nullptr);
-    }
-}
-
 bool LoadImageFromPath(const std::wstring& filepath) {
     if (!ValidateFileIntegrity(filepath)) {
         HandleError(L"Archivo inválido o inaccesible: " + GetFileName(filepath), false);
