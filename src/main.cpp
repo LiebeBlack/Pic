@@ -91,36 +91,36 @@ enum class UISize {
     Large           // Para pantallas grandes
 };
 
-// Tema oscuro opaco estilo Windows 10 (sin glass / mica)
-const COLORREF BG_COLOR_DARK = RGB(32, 32, 32);
-const COLORREF CHECKER_A_DARK = RGB(38, 38, 38);
-const COLORREF CHECKER_B_DARK = RGB(48, 48, 48);
+// Tema oscuro suave y descansado (estilo Win10/7 con toques Win11, sin fatiga visual)
+const COLORREF BG_COLOR_DARK = RGB(26, 26, 30);
+const COLORREF CHECKER_A_DARK = RGB(32, 32, 38);
+const COLORREF CHECKER_B_DARK = RGB(40, 40, 48);
 
-// Tema claro opaco estilo Windows 10
-const COLORREF BG_COLOR_LIGHT = RGB(243, 243, 243);
-const COLORREF CHECKER_A_LIGHT = RGB(232, 232, 232);
-const COLORREF CHECKER_B_LIGHT = RGB(220, 220, 220);
+// Tema claro limpio estilo Windows
+const COLORREF BG_COLOR_LIGHT = RGB(242, 244, 247);
+const COLORREF CHECKER_A_LIGHT = RGB(232, 234, 238);
+const COLORREF CHECKER_B_LIGHT = RGB(220, 222, 226);
 
 // Colores actuales (se establecen dinámicamente)
 COLORREF BG_COLOR = BG_COLOR_DARK;
 COLORREF CHECKER_A = CHECKER_A_DARK;
 COLORREF CHECKER_B = CHECKER_B_DARK;
 
-// Dock y botones opacos (Win10 + radio Win11). Alpha 255: sin transparencias pesadas.
-const Color GLASS_DOCK_BG_DARK(255, 45, 45, 45);
-const Color GLASS_DOCK_BORDER_DARK(255, 64, 64, 64);
-const Color GLASS_DOCK_SHADOW_DARK(40, 0, 0, 0);
-const Color GLASS_BTN_NORMAL_DARK(255, 52, 52, 52);
-const Color GLASS_BTN_BORDER_NORMAL_DARK(255, 72, 72, 72);
+// Dock y botones ultraligeros estilo Windows 10/7 con bordes suaves de Windows 11
+const Color GLASS_DOCK_BG_DARK(255, 34, 35, 42);
+const Color GLASS_DOCK_BORDER_DARK(255, 58, 60, 72);
+const Color GLASS_DOCK_SHADOW_DARK(30, 0, 0, 0);
+const Color GLASS_BTN_NORMAL_DARK(255, 45, 46, 56);
+const Color GLASS_BTN_BORDER_NORMAL_DARK(255, 68, 70, 84);
 const Color GLASS_BTN_HOT_DARK(255, 0, 120, 215);
 const Color GLASS_BTN_BORDER_HOT_DARK(255, 96, 180, 242);
 const Color GLASS_BTN_ACTIVE_DARK(255, 0, 99, 177);
 
-const Color GLASS_DOCK_BG_LIGHT(255, 243, 243, 243);
-const Color GLASS_DOCK_BORDER_LIGHT(255, 204, 204, 204);
-const Color GLASS_DOCK_SHADOW_LIGHT(28, 0, 0, 0);
-const Color GLASS_BTN_NORMAL_LIGHT(255, 255, 255, 255);
-const Color GLASS_BTN_BORDER_NORMAL_LIGHT(255, 210, 210, 210);
+const Color GLASS_DOCK_BG_LIGHT(255, 245, 247, 250);
+const Color GLASS_DOCK_BORDER_LIGHT(255, 208, 213, 220);
+const Color GLASS_DOCK_SHADOW_LIGHT(20, 0, 0, 0);
+const Color GLASS_BTN_NORMAL_LIGHT(255, 255, 255);
+const Color GLASS_BTN_BORDER_NORMAL_LIGHT(255, 212, 216, 224);
 const Color GLASS_BTN_HOT_LIGHT(255, 0, 120, 215);
 const Color GLASS_BTN_BORDER_HOT_LIGHT(255, 0, 99, 177);
 const Color GLASS_BTN_ACTIVE_LIGHT(255, 0, 99, 177);
@@ -139,12 +139,12 @@ Color GLASS_BTN_ACTIVE = GLASS_BTN_ACTIVE_DARK;
 const float MIN_ZOOM = 0.01f;
 const float MAX_ZOOM = 200.0f;
 const float ZOOM_STEP = 1.25f;
-const size_t CACHE_SIZE = 2;                           // Actual + siguiente (prefetch no evicta la imagen en uso)
-const size_t MAX_CACHE_BYTES = 48ull * 1024ull * 1024ull;
+const size_t CACHE_SIZE = 6;                           // Tamaño de caché equilibrado para navegación suave
+const size_t MAX_CACHE_BYTES = 128ull * 1024ull * 1024ull; // 128 MB límite para evitar consumo excesivo
 const int MAX_DIMENSION = 3840;
 const LONGLONG MAX_FILE_BYTES = 300LL * 1024LL * 1024LL;
-const int MAX_GIF_FRAMES = 180;
-const size_t MAX_GIF_BYTES = 64ull * 1024ull * 1024ull;
+const int MAX_GIF_FRAMES = 240;
+const size_t MAX_GIF_BYTES = 96ull * 1024ull * 1024ull;
 
 // Configuración de renderizado ultraligero - efectos desactivados
 const bool ENABLE_ULTRA_QUALITY_RENDERING = false;
@@ -241,6 +241,14 @@ struct GifAnimation {
     }
 
     bool animated() const { return frames.size() > 1 && frames.size() == delaysMs.size(); }
+    int frameCount() const { return static_cast<int>(frames.size()); }
+
+    unsigned char* currentFramePixels() const {
+        if (animated() && current >= 0 && static_cast<size_t>(current) < frames.size()) {
+            return frames[static_cast<size_t>(current)];
+        }
+        return nullptr;
+    }
 
     int delayAt(int index) const {
         if (index < 0 || index >= static_cast<int>(delaysMs.size())) return 100;
@@ -345,6 +353,7 @@ struct AppState {
     std::unordered_map<std::wstring, std::list<CachedImage>::iterator> cacheIndex;
     std::list<CachedImage> imageCache;
     std::mutex cacheMutex;
+    size_t cacheMemoryBytes = 0;
 
     // Prefetch en segundo plano
     std::thread prefetchThread;
@@ -1127,6 +1136,7 @@ void CalculateDialogSize(const wchar_t* title, const wchar_t* message, UINT butt
 }
 
 float GetAdaptiveFontSize(const wchar_t* text, int availableWidth, int availableHeight, const wchar_t* fontName) {
+    (void)fontName;
     if (!text || !text[0]) return 11.0f;
     
     size_t textLength = wcslen(text);
@@ -1143,10 +1153,10 @@ float GetAdaptiveFontSize(const wchar_t* text, int availableWidth, int available
         baseSize = 10.0f;
     }
     
-    // Ajustar según espacio disponible
-    if (availableWidth < 400) {
+    // Ajustar según espacio horizontal y vertical disponible
+    if (availableWidth < 400 || availableHeight < 300) {
         baseSize *= 0.9f;
-    } else if (availableWidth > 600) {
+    } else if (availableWidth > 600 && availableHeight > 500) {
         baseSize *= 1.1f;
     }
     
@@ -1178,6 +1188,7 @@ void CleanupGDIPlus() {
         std::lock_guard<std::mutex> lock(g_state.cacheMutex);
         g_state.imageCache.clear();
         g_state.cacheIndex.clear();
+        g_state.cacheMemoryBytes = 0;
     }
     FreeCurrentImage();
     FreeDoubleBuffer();
@@ -1235,22 +1246,23 @@ void AddToCache(const std::wstring& filepath, unsigned char* data, int width, in
     auto it = g_state.cacheIndex.find(key);
     if (it != g_state.cacheIndex.end()) {
         if (it->second != g_state.imageCache.end()) {
+            size_t oldBytes = 0;
+            if (SafePixelBytes(it->second->width, it->second->height, oldBytes)) {
+                if (g_state.cacheMemoryBytes >= oldBytes) g_state.cacheMemoryBytes -= oldBytes;
+                else g_state.cacheMemoryBytes = 0;
+            }
             g_state.imageCache.erase(it->second);
         }
         g_state.cacheIndex.erase(it);
     }
 
-    auto getCacheMemoryBytes = [&]() -> size_t {
-        size_t total = 0;
-        for (const auto& item : g_state.imageCache) {
-            size_t b = 0;
-            if (SafePixelBytes(item.width, item.height, b)) total += b;
-        }
-        return total;
-    };
-
-    while (!g_state.imageCache.empty() && (g_state.imageCache.size() >= CACHE_SIZE || (getCacheMemoryBytes() + bytes) > MAX_CACHE_BYTES)) {
+    while (!g_state.imageCache.empty() && (g_state.imageCache.size() >= CACHE_SIZE || (g_state.cacheMemoryBytes + bytes) > MAX_CACHE_BYTES)) {
         auto oldest = g_state.imageCache.begin();
+        size_t oldestBytes = 0;
+        if (SafePixelBytes(oldest->width, oldest->height, oldestBytes)) {
+            if (g_state.cacheMemoryBytes >= oldestBytes) g_state.cacheMemoryBytes -= oldestBytes;
+            else g_state.cacheMemoryBytes = 0;
+        }
         g_state.cacheIndex.erase(CacheKey(oldest->filepath));
         g_state.imageCache.pop_front();
     }
@@ -1267,6 +1279,7 @@ void AddToCache(const std::wstring& filepath, unsigned char* data, int width, in
     cached.filepath = filepath;
     cached.decoder = decoder;
     g_state.imageCache.push_back(std::move(cached));
+    g_state.cacheMemoryBytes += bytes;
     g_state.cacheIndex[key] = std::prev(g_state.imageCache.end());
 }
 
@@ -1279,6 +1292,7 @@ void ClearCache() {
     std::lock_guard<std::mutex> lock(g_state.cacheMutex);
     g_state.imageCache.clear();
     g_state.cacheIndex.clear();
+    g_state.cacheMemoryBytes = 0;
     TrimProcessMemory();
 }
 
@@ -1896,6 +1910,20 @@ bool ApplyLoadedImage(unsigned char* pixels, int width, int height, int channels
     return true;
 }
 
+void StopGifTimer() {
+    if (g_state.hwnd) {
+        KillTimer(g_state.hwnd, TIMER_GIF);
+    }
+}
+
+void StartGifTimer() {
+    StopGifTimer();
+    if (g_state.hwnd && g_state.gif.animated()) {
+        const int firstDelay = g_state.gif.delayAt(g_state.gif.current);
+        SetTimer(g_state.hwnd, TIMER_GIF, static_cast<UINT>(firstDelay), nullptr);
+    }
+}
+
 bool LoadImageFromPath(const std::wstring& filepath) {
     if (!ValidateFileIntegrity(filepath)) {
         HandleError(L"Archivo inválido o inaccesible: " + GetFileName(filepath), false);
@@ -2249,10 +2277,10 @@ void RenderHud(Graphics& graphics, const RECT& client) {
 
         RectF osdRect(osdX, osdY, osdW, osdH);
         GraphicsPath osdPath;
-        AddRoundedRect(osdPath, osdRect, 16.0f);
+        AddRoundedRect(osdPath, osdRect, 8.0f);
 
-        SolidBrush osdBg(Color(220, 12, 14, 20));
-        Pen osdBorder(Color(130, 200, 210, 230), 1.2f);
+        SolidBrush osdBg(Color(245, 24, 25, 30));
+        Pen osdBorder(Color(255, 60, 62, 74), 1.0f);
         graphics.FillPath(&osdBg, &osdPath);
         graphics.DrawPath(&osdBorder, &osdPath);
 
@@ -2260,7 +2288,7 @@ void RenderHud(Graphics& graphics, const RECT& client) {
         graphics.DrawString(g_state.statusMessage.c_str(), -1, &font, osdRect, &format, &textBrush);
     }
 
-    // 2. Dock Flotante Acrílico Inferior
+    // 2. Dock Flotante Compacto y Ultraligero Inferior
     if (shouldShowDock) {
         RectF dockRectF(static_cast<float>(g_state.dockRect.left),
                        static_cast<float>(g_state.dockRect.top),
@@ -2268,23 +2296,23 @@ void RenderHud(Graphics& graphics, const RECT& client) {
                        static_cast<float>(g_state.dockRect.bottom - g_state.dockRect.top));
 
         GraphicsPath dockPath;
-        AddRoundedRect(dockPath, dockRectF, 22.0f);
+        AddRoundedRect(dockPath, dockRectF, 10.0f);
 
-        // Sombra
+        // Sombra suave y ligera
         RectF shadowRect = dockRectF;
-        shadowRect.Y += 5.0f;
+        shadowRect.Y += 2.0f;
         GraphicsPath shadowPath;
-        AddRoundedRect(shadowPath, shadowRect, 22.0f);
+        AddRoundedRect(shadowPath, shadowRect, 10.0f);
         SolidBrush shadowBrush(GLASS_DOCK_SHADOW);
         graphics.FillPath(&shadowBrush, &shadowPath);
 
         // Fondo y borde
         SolidBrush dockBg(GLASS_DOCK_BG);
-        Pen dockBorder(GLASS_DOCK_BORDER, 1.2f);
+        Pen dockBorder(GLASS_DOCK_BORDER, 1.0f);
         graphics.FillPath(&dockBg, &dockPath);
         graphics.DrawPath(&dockBorder, &dockPath);
 
-        // Botones
+        // Botones elegantes estilo Windows 10 / Windows 7 con bordes suaves Windows 11
         FontFamily btnFontFamily(L"Segoe UI");
         Font btnFont(&btnFontFamily, 9.5f, FontStyleBold, UnitPoint);
         StringFormat btnFormat;
@@ -2301,11 +2329,11 @@ void RenderHud(Graphics& graphics, const RECT& client) {
                           static_cast<float>(g_state.hud[i].rc.bottom - g_state.hud[i].rc.top));
 
             GraphicsPath itemPath;
-            AddRoundedRect(itemPath, itemRect, 15.0f);
+            AddRoundedRect(itemPath, itemRect, 6.0f);
 
             if (active) {
                 SolidBrush activeBrush(GLASS_BTN_ACTIVE);
-                Pen activeBorder(Color(255, 80, 240, 180), 1.2f);
+                Pen activeBorder(Color(255, 96, 205, 255), 1.2f);
                 graphics.FillPath(&activeBrush, &itemPath);
                 graphics.DrawPath(&activeBorder, &itemPath);
             } else if (hot) {
@@ -2320,7 +2348,7 @@ void RenderHud(Graphics& graphics, const RECT& client) {
                 graphics.DrawPath(&normalBorder, &itemPath);
             }
 
-            SolidBrush btnTextBrush((hot || active) ? Color(255, 255, 255) : Color(225, 230, 238));
+            SolidBrush btnTextBrush((hot || active) ? Color(255, 255, 255) : Color(255, 230, 235, 242));
             graphics.DrawString(g_state.hud[i].label, -1, &btnFont, itemRect, &btnFormat, &btnTextBrush);
         }
     }
@@ -2428,8 +2456,9 @@ void RenderImage() {
 
     // Usar frame actual de GIF si está animado
     unsigned char* currentImageData = g_state.imageData;
-    if (g_state.isGifAnimated && !g_state.gifFrameData.empty() && g_state.gifCurrentFrame < g_state.gifFrameData.size()) {
-        currentImageData = g_state.gifFrameData[g_state.gifCurrentFrame];
+    if (g_state.gif.animated()) {
+        unsigned char* framePtr = g_state.gif.currentFramePixels();
+        if (framePtr) currentImageData = framePtr;
     }
 
     Bitmap bitmap(g_state.imageWidth, g_state.imageHeight,
@@ -3425,25 +3454,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     g_state.dockLastActivity = GetTickCount();
                 }
             } else if (wParam == TIMER_GIF) {
-                if (g_state.isGifAnimated && g_state.gifTotalFrames > 1 && !g_state.gifFrameDelays.empty()) {
-                    DWORD currentTime = GetTickCount();
-                    DWORD elapsed = currentTime - g_state.gifLastFrameTime;
-                    
-                    // Obtener delay del frame actual
-                    int currentDelay = g_state.gifFrameDelays[g_state.gifCurrentFrame];
-                    if (currentDelay < 50) currentDelay = 100; // Mínimo 50ms
-                    
-                    if (elapsed >= static_cast<DWORD>(currentDelay)) {
-                        // Avanzar al siguiente frame
-                        g_state.gifCurrentFrame = (g_state.gifCurrentFrame + 1) % g_state.gifTotalFrames;
-                        g_state.gifLastFrameTime = currentTime;
-                        InvalidateRect(hwnd, nullptr, FALSE);
-                        
-                        // Programar siguiente timer con el delay del nuevo frame
-                        int nextDelay = g_state.gifFrameDelays[g_state.gifCurrentFrame];
-                        if (nextDelay < 50) nextDelay = 100;
-                        SetTimer(hwnd, TIMER_GIF, nextDelay, nullptr);
-                    }
+                if (g_state.gif.animated()) {
+                    g_state.gif.current = (g_state.gif.current + 1) % g_state.gif.frameCount();
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                    const int nextDelay = g_state.gif.delayAt(g_state.gif.current);
+                    SetTimer(hwnd, TIMER_GIF, static_cast<UINT>(nextDelay), nullptr);
+                } else {
+                    KillTimer(hwnd, TIMER_GIF);
                 }
             }
             return 0;

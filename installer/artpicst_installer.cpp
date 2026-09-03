@@ -35,7 +35,7 @@
 using namespace Gdiplus;
 
 const wchar_t APP_NAME[] = L"ARTPICST";
-const wchar_t APP_VERSION[] = L"1.1.0";
+const wchar_t APP_VERSION[] = L"1.2.0";
 const wchar_t CLASS_NAME[] = L"ARTPICSTInstallerWindow";
 
 // Colores premium
@@ -149,14 +149,14 @@ void RenderWelcome(Graphics& g, const RECT& client) {
     
     SolidBrush textBrush(TEXT_COLOR);
     
-    RectF titleRect(0, centerY - 120, client.right, 50);
+    RectF titleRect(0.0f, centerY - 120.0f, static_cast<REAL>(client.right), 50.0f);
     g.DrawString(APP_NAME, -1, &titleFont, titleRect, &format, &textBrush);
     
-    RectF subtitleRect(0, centerY - 70, client.right, 30);
+    RectF subtitleRect(0.0f, centerY - 70.0f, static_cast<REAL>(client.right), 30.0f);
     g.DrawString(L"Visor de imágenes premium con interfaz acrílica moderna", -1, &subtitleFont, subtitleRect, &format, &textBrush);
     
     // Feature card
-    RectF cardRect(centerX - 200, centerY - 20, 400, 200);
+    RectF cardRect(centerX - 200.0f, centerY - 20.0f, 400.0f, 200.0f);
     DrawRoundedRect(g, cardRect, 16.0f, CARD_BG, CARD_BORDER);
     
     Gdiplus::Font featureFont(&titleFamily, 11.0f, FontStyleRegular, UnitPoint);
@@ -170,17 +170,17 @@ void RenderWelcome(Graphics& g, const RECT& client) {
         L"• Rendimiento ultra-ligero y bajo consumo de recursos"
     };
     
-    float featureY = cardRect.Y + 30;
+    float featureY = cardRect.Y + 30.0f;
     for (const wchar_t* feature : features) {
-        RectF featureRect(cardRect.X + 20, featureY, cardRect.Width - 40, 25);
+        RectF featureRect(cardRect.X + 20.0f, featureY, cardRect.Width - 40.0f, 25.0f);
         g.DrawString(feature, -1, &featureFont, featureRect, &format, &featureBrush);
-        featureY += 30;
+        featureY += 30.0f;
     }
 }
 
 void RenderLicense(Graphics& g, const RECT& client) {
-    float centerX = client.right / 2.0f;
-    float centerY = client.bottom / 2.0f;
+    float centerX = static_cast<float>(client.right) / 2.0f;
+    float centerY = static_cast<float>(client.bottom) / 2.0f;
     
     Gdiplus::FontFamily titleFamily(L"Segoe UI");
     Gdiplus::Font titleFont(&titleFamily, 24.0f, FontStyleBold, UnitPoint);
@@ -192,7 +192,7 @@ void RenderLicense(Graphics& g, const RECT& client) {
     
     SolidBrush textBrush(TEXT_COLOR);
     
-    RectF titleRect(0, centerY - 150, client.right, 40);
+    RectF titleRect(0.0f, centerY - 150.0f, static_cast<REAL>(client.right), 40.0f);
     g.DrawString(L"Acuerdo de Licencia", -1, &titleFont, titleRect, &format, &textBrush);
     
     // License text box
@@ -219,8 +219,8 @@ void RenderLicense(Graphics& g, const RECT& client) {
 }
 
 void RenderInstall(Graphics& g, const RECT& client) {
-    float centerX = client.right / 2.0f;
-    float centerY = client.bottom / 2.0f;
+    float centerX = static_cast<float>(client.right) / 2.0f;
+    float centerY = static_cast<float>(client.bottom) / 2.0f;
     
     Gdiplus::FontFamily titleFamily(L"Segoe UI");
     Gdiplus::Font titleFont(&titleFamily, 24.0f, FontStyleBold, UnitPoint);
@@ -232,24 +232,23 @@ void RenderInstall(Graphics& g, const RECT& client) {
     
     SolidBrush textBrush(TEXT_COLOR);
     
-    RectF titleRect(0, centerY - 150, client.right, 40);
+    RectF titleRect(0.0f, centerY - 150.0f, static_cast<REAL>(client.right), 40.0f);
     g.DrawString(L"Instalando ARTPICST", -1, &titleFont, titleRect, &format, &textBrush);
     
     // Progress bar
-    RectF progressRect(centerX - 200, centerY - 50, 400, 24);
+    RectF progressRect(centerX - 200.0f, centerY - 50.0f, 400.0f, 24.0f);
     DrawProgress(g, progressRect, g_state.installProgress);
     
     // Status text
     wchar_t statusText[256];
     swprintf_s(statusText, L"Progreso: %d%%", g_state.installProgress);
     
-    RectF statusRect(0, centerY, client.right, 30);
+    RectF statusRect(0.0f, centerY, static_cast<REAL>(client.right), 30.0f);
     g.DrawString(statusText, -1, &textFont, statusRect, &format, &textBrush);
 }
 
 void RenderComplete(Graphics& g, const RECT& client) {
-    float centerX = client.right / 2.0f;
-    float centerY = client.bottom / 2.0f;
+    float centerY = static_cast<float>(client.bottom) / 2.0f;
     
     Gdiplus::FontFamily titleFamily(L"Segoe UI");
     Gdiplus::Font titleFont(&titleFamily, 28.0f, FontStyleBold, UnitPoint);
@@ -261,14 +260,14 @@ void RenderComplete(Graphics& g, const RECT& client) {
     
     SolidBrush textBrush(TEXT_COLOR);
     
-    RectF titleRect(0, centerY - 100, client.right, 50);
+    RectF titleRect(0.0f, centerY - 100.0f, static_cast<REAL>(client.right), 50.0f);
     g.DrawString(L"¡Instalación Completada!", -1, &titleFont, titleRect, &format, &textBrush);
     
     const wchar_t* completeText = L"ARTPICST se ha instalado correctamente en tu sistema.\n\n"
         L"Puedes iniciar la aplicación desde el menú de inicio\n"
         L"o haciendo clic en el botón de abajo.";
     
-    RectF textRect(0, centerY - 30, client.right, 60);
+    RectF textRect(0.0f, centerY - 30.0f, static_cast<REAL>(client.right), 60.0f);
     g.DrawString(completeText, -1, &textFont, textRect, &format, &textBrush);
 }
 
@@ -279,7 +278,7 @@ void RenderWindow(Graphics& g, const RECT& client) {
     
     // Header line
     Pen headerPen(ACCENT_COLOR, 2.0f);
-    g.DrawLine(&headerPen, 0, 0, client.right, 0);
+    g.DrawLine(&headerPen, 0.0f, 0.0f, static_cast<REAL>(client.right), 0.0f);
     
     // Render current step
     switch (g_state.currentStep) {
@@ -298,12 +297,12 @@ void RenderWindow(Graphics& g, const RECT& client) {
     }
     
     // Navigation buttons
-    float buttonY = client.bottom - 60;
-    float buttonWidth = 120;
-    float buttonHeight = 36;
+    float buttonY = static_cast<float>(client.bottom) - 60.0f;
+    float buttonWidth = 120.0f;
+    float buttonHeight = 36.0f;
     
-    RectF backButton(20, buttonY, buttonWidth, buttonHeight);
-    RectF nextButton(client.right - buttonWidth - 20, buttonY, buttonWidth, buttonHeight);
+    RectF backButton(20.0f, buttonY, buttonWidth, buttonHeight);
+    RectF nextButton(static_cast<REAL>(client.right) - buttonWidth - 20.0f, buttonY, buttonWidth, buttonHeight);
     
     const wchar_t* backText = L"← Atrás";
     const wchar_t* nextText = L"Siguiente →";
@@ -320,13 +319,13 @@ void RenderWindow(Graphics& g, const RECT& client) {
             // No buttons during installation
             break;
         case InstallStep::Complete:
-            DrawButton(g, RectF(client.right - buttonWidth - 20, buttonY, buttonWidth, buttonHeight), 
+            DrawButton(g, RectF(static_cast<REAL>(client.right) - buttonWidth - 20.0f, buttonY, buttonWidth, buttonHeight), 
                       L"Iniciar App", false, true);
             break;
     }
     
     // Cancel button (top right)
-    RectF cancelRect(client.right - 80, 10, 60, 24);
+    RectF cancelRect(static_cast<REAL>(client.right) - 80.0f, 10.0f, 60.0f, 24.0f);
     DrawButton(g, cancelRect, L"Cancelar", false, g_state.currentStep != InstallStep::Install);
 }
 
@@ -390,12 +389,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             RECT client;
             GetClientRect(hwnd, &client);
             
-            float buttonY = client.bottom - 60;
-            float buttonWidth = 120;
-            float buttonHeight = 36;
+            float buttonY = static_cast<float>(client.bottom) - 60.0f;
+            float buttonWidth = 120.0f;
+            float buttonHeight = 36.0f;
             
             // Next button
-            RectF nextButton(client.right - buttonWidth - 20, buttonY, buttonWidth, buttonHeight);
+            RectF nextButton(static_cast<REAL>(client.right) - buttonWidth - 20.0f, buttonY, buttonWidth, buttonHeight);
             if (x >= nextButton.X && x <= nextButton.X + nextButton.Width &&
                 y >= nextButton.Y && y <= nextButton.Y + nextButton.Height) {
                 
@@ -418,7 +417,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
             
             // Back button
-            RectF backButton(20, buttonY, buttonWidth, buttonHeight);
+            RectF backButton(20.0f, buttonY, buttonWidth, buttonHeight);
             if (x >= backButton.X && x <= backButton.X + backButton.Width &&
                 y >= backButton.Y && y <= backButton.Y + backButton.Height) {
                 
@@ -429,7 +428,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
             
             // Cancel button
-            RectF cancelRect(client.right - 80, 10, 60, 24);
+            RectF cancelRect(static_cast<REAL>(client.right) - 80.0f, 10.0f, 60.0f, 24.0f);
             if (x >= cancelRect.X && x <= cancelRect.X + cancelRect.Width &&
                 y >= cancelRect.Y && y <= cancelRect.Y + cancelRect.Height) {
                 
@@ -446,6 +445,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 }
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine, int nCmdShow) {
+    (void)hPrevInstance;
+    (void)pCmdLine;
     g_state.hInstance = hInstance;
     
     // Initialize GDI+
