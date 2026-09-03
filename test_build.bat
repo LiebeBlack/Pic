@@ -4,7 +4,7 @@ echo Testing build configuration...
 echo Checking source files...
 if exist "src\main.cpp" echo [OK] src\main.cpp
 if exist "installer\artpicst_installer.cpp" echo [OK] installer\artpicst_installer.cpp  
-if exist "updater\auto_updater_simple.cpp" echo [OK] updater\auto_updater_simple.cpp
+
 if exist "resources\artpicst.ico" echo [OK] resources\artpicst.ico
 if exist "artpicst.rc" echo [OK] artpicst.rc
 if exist "artpicst.manifest" echo [OK] artpicst.manifest

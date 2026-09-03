@@ -28,12 +28,6 @@ jobs:
         shell: powershell
         run: cmake --build build --config Release --parallel
 
-      - name: Build updater executable
-        shell: powershell
-        run: |
-          python -m pip install --upgrade pip
-          python updater/build_exe.py
-
       - name: Validate executable exists
         shell: powershell
         run: |
@@ -54,8 +48,6 @@ jobs:
           $root = $env:GITHUB_WORKSPACE
           $dist = Join-Path $root "dist"
           $icon = Join-Path $root "resources\artpicst.ico"
-          $updaterExe = Join-Path $root "updater_build\auto_updater.exe"
-          $distUpdaterExe = Join-Path $dist "auto_updater.exe"
           $tag = if ($env:GITHUB_REF -like "refs/tags/*") { $env:GITHUB_REF_NAME } else { "auto-$env:GITHUB_RUN_NUMBER" }
 
           New-Item -ItemType Directory -Force -Path $dist | Out-Null
@@ -64,12 +56,7 @@ jobs:
             throw "Missing icon: $icon"
           }
 
-          if (-not (Test-Path $updaterExe)) {
-            throw "Updater EXE not found: $updaterExe"
-          }
-
           Copy-Item $env:ARTPICST_EXE (Join-Path $dist "artpicst.exe") -Force
-          Copy-Item $updaterExe $distUpdaterExe -Force
           Copy-Item (Join-Path $root "README.md") (Join-Path $dist "README.md") -Force
           Copy-Item $icon (Join-Path $dist "artpicst.ico") -Force
 

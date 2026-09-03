@@ -21,6 +21,8 @@
 // Implementación de stb_image para carga de imágenes
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
+#define STB_IMAGE_RESIZE_IMPLEMENTATION
+#include "stb_image_resize2.h"
 
 // Headers de Windows API
 #include <windows.h>
@@ -73,7 +75,7 @@ using namespace Gdiplus;
 // Configuración de aplicación y constantes visuales
 const wchar_t CLASS_NAME[] = L"ARTPICSTWindow";
 const wchar_t APP_NAME_TEXT[] = L"ARTPICST";
-const wchar_t APP_VERSION_TEXT[] = L"1.1.0 Premium AI";
+const wchar_t APP_VERSION_TEXT[] = L"1.2.0";
 
 // Sistema de temas inteligente
 enum class ThemeMode {
@@ -89,40 +91,39 @@ enum class UISize {
     Large           // Para pantallas grandes
 };
 
-// Colores del sistema (tema oscuro - por defecto)
-const COLORREF BG_COLOR_DARK = RGB(10, 12, 18);
-const COLORREF CHECKER_A_DARK = RGB(15, 17, 25);
-const COLORREF CHECKER_B_DARK = RGB(22, 25, 35);
+// Tema oscuro opaco estilo Windows 10 (sin glass / mica)
+const COLORREF BG_COLOR_DARK = RGB(32, 32, 32);
+const COLORREF CHECKER_A_DARK = RGB(38, 38, 38);
+const COLORREF CHECKER_B_DARK = RGB(48, 48, 48);
 
-// Colores del sistema (tema claro)
-const COLORREF BG_COLOR_LIGHT = RGB(245, 245, 250);
-const COLORREF CHECKER_A_LIGHT = RGB(235, 235, 240);
-const COLORREF CHECKER_B_LIGHT = RGB(225, 225, 230);
+// Tema claro opaco estilo Windows 10
+const COLORREF BG_COLOR_LIGHT = RGB(243, 243, 243);
+const COLORREF CHECKER_A_LIGHT = RGB(232, 232, 232);
+const COLORREF CHECKER_B_LIGHT = RGB(220, 220, 220);
 
 // Colores actuales (se establecen dinámicamente)
 COLORREF BG_COLOR = BG_COLOR_DARK;
 COLORREF CHECKER_A = CHECKER_A_DARK;
 COLORREF CHECKER_B = CHECKER_B_DARK;
 
-// Colores de interfaz Glassmorphism/Acrílica (tema oscuro)
-const Color GLASS_DOCK_BG_DARK(240, 12, 14, 20);
-const Color GLASS_DOCK_BORDER_DARK(130, 200, 210, 230);
-const Color GLASS_DOCK_SHADOW_DARK(180, 0, 0, 0);
-const Color GLASS_BTN_NORMAL_DARK(80, 200, 210, 230);
-const Color GLASS_BTN_BORDER_NORMAL_DARK(65, 180, 190, 210);
-const Color GLASS_BTN_HOT_DARK(250, 70, 140, 220);
-const Color GLASS_BTN_BORDER_HOT_DARK(255, 130, 180, 255);
-const Color GLASS_BTN_ACTIVE_DARK(250, 50, 160, 180);
+// Dock y botones opacos (Win10 + radio Win11). Alpha 255: sin transparencias pesadas.
+const Color GLASS_DOCK_BG_DARK(255, 45, 45, 45);
+const Color GLASS_DOCK_BORDER_DARK(255, 64, 64, 64);
+const Color GLASS_DOCK_SHADOW_DARK(40, 0, 0, 0);
+const Color GLASS_BTN_NORMAL_DARK(255, 52, 52, 52);
+const Color GLASS_BTN_BORDER_NORMAL_DARK(255, 72, 72, 72);
+const Color GLASS_BTN_HOT_DARK(255, 0, 120, 215);
+const Color GLASS_BTN_BORDER_HOT_DARK(255, 96, 180, 242);
+const Color GLASS_BTN_ACTIVE_DARK(255, 0, 99, 177);
 
-// Colores de interfaz Glassmorphism/Acrílica (tema claro)
-const Color GLASS_DOCK_BG_LIGHT(250, 245, 240, 230);
-const Color GLASS_DOCK_BORDER_LIGHT(100, 120, 140, 150);
-const Color GLASS_DOCK_SHADOW_LIGHT(150, 0, 0, 0);
-const Color GLASS_BTN_NORMAL_LIGHT(150, 170, 190, 200);
-const Color GLASS_BTN_BORDER_NORMAL_LIGHT(130, 150, 170, 180);
-const Color GLASS_BTN_HOT_LIGHT(200, 100, 50, 80);
-const Color GLASS_BTN_BORDER_HOT_LIGHT(180, 130, 80, 100);
-const Color GLASS_BTN_ACTIVE_LIGHT(180, 80, 40, 60);
+const Color GLASS_DOCK_BG_LIGHT(255, 243, 243, 243);
+const Color GLASS_DOCK_BORDER_LIGHT(255, 204, 204, 204);
+const Color GLASS_DOCK_SHADOW_LIGHT(28, 0, 0, 0);
+const Color GLASS_BTN_NORMAL_LIGHT(255, 255, 255, 255);
+const Color GLASS_BTN_BORDER_NORMAL_LIGHT(255, 210, 210, 210);
+const Color GLASS_BTN_HOT_LIGHT(255, 0, 120, 215);
+const Color GLASS_BTN_BORDER_HOT_LIGHT(255, 0, 99, 177);
+const Color GLASS_BTN_ACTIVE_LIGHT(255, 0, 99, 177);
 
 // Colores actuales de interfaz (se establecen dinámicamente)
 Color GLASS_DOCK_BG = GLASS_DOCK_BG_DARK;
@@ -134,20 +135,24 @@ Color GLASS_BTN_HOT = GLASS_BTN_HOT_DARK;
 Color GLASS_BTN_BORDER_HOT = GLASS_BTN_BORDER_HOT_DARK;
 Color GLASS_BTN_ACTIVE = GLASS_BTN_ACTIVE_DARK;
 
-// Configuración de zoom y renderizado optimizado (Bajo consumo de RAM y CPU)
+// Configuración de zoom y renderizado ultraligero (Consumo mínimo de RAM y CPU)
 const float MIN_ZOOM = 0.01f;
 const float MAX_ZOOM = 200.0f;
 const float ZOOM_STEP = 1.25f;
-const size_t CACHE_SIZE = 1;                           // Máximo 1 imagen en caché para mantener RAM <= 80MB
-const size_t MAX_CACHE_BYTES = 20 * 1024 * 1024;       // Límite estricto de 20MB para caché en memoria
-const int MAX_DIMENSION = 4096;                        // Límite de 4K para decodificación directa
+const size_t CACHE_SIZE = 2;                           // Actual + siguiente (prefetch no evicta la imagen en uso)
+const size_t MAX_CACHE_BYTES = 48ull * 1024ull * 1024ull;
+const int MAX_DIMENSION = 3840;
 const LONGLONG MAX_FILE_BYTES = 300LL * 1024LL * 1024LL;
+const int MAX_GIF_FRAMES = 180;
+const size_t MAX_GIF_BYTES = 64ull * 1024ull * 1024ull;
 
-// Configuración de renderizado ultra-rápido y eficiente
+// Configuración de renderizado ultraligero - efectos desactivados
 const bool ENABLE_ULTRA_QUALITY_RENDERING = false;
 const bool ENABLE_ADAPTIVE_SHARPNESS = false;
 const bool ENABLE_AUTO_CONTRAST = false;
 const bool ENABLE_GAMMA_CORRECTION = false;
+const bool ENABLE_BLUR_EFFECTS = false;                 // Desactivar desenfoques pesados
+const bool ENABLE_TRANSPARENCY_EFFECTS = false;         // Desactivar transparencias pesadas
 
 // Sistema de tamaño UI adaptativo
 const int UI_SCALE_SMALL = 80;      // 80% del tamaño normal
@@ -191,57 +196,91 @@ struct ComPtr {
     explicit operator bool() const { return p != nullptr; }
 };
 
-// Estructura de imagen cacheada con soporte GIF
+static void FreePixels(unsigned char*& p) {
+    if (p) {
+        free(p);
+        p = nullptr;
+    }
+}
+
+struct GifAnimation {
+    std::vector<unsigned char*> frames;
+    std::vector<int> delaysMs;
+    int current = 0;
+
+    void reset() {
+        for (unsigned char* f : frames) {
+            if (f) free(f);
+        }
+        frames.clear();
+        delaysMs.clear();
+        current = 0;
+    }
+
+    GifAnimation() = default;
+    ~GifAnimation() { reset(); }
+    GifAnimation(const GifAnimation&) = delete;
+    GifAnimation& operator=(const GifAnimation&) = delete;
+    GifAnimation(GifAnimation&& other) noexcept
+        : frames(std::move(other.frames)), delaysMs(std::move(other.delaysMs)), current(other.current) {
+        other.frames.clear();
+        other.delaysMs.clear();
+        other.current = 0;
+    }
+    GifAnimation& operator=(GifAnimation&& other) noexcept {
+        if (this != &other) {
+            reset();
+            frames = std::move(other.frames);
+            delaysMs = std::move(other.delaysMs);
+            current = other.current;
+            other.frames.clear();
+            other.delaysMs.clear();
+            other.current = 0;
+        }
+        return *this;
+    }
+
+    bool animated() const { return frames.size() > 1 && frames.size() == delaysMs.size(); }
+
+    int delayAt(int index) const {
+        if (index < 0 || index >= static_cast<int>(delaysMs.size())) return 100;
+        int d = delaysMs[static_cast<size_t>(index)];
+        if (d < 20) d = 100;
+        if (d > 10000) d = 10000;
+        return d;
+    }
+};
+
 struct CachedImage {
     unsigned char* data = nullptr;
     int width = 0, height = 0, channels = 0, rotation = 0;
     bool flipH = false, flipV = false, hasAlpha = false;
     std::wstring filepath, decoder;
-    
-    // Animación GIF
-    bool isAnimated = false;
-    int currentFrame = 0, totalFrames = 0;
-    std::vector<unsigned char*> frameData;
-    std::vector<int> frameDelays;
 
     CachedImage() = default;
-    ~CachedImage() {
-        if (data) { stbi_image_free(data); data = nullptr; }
-        for (auto* frame : frameData) if (frame) stbi_image_free(frame);
-        frameData.clear();
-    }
+    ~CachedImage() { FreePixels(data); }
     CachedImage(const CachedImage&) = delete;
     CachedImage& operator=(const CachedImage&) = delete;
     CachedImage(CachedImage&& other) noexcept
         : data(other.data), width(other.width), height(other.height),
           channels(other.channels), rotation(other.rotation),
           flipH(other.flipH), flipV(other.flipV), hasAlpha(other.hasAlpha),
-          filepath(std::move(other.filepath)), decoder(std::move(other.decoder)),
-          isAnimated(other.isAnimated), currentFrame(other.currentFrame),
-          totalFrames(other.totalFrames), frameData(std::move(other.frameData)),
-          frameDelays(std::move(other.frameDelays)) {
+          filepath(std::move(other.filepath)), decoder(std::move(other.decoder)) {
         other.data = nullptr;
         other.width = other.height = other.channels = other.rotation = 0;
         other.flipH = other.flipV = other.hasAlpha = false;
-        other.isAnimated = false;
-        other.currentFrame = 0;
-        other.totalFrames = 0;
     }
     CachedImage& operator=(CachedImage&& other) noexcept {
         if (this != &other) {
-            if (data) stbi_image_free(data);
+            FreePixels(data);
             data = other.data;
             width = other.width; height = other.height; channels = other.channels;
             rotation = other.rotation; flipH = other.flipH; flipV = other.flipV;
             hasAlpha = other.hasAlpha;
             filepath = std::move(other.filepath); decoder = std::move(other.decoder);
-            isAnimated = other.isAnimated; currentFrame = other.currentFrame;
-            totalFrames = other.totalFrames;
-            frameData = std::move(other.frameData); frameDelays = std::move(other.frameDelays);
             other.data = nullptr;
             other.width = other.height = other.channels = other.rotation = 0;
             other.flipH = other.flipV = other.hasAlpha = false;
-            other.isAnimated = false; other.currentFrame = 0; other.totalFrames = 0;
         }
         return *this;
     }
@@ -339,14 +378,7 @@ struct AppState {
     bool dockAutoHide = true;
     DWORD dockLastActivity = 0;
 
-    // GIF animation support
-    bool isGifAnimated = false;
-    // Animación GIF
-    int gifCurrentFrame = 0, gifTotalFrames = 0;
-    std::vector<unsigned char*> gifFrameData;
-    std::vector<int> gifFrameDelays;
-    UINT_PTR gifTimer = 0;
-    DWORD gifLastFrameTime = 0;
+    GifAnimation gif;
 
     // Sistema y recursos
     std::wstring lastError;
@@ -362,12 +394,8 @@ struct AppState {
     }
 
     ~AppState() {
-        if (imageData) { stbi_image_free(imageData); imageData = nullptr; }
-        for (auto* frame : gifFrameData) {
-            if (frame) delete[] frame;
-        }
-        gifFrameData.clear();
-        gifFrameDelays.clear();
+        FreePixels(imageData);
+        gif.reset();
     }
 };
 
@@ -375,6 +403,7 @@ AppState g_state;
 
 std::wstring GetFileName(const std::wstring& filepath);
 std::wstring GetFileSizeString(const std::wstring& filepath);
+std::wstring GetExtensionLower(const std::wstring& filename);
 bool PathsEqualCaseInsensitive(const std::wstring& a, const std::wstring& b);
 void FreeCurrentImage();
 void ScanFolderForImages(const std::wstring& folderPath);
@@ -426,7 +455,9 @@ void NextImage();
 void PreviousImage();
 void OpenPath(const std::wstring& path);
 void UpdateWindowTitle();
-void EnableDarkTitleBar(HWND hwnd);
+void EnableDarkTitleBar(HWND hwnd, bool dark = true);
+void StopGifTimer();
+void StartGifTimer();
 int ShowThemedMessageBox(HWND parent, const wchar_t* title, const wchar_t* message, UINT buttons, UINT icon);
 bool OpenImageFileDialog(HWND hwnd);
 bool OpenFolderDialog(HWND hwnd);
@@ -459,57 +490,22 @@ static void TrimProcessMemory() {
     SetProcessWorkingSetSize(GetCurrentProcess(), static_cast<SIZE_T>(-1), static_cast<SIZE_T>(-1));
 }
 
-// Reduce imágenes gigantescas al decodificar con interpolación bilineal de alta fidelidad (RAM <= 80MB)
 static void DownscaleImageIfTooLarge(unsigned char*& pixels, int& width, int& height) {
     if (!pixels || width <= 0 || height <= 0) return;
-    const int maxDim = 3840; // Límite 4K Ultra HD (máxima nitidez y fidelidad)
-    if (width <= maxDim && height <= maxDim) return;
+    if (width <= MAX_DIMENSION && height <= MAX_DIMENSION) return;
 
-    float scale = std::min(static_cast<float>(maxDim) / width, static_cast<float>(maxDim) / height);
-    int newWidth = std::max(1, static_cast<int>(width * scale));
-    int newHeight = std::max(1, static_cast<int>(height * scale));
+    const float scale = std::min(static_cast<float>(MAX_DIMENSION) / width, static_cast<float>(MAX_DIMENSION) / height);
+    const int newWidth = std::max(1, static_cast<int>(width * scale + 0.5f));
+    const int newHeight = std::max(1, static_cast<int>(height * scale + 0.5f));
 
-    size_t newBytes = static_cast<size_t>(newWidth) * static_cast<size_t>(newHeight) * 4;
-    unsigned char* newPixels = static_cast<unsigned char*>(malloc(newBytes));
-    if (!newPixels) return;
+    unsigned char* resized = stbir_resize_uint8_srgb(
+        pixels, width, height, 0,
+        nullptr, newWidth, newHeight, 0,
+        STBIR_BGRA);
+    if (!resized) return;
 
-    float xRatio = static_cast<float>(width - 1) / std::max(1, newWidth - 1);
-    float yRatio = static_cast<float>(height - 1) / std::max(1, newHeight - 1);
-
-    for (int y = 0; y < newHeight; ++y) {
-        int srcY = static_cast<int>(y * yRatio);
-        float yDiff = (y * yRatio) - srcY;
-        int nextY = std::min(srcY + 1, height - 1);
-
-        for (int x = 0; x < newWidth; ++x) {
-            int srcX = static_cast<int>(x * xRatio);
-            float xDiff = (x * xRatio) - srcX;
-            int nextX = std::min(srcX + 1, width - 1);
-
-            size_t idxTL = (static_cast<size_t>(srcY) * width + srcX) * 4;
-            size_t idxTR = (static_cast<size_t>(srcY) * width + nextX) * 4;
-            size_t idxBL = (static_cast<size_t>(nextY) * width + srcX) * 4;
-            size_t idxBR = (static_cast<size_t>(nextY) * width + nextX) * 4;
-
-            size_t outIdx = (static_cast<size_t>(y) * newWidth + x) * 4;
-
-            for (int c = 0; c < 4; ++c) {
-                float tl = static_cast<float>(pixels[idxTL + c]);
-                float tr = static_cast<float>(pixels[idxTR + c]);
-                float bl = static_cast<float>(pixels[idxBL + c]);
-                float br = static_cast<float>(pixels[idxBR + c]);
-
-                float top = tl + xDiff * (tr - tl);
-                float bottom = bl + xDiff * (br - bl);
-                float val = top + yDiff * (bottom - top);
-
-                newPixels[outIdx + c] = static_cast<unsigned char>(std::min(255.0f, std::max(0.0f, val + 0.5f)));
-            }
-        }
-    }
-
-    stbi_image_free(pixels);
-    pixels = newPixels;
+    FreePixels(pixels);
+    pixels = resized;
     width = newWidth;
     height = newHeight;
 }
@@ -593,21 +589,29 @@ struct ThemedDialogState {
 
 ThemedDialogState g_dialogState;
 
-void EnableDarkTitleBar(HWND hwnd) {
+void EnableDarkTitleBar(HWND hwnd, bool dark) {
     if (!hwnd) return;
-    BOOL dark = TRUE;
-    DwmSetWindowAttribute(hwnd, 20, &dark, sizeof(dark)); // DWMWA_USE_IMMERSIVE_DARK_MODE (Win11 / Win10 20H1+)
-    DwmSetWindowAttribute(hwnd, 19, &dark, sizeof(dark)); // DWMWA_USE_IMMERSIVE_DARK_MODE (Win10 1809)
+    BOOL useDark = dark ? TRUE : FALSE;
+    DwmSetWindowAttribute(hwnd, 20, &useDark, sizeof(useDark));
+    DwmSetWindowAttribute(hwnd, 19, &useDark, sizeof(useDark));
 
-    // Color de barra de título y texto premium moderno (Win 11)
-    COLORREF captionColor = RGB(14, 16, 22);
-    COLORREF textColor = RGB(242, 245, 250);
-    DwmSetWindowAttribute(hwnd, 35, &captionColor, sizeof(captionColor)); // DWMWA_CAPTION_COLOR
-    DwmSetWindowAttribute(hwnd, 36, &textColor, sizeof(textColor));       // DWMWA_TEXT_COLOR
+    COLORREF captionColor = dark ? RGB(32, 32, 32) : RGB(243, 243, 243);
+    COLORREF textColor = dark ? RGB(250, 250, 250) : RGB(32, 32, 32);
+    DwmSetWindowAttribute(hwnd, 35, &captionColor, sizeof(captionColor));
+    DwmSetWindowAttribute(hwnd, 36, &textColor, sizeof(textColor));
 
-    // Efecto de fondo Mica/Acrílico (Win 11)
-    DWORD backdropType = 2; // 2 = Mica
-    DwmSetWindowAttribute(hwnd, 38, &backdropType, sizeof(backdropType)); // DWMWA_SYSTEMBACKDROP_TYPE
+    DWORD backdropType = 1; // DWMSBT_NONE — sin Mica/Acrílico (ligero)
+    DwmSetWindowAttribute(hwnd, 38, &backdropType, sizeof(backdropType));
+}
+
+void StopGifTimer() {
+    if (g_state.hwnd) KillTimer(g_state.hwnd, TIMER_GIF);
+}
+
+void StartGifTimer() {
+    StopGifTimer();
+    if (!g_state.hwnd || !g_state.gif.animated()) return;
+    SetTimer(g_state.hwnd, TIMER_GIF, static_cast<UINT>(g_state.gif.delayAt(g_state.gif.current)), nullptr);
 }
 
 LRESULT CALLBACK ThemedDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -622,21 +626,18 @@ LRESULT CALLBACK ThemedDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
             HDC hdc = BeginPaint(hwnd, &ps);
             
             Graphics graphics(hdc);
-            // Configuración de calidad MÁXIMA para diálogos
-            graphics.SetCompositingQuality(CompositingQualityAssumeLinear);
+            graphics.SetCompositingQuality(CompositingQualityHighSpeed);
             graphics.SetSmoothingMode(SmoothingModeAntiAlias);
-            graphics.SetPixelOffsetMode(PixelOffsetModeHighQuality);
+            graphics.SetPixelOffsetMode(PixelOffsetModeHalf);
             graphics.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
             
             RECT client;
             GetClientRect(hwnd, &client);
             
-            // Background with glass effect
-            SolidBrush bgBrush(Color(240, 12, 14, 20));
+            SolidBrush bgBrush(Color(255, 32, 32, 32));
             graphics.FillRectangle(&bgBrush, 0, 0, client.right, client.bottom);
             
-            // Border
-            Pen borderPen(Color(255, 80, 200, 210), 1.0f);
+            Pen borderPen(Color(255, 64, 64, 64), 1.0f);
             graphics.DrawRectangle(&borderPen, 0, 0, client.right - 1, client.bottom - 1);
             
             // Title - Tamaño INTELIGENTE adaptativo
@@ -649,7 +650,7 @@ LRESULT CALLBACK ThemedDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
                 titleFormat.SetLineAlignment(StringAlignmentNear);
                 titleFormat.SetTrimming(StringTrimmingEllipsisCharacter);
                 
-                SolidBrush titleBrush(Color(255, 242, 245, 250));
+                SolidBrush titleBrush(Color(255, 250, 250, 250));
                 RectF titleRect(0.0f, 20.0f, static_cast<float>(client.right), 50.0f);
                 graphics.DrawString(g_dialogState.title.c_str(), -1, &titleFont, titleRect, &titleFormat, &titleBrush);
             }
@@ -664,7 +665,7 @@ LRESULT CALLBACK ThemedDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
                 messageFormat.SetLineAlignment(StringAlignmentCenter);
                 messageFormat.SetTrimming(StringTrimmingEllipsisWord);
                 
-                SolidBrush messageBrush(Color(255, 200, 210, 220));
+                SolidBrush messageBrush(Color(255, 200, 200, 200));
                 RectF messageRect(40.0f, 80.0f, static_cast<float>(client.right - 80), static_cast<float>(client.bottom - 140));
                 graphics.DrawString(g_dialogState.message.c_str(), -1, &messageFont, messageRect, &messageFormat, &messageBrush);
             }
@@ -698,9 +699,9 @@ LRESULT CALLBACK ThemedDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
                 int noX = client.right / 2 + 10;
                 
                 // Yes button
-                SolidBrush yesBrush(Color(255, 48, 120, 235));
+                SolidBrush yesBrush(Color(255, 0, 120, 215));
                 graphics.FillRectangle(&yesBrush, static_cast<float>(yesX), static_cast<float>(buttonY), static_cast<float>(buttonWidth), static_cast<float>(buttonHeight));
-                Pen yesBorder(Color(255, 80, 200, 210), 1.0f);
+                Pen yesBorder(Color(255, 96, 180, 242), 1.0f);
                 graphics.DrawRectangle(&yesBorder, static_cast<float>(yesX), static_cast<float>(buttonY), static_cast<float>(buttonWidth), static_cast<float>(buttonHeight));
                 
                 // No button
@@ -726,9 +727,9 @@ LRESULT CALLBACK ThemedDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
                 int okX = client.right / 2 - buttonWidth / 2;
                 
                 // OK button
-                SolidBrush okBrush(Color(255, 48, 120, 235));
+                SolidBrush okBrush(Color(255, 0, 120, 215));
                 graphics.FillRectangle(&okBrush, static_cast<float>(okX), static_cast<float>(buttonY), static_cast<float>(buttonWidth), static_cast<float>(buttonHeight));
-                Pen okBorder(Color(255, 80, 200, 210), 1.0f);
+                Pen okBorder(Color(255, 96, 180, 242), 1.0f);
                 graphics.DrawRectangle(&okBorder, static_cast<float>(okX), static_cast<float>(buttonY), static_cast<float>(buttonWidth), static_cast<float>(buttonHeight));
                 
                 // Button text
@@ -929,6 +930,7 @@ void ApplyTheme(ThemeMode theme) {
         GLASS_BTN_HOT = GLASS_BTN_HOT_DARK;
         GLASS_BTN_BORDER_HOT = GLASS_BTN_BORDER_HOT_DARK;
         GLASS_BTN_ACTIVE = GLASS_BTN_ACTIVE_DARK;
+        if (g_state.hwnd) EnableDarkTitleBar(g_state.hwnd, true);
     } else {
         // Aplicar tema claro
         BG_COLOR = BG_COLOR_LIGHT;
@@ -942,6 +944,7 @@ void ApplyTheme(ThemeMode theme) {
         GLASS_BTN_HOT = GLASS_BTN_HOT_LIGHT;
         GLASS_BTN_BORDER_HOT = GLASS_BTN_BORDER_HOT_LIGHT;
         GLASS_BTN_ACTIVE = GLASS_BTN_ACTIVE_LIGHT;
+        if (g_state.hwnd) EnableDarkTitleBar(g_state.hwnd, false);
     }
     
     // Actualizar brush de clase si existe
@@ -1194,6 +1197,7 @@ bool CopyCachedPixels(const CachedImage& src, unsigned char*& dest) {
 }
 
 bool TryCopyFromCache(const std::wstring& filepath, CachedImage& outCopy) {
+    if (GetExtensionLower(filepath) == L"gif") return false;
     const std::wstring key = CacheKey(filepath);
     std::lock_guard<std::mutex> lock(g_state.cacheMutex);
     auto it = g_state.cacheIndex.find(key);
@@ -1223,18 +1227,19 @@ void AddToCache(const std::wstring& filepath, unsigned char* data, int width, in
     if (!data) return;
     size_t bytes = 0;
     if (!SafePixelBytes(width, height, bytes) || bytes > MAX_CACHE_BYTES) {
-        stbi_image_free(data);
+        FreePixels(data);
         return;
     }
     std::lock_guard<std::mutex> lock(g_state.cacheMutex);
     const std::wstring key = CacheKey(filepath);
     auto it = g_state.cacheIndex.find(key);
     if (it != g_state.cacheIndex.end()) {
-        if (it->second != g_state.imageCache.end()) g_state.imageCache.erase(it->second);
+        if (it->second != g_state.imageCache.end()) {
+            g_state.imageCache.erase(it->second);
+        }
         g_state.cacheIndex.erase(it);
     }
-    
-    // Calcular uso total de memoria en caché y desalojar si excede el límite
+
     auto getCacheMemoryBytes = [&]() -> size_t {
         size_t total = 0;
         for (const auto& item : g_state.imageCache) {
@@ -1243,7 +1248,7 @@ void AddToCache(const std::wstring& filepath, unsigned char* data, int width, in
         }
         return total;
     };
-    
+
     while (!g_state.imageCache.empty() && (g_state.imageCache.size() >= CACHE_SIZE || (getCacheMemoryBytes() + bytes) > MAX_CACHE_BYTES)) {
         auto oldest = g_state.imageCache.begin();
         g_state.cacheIndex.erase(CacheKey(oldest->filepath));
@@ -1278,19 +1283,9 @@ void ClearCache() {
 }
 
 void FreeCurrentImage() {
-    if (g_state.imageData) {
-        stbi_image_free(g_state.imageData);
-        g_state.imageData = nullptr;
-    }
-    // Liberar todos los frames de GIF para evitar fuga de memoria
-    for (auto* frame : g_state.gifFrameData) {
-        if (frame) delete[] frame;
-    }
-    g_state.gifFrameData.clear();
-    g_state.gifFrameDelays.clear();
-    g_state.isGifAnimated = false;
-    g_state.gifCurrentFrame = 0;
-    g_state.gifTotalFrames = 0;
+    StopGifTimer();
+    FreePixels(g_state.imageData);
+    g_state.gif.reset();
 
     g_state.imageWidth = 0;
     g_state.imageHeight = 0;
@@ -1353,11 +1348,10 @@ void HandleError(const std::wstring& errorMsg, bool showUser) {
 
 void ShowAboutDialog(HWND hwnd) {
     std::wstring info =
-        std::wstring(APP_NAME_TEXT) + L" v" + APP_VERSION_TEXT + L" (Edición Premium)\n\n" +
-        L"Visor de imágenes nativo ultra-ligero con aceleración por hardware y diseño Acrílico/Glassmorphism.\n\n" +
-        L"• Motores: stb_image, WIC y GDI+ con interpolación bicúbica de precisión y Ultra-Claridad HDR.\n" +
-        L"• Auto-orientación EXIF, visor de máxima área, fondo de pantalla directo y exportador PNG/JPG.\n" +
-        L"• Rendimiento ultra-optimizado con consumo mínimo de RAM y soporte para más de 30 formatos gráficos.\n\n" +
+        std::wstring(APP_NAME_TEXT) + L" v" + APP_VERSION_TEXT + L"\n\n" +
+        L"Visor nativo ultra-ligero para Windows. Interfaz opaca estilo Windows 10 con detalles Win11.\n\n" +
+        L"• Motores: stb_image, WIC y GDI+. Orientación EXIF, GIF animado y más de 30 formatos.\n" +
+        L"• Sin desenfoques ni transparencias pesadas. Caché LRU y reproducción GIF estable.\n\n" +
         L"© 2026 ARTPICST";
     ShowThemedMessageBox(hwnd ? hwnd : nullptr, APP_NAME_TEXT, info.c_str(), MB_OK, MB_ICONINFORMATION);
 }
@@ -1576,119 +1570,106 @@ void ConvertRGBAtoBGRA(unsigned char* pixels, int width, int height, bool& outHa
     }
 }
 
-unsigned char* DecodeWithStb(const std::wstring& filepath, int& width, int& height, int& channels, bool& outHasAlpha, int& autoRotateDeg) {
+unsigned char* DecodeWithStb(const std::wstring& filepath, int& width, int& height, int& channels, bool& outHasAlpha, int& autoRotateDeg, GifAnimation* outGif, bool decodeAnimation) {
     width = height = channels = 0;
     outHasAlpha = false;
     autoRotateDeg = 0;
     const std::string utf8 = WideToUtf8(filepath);
     if (utf8.empty()) return nullptr;
-    
+
     const std::wstring ext = GetExtensionLower(filepath);
-    bool isGif = (ext == L"gif");
+    const bool isGif = (ext == L"gif");
 
-    // Limpiar estado previo de GIF
-    g_state.isGifAnimated = false;
-    g_state.gifCurrentFrame = 0;
-    g_state.gifTotalFrames = 0;
-    for (auto* frame : g_state.gifFrameData) {
-        if (frame) delete[] frame;
-    }
-    g_state.gifFrameData.clear();
-    g_state.gifFrameDelays.clear();
-
-    if (isGif) {
+    if (isGif && decodeAnimation && outGif) {
         int* delays = nullptr;
         int frameCount = 0;
         int tempWidth = 0, tempHeight = 0, tempChannels = 0;
         unsigned char* gifData = nullptr;
-        
+
         FILE* gifFile = nullptr;
-        _wfopen_s(&gifFile, filepath.c_str(), L"rb");
-        if (gifFile) {
-            fseek(gifFile, 0, SEEK_END);
-            long gifSize = ftell(gifFile);
-            fseek(gifFile, 0, SEEK_SET);
-            if (gifSize > 0 && gifSize <= MAX_FILE_BYTES) {
-                stbi_uc* gifBuffer = static_cast<stbi_uc*>(malloc(gifSize));
-                if (gifBuffer) {
-                    size_t readBytes = fread(gifBuffer, 1, gifSize, gifFile);
-                    if (readBytes == static_cast<size_t>(gifSize)) {
-                        gifData = stbi_load_gif_from_memory(gifBuffer, static_cast<int>(gifSize), &delays, &tempWidth, &tempHeight, &frameCount, &tempChannels, 4);
+        if (_wfopen_s(&gifFile, filepath.c_str(), L"rb") == 0 && gifFile) {
+            if (fseek(gifFile, 0, SEEK_END) == 0) {
+                const long gifSize = ftell(gifFile);
+                if (gifSize > 0 && gifSize <= MAX_FILE_BYTES && fseek(gifFile, 0, SEEK_SET) == 0) {
+                    stbi_uc* gifBuffer = static_cast<stbi_uc*>(malloc(static_cast<size_t>(gifSize)));
+                    if (gifBuffer) {
+                        const size_t readBytes = fread(gifBuffer, 1, static_cast<size_t>(gifSize), gifFile);
+                        if (readBytes == static_cast<size_t>(gifSize)) {
+                            gifData = stbi_load_gif_from_memory(
+                                gifBuffer, static_cast<int>(gifSize), &delays,
+                                &tempWidth, &tempHeight, &frameCount, &tempChannels, 4);
+                        }
+                        free(gifBuffer);
                     }
-                    free(gifBuffer);
                 }
             }
             fclose(gifFile);
         }
 
-        if (gifData && frameCount > 1) {
-            width = tempWidth;
-            height = tempHeight;
-            channels = tempChannels;
-            
-            g_state.isGifAnimated = true;
-            g_state.gifCurrentFrame = 0;
-            g_state.gifTotalFrames = frameCount;
-            g_state.gifLastFrameTime = GetTickCount();
-            
-            g_state.gifFrameDelays.clear();
-            for (int i = 0; i < frameCount; i++) {
-                g_state.gifFrameDelays.push_back(delays[i] ? delays[i] : 100);
+        if (gifData && frameCount > 1 && tempWidth > 0 && tempHeight > 0) {
+            size_t frameBytes = 0;
+            if (!SafePixelBytes(tempWidth, tempHeight, frameBytes)) {
+                stbi_image_free(gifData);
+                if (delays) free(delays);
+                return nullptr;
             }
-            
-            size_t frameSize = static_cast<size_t>(width) * height * 4;
-            for (int i = 0; i < frameCount; i++) {
-                unsigned char* frameCopy = new unsigned char[frameSize];
-                memcpy(frameCopy, gifData + i * frameSize, frameSize);
-                ConvertRGBAtoBGRA(frameCopy, width, height, outHasAlpha);
-                g_state.gifFrameData.push_back(frameCopy);
+
+            int keepFrames = frameCount;
+            if (keepFrames > MAX_GIF_FRAMES) keepFrames = MAX_GIF_FRAMES;
+            while (keepFrames > 1 && (static_cast<size_t>(keepFrames) * frameBytes) > MAX_GIF_BYTES) {
+                --keepFrames;
             }
-            
-            size_t gifFrameBytes = 0;
-            if (!SafePixelBytes(width, height, gifFrameBytes)) {
-                for (auto* frame : g_state.gifFrameData) {
-                    if (frame) delete[] frame;
+
+            GifAnimation loaded;
+            loaded.frames.reserve(static_cast<size_t>(keepFrames));
+            loaded.delaysMs.reserve(static_cast<size_t>(keepFrames));
+            bool ok = true;
+            for (int i = 0; i < keepFrames; ++i) {
+                unsigned char* frameCopy = static_cast<unsigned char*>(malloc(frameBytes));
+                if (!frameCopy) {
+                    ok = false;
+                    break;
                 }
-                g_state.gifFrameData.clear();
-                g_state.gifFrameDelays.clear();
-                g_state.isGifAnimated = false;
-                stbi_image_free(gifData);
-                if (delays) free(delays);
-                return nullptr;
+                memcpy(frameCopy, gifData + static_cast<size_t>(i) * frameBytes, frameBytes);
+                ConvertRGBAtoBGRA(frameCopy, tempWidth, tempHeight, outHasAlpha);
+                loaded.frames.push_back(frameCopy);
+                const int delay = delays ? delays[i] : 100;
+                loaded.delaysMs.push_back(delay);
             }
-            
-            unsigned char* firstFrameCopy = static_cast<unsigned char*>(malloc(gifFrameBytes));
-            if (!firstFrameCopy) {
-                stbi_image_free(gifData);
-                if (delays) free(delays);
-                return nullptr;
-            }
-            memcpy(firstFrameCopy, g_state.gifFrameData[0], gifFrameBytes);
-            
+
             stbi_image_free(gifData);
             if (delays) free(delays);
-            return firstFrameCopy;
+
+            if (!ok || loaded.frames.empty()) return nullptr;
+
+            unsigned char* first = static_cast<unsigned char*>(malloc(frameBytes));
+            if (!first) return nullptr;
+            memcpy(first, loaded.frames[0], frameBytes);
+            *outGif = std::move(loaded);
+            width = tempWidth;
+            height = tempHeight;
+            channels = 4;
+            return first;
         }
-        
+
         if (gifData) stbi_image_free(gifData);
         if (delays) free(delays);
     }
 
-    // Carga estática para no-GIFs o GIFs estáticos de un solo frame
     unsigned char* pixels = stbi_load(utf8.c_str(), &width, &height, &channels, 4);
     if (!pixels) return nullptr;
-    
+
     size_t bytes = 0;
     if (!SafePixelBytes(width, height, bytes)) {
         stbi_image_free(pixels);
         width = height = channels = 0;
         return nullptr;
     }
-    
+
     ConvertRGBAtoBGRA(pixels, width, height, outHasAlpha);
 
     if (!isGif) {
-        int exif = GetExifOrientationFromJpeg(filepath);
+        const int exif = GetExifOrientationFromJpeg(filepath);
         if (exif == 6) autoRotateDeg = 90;
         else if (exif == 3) autoRotateDeg = 180;
         else if (exif == 8) autoRotateDeg = 270;
@@ -1713,11 +1694,10 @@ unsigned char* DecodeWithWic(const std::wstring& filepath, int& width, int& heig
     // Verificar si es GIF animado
     GUID containerFormat;
     hr = decoder->GetContainerFormat(&containerFormat);
-    bool isGif = (hr == Ok && containerFormat == GUID_ContainerFormatGif);
+    bool isGif = (SUCCEEDED(hr) && containerFormat == GUID_ContainerFormatGif);
     
-    // Si es GIF animado, intentar cargar como estático por ahora (stb maneja animación mejor)
     if (isGif) {
-        return nullptr; // Dejar que stb maneje los GIFs
+        return nullptr;
     }
 
     ComPtr<IWICBitmapFrameDecode> frame;
@@ -1839,10 +1819,10 @@ unsigned char* DecodeWithGdiplus(const std::wstring& filepath, int& width, int& 
     return pixels;
 }
 
-unsigned char* DecodeImageFile(const std::wstring& filepath, int& width, int& height, int& channels, bool& hasAlpha, int& autoRotateDeg, std::wstring& decoder) {
+unsigned char* DecodeImageFile(const std::wstring& filepath, int& width, int& height, int& channels, bool& hasAlpha, int& autoRotateDeg, std::wstring& decoder, GifAnimation* outGif, bool decodeAnimation) {
     decoder.clear();
     autoRotateDeg = 0;
-    unsigned char* pixels = DecodeWithStb(filepath, width, height, channels, hasAlpha, autoRotateDeg);
+    unsigned char* pixels = DecodeWithStb(filepath, width, height, channels, hasAlpha, autoRotateDeg, outGif, decodeAnimation);
     if (pixels) {
         decoder = L"stb";
     } else {
@@ -1857,13 +1837,16 @@ unsigned char* DecodeImageFile(const std::wstring& filepath, int& width, int& he
         }
     }
     if (pixels) {
-        DownscaleImageIfTooLarge(pixels, width, height);
+        if (!(outGif && outGif->animated())) {
+            DownscaleImageIfTooLarge(pixels, width, height);
+        }
     }
     return pixels;
 }
 
 void StoreCurrentInCache() {
     if (g_state.currentFilePath.empty() || !g_state.imageData) return;
+    if (g_state.gif.animated()) return;
     size_t bytes = 0;
     if (!SafePixelBytes(g_state.imageWidth, g_state.imageHeight, bytes) || bytes > MAX_CACHE_BYTES) return;
     unsigned char* copy = static_cast<unsigned char*>(malloc(bytes));
@@ -1910,7 +1893,6 @@ bool ApplyLoadedImage(unsigned char* pixels, int width, int height, int channels
     }
     UpdateWindowTitle();
     ShowOSD();
-    TrimProcessMemory();
     return true;
 }
 
@@ -1919,6 +1901,8 @@ bool LoadImageFromPath(const std::wstring& filepath) {
         HandleError(L"Archivo inválido o inaccesible: " + GetFileName(filepath), false);
         return false;
     }
+
+    StopGifTimer();
 
     CachedImage cached;
     if (TryCopyFromCache(filepath, cached) && cached.data) {
@@ -1931,7 +1915,8 @@ bool LoadImageFromPath(const std::wstring& filepath) {
     int width = 0, height = 0, channels = 0, autoRotate = 0;
     bool hasAlpha = false;
     std::wstring decoder;
-    unsigned char* pixels = DecodeImageFile(filepath, width, height, channels, hasAlpha, autoRotate, decoder);
+    GifAnimation decodedGif;
+    unsigned char* pixels = DecodeImageFile(filepath, width, height, channels, hasAlpha, autoRotate, decoder, &decodedGif, true);
     if (!pixels) {
         std::wstring msg = L"No se pudo cargar: " + GetFileName(filepath);
         HandleError(msg, false);
@@ -1939,16 +1924,9 @@ bool LoadImageFromPath(const std::wstring& filepath) {
     }
 
     ApplyLoadedImage(pixels, width, height, channels, autoRotate, false, false, hasAlpha, filepath, decoder);
+    g_state.gif = std::move(decodedGif);
     StoreCurrentInCache();
-    
-    // Iniciar timer de animación GIF si está animado
-    if (g_state.isGifAnimated && g_state.gifTotalFrames > 1 && !g_state.gifFrameDelays.empty()) {
-        int firstDelay = g_state.gifFrameDelays[0];
-        if (firstDelay < 50) firstDelay = 100;
-        g_state.gifLastFrameTime = GetTickCount();
-        SetTimer(g_state.hwnd, TIMER_GIF, firstDelay, nullptr);
-    }
-    
+    StartGifTimer();
     return true;
 }
 
@@ -2015,16 +1993,16 @@ void PrefetchThreadFunc() {
         if (generation != g_state.folderGeneration.load(std::memory_order_relaxed)) continue;
         
         const std::wstring filepath = ImagePathAt(nextIdx);
-        if (filepath.empty() || IsInCache(filepath)) continue;
+        if (filepath.empty() || GetExtensionLower(filepath) == L"gif" || IsInCache(filepath)) continue;
         if (!ValidateFileIntegrity(filepath)) continue;
         
         int width = 0, height = 0, channels = 0, autoRotate = 0;
         bool hasAlpha = false;
         std::wstring decoder;
-        unsigned char* pixels = DecodeImageFile(filepath, width, height, channels, hasAlpha, autoRotate, decoder);
+        unsigned char* pixels = DecodeImageFile(filepath, width, height, channels, hasAlpha, autoRotate, decoder, nullptr, false);
         if (!pixels) continue;
         if (generation != g_state.folderGeneration.load(std::memory_order_relaxed)) {
-            stbi_image_free(pixels);
+            FreePixels(pixels);
             continue;
         }
         AddToCache(filepath, pixels, width, height, channels, autoRotate, false, false, hasAlpha, decoder);

@@ -93,11 +93,6 @@ Section "Main"
     File "${SourceDir}\artpicst.exe"
     File "${SourceDir}\artpicst.ico"
     File /nonfatal "${SourceDir}\README.md"
-    File /nonfatal "${SourceDir}\auto_updater.exe"
-
-    SetOutPath "$INSTDIR\updater"
-    File "..\updater\install_auto_update_task.bat"
-    File "..\updater\install_auto_update_task.ps1"
 
     CreateDirectory "$SMPROGRAMS\ARTPICST"
     CreateShortCut "$SMPROGRAMS\ARTPICST\ARTPICST.lnk" "$INSTDIR\artpicst.exe"
@@ -107,7 +102,6 @@ Section "Main"
     CreateShortCut "$SMPROGRAMS\ARTPICST\Uninstall ARTPICST.lnk" "$INSTDIR\Uninstall.exe"
 
     Call RegisterImageFileAssociations
-    ExecWait 'cmd /c "$INSTDIR\updater\install_auto_update_task.bat" "$INSTDIR\auto_updater.exe"'
 SectionEnd
 
 Section "Uninstall"
@@ -118,11 +112,7 @@ Section "Uninstall"
 
     Delete "$INSTDIR\artpicst.exe"
     Delete "$INSTDIR\artpicst.ico"
-    Delete "$INSTDIR\auto_updater.exe"
     Delete "$INSTDIR\README.md"
-    Delete "$INSTDIR\updater\install_auto_update_task.bat"
-    Delete "$INSTDIR\updater\install_auto_update_task.ps1"
-    RMDir "$INSTDIR\updater"
     Delete "$INSTDIR\Uninstall.exe"
     RMDir "$INSTDIR"
 

@@ -2,8 +2,6 @@
 build/
 dist/
 installer/build/
-updater/build/
-updater_build/
 
 # Compiled files
 *.exe
