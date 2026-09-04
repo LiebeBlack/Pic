@@ -509,7 +509,8 @@ void ToggleFullscreen();
 void ToggleSlideshow();
 void ActualSize();
 void CreateDoubleBuffer(int width, int height);
-void RenderImage();
+void RenderImage(const RECT* clipRect = nullptr);
+void FreeCheckerTile();
 void LoadInitialImageSafely();
 bool CopyPathToClipboard();
 bool CopyImageToClipboard();
@@ -1320,6 +1321,7 @@ void CleanupGDIPlus() {
     }
     FreeCurrentImage();
     FreeDoubleBuffer();
+    FreeCheckerTile();
     g_ui.Shutdown();
     if (g_state.gdiplusToken) {
         GdiplusShutdown(g_state.gdiplusToken);
@@ -1475,6 +1477,31 @@ bool ValidateFileIntegrity(const std::wstring& filepath) {
     return true;
 }
 
+// Repinta únicamente la banda superior donde vive el OSD, no toda la ventana:
+// con el repintado por clip del trazador GDI+ el coste es mínimo aunque la
+// foto de fondo sea 4K (el OSD ya no re-rasteriza la imagen completa).
+void InvalidateOsdRegion() {
+    if (!g_state.hwnd) return;
+    RECT client{};
+    GetClientRect(g_state.hwnd, &client);
+    const int cw = client.right - client.left;
+    if (cw <= 0) return;
+    RECT band{ 4, 6, std::max(4, cw - 4), 54 };
+    InvalidateRect(g_state.hwnd, &band, FALSE);
+}
+
+// Repinta solo el dock (con margen para la sombra y el antialias), no toda la
+// ventana: mover el ratón sobre los botones ya no vuelve a escalar la foto 4K.
+void InvalidateDockRegion() {
+    if (!g_state.hwnd || g_state.dockRect.right <= g_state.dockRect.left) return;
+    RECT inv = g_state.dockRect;
+    inv.left = std::max(0L, inv.left - 4);
+    inv.top = std::max(0L, inv.top - 4);
+    inv.right += 4;
+    inv.bottom += 4;
+    InvalidateRect(g_state.hwnd, &inv, FALSE);
+}
+
 void ShowOSD(const std::wstring& status) {
     g_state.showOSD = true;
     g_state.osdDisplayTime = GetTickCount();
@@ -1487,7 +1514,7 @@ void ShowOSD(const std::wstring& status) {
         if (!g_state.osdPinned) {
             SetTimer(g_state.hwnd, TIMER_OSD, OSD_MS + 80, nullptr);
         }
-        InvalidateRect(g_state.hwnd, nullptr, FALSE);
+        InvalidateOsdRegion();
     }
 }
 
@@ -2597,7 +2624,53 @@ void RenderEmptyState(Graphics& graphics, const RECT& clientRect) {
                         -1, &hintFont, hintRect, &format, &hintBrush);
 }
 
+// Baldosa de ajedrez en caché (32x32, cuadros de 16) con TextureBrush: pinta el
+// fondo de transparencia con UNA llamada en vez de ~28.000 FillRectangle por
+// fotograma en GDI+. Se reconstruye solo si cambia el tema (colores CHECKER_*).
+static Bitmap* s_checkerTile = nullptr;
+static TextureBrush* s_checkerBrush = nullptr;
+static COLORREF s_checkerCA = 0;
+static COLORREF s_checkerCB = 0;
+
+void FreeCheckerTile() {
+    delete s_checkerBrush;
+    delete s_checkerTile;
+    s_checkerBrush = nullptr;
+    s_checkerTile = nullptr;
+}
+
+void EnsureCheckerTile() {
+    const COLORREF ca = CHECKER_A, cb = CHECKER_B;
+    if (s_checkerBrush && s_checkerCA == ca && s_checkerCB == cb) return;
+    FreeCheckerTile();
+    s_checkerCA = ca;
+    s_checkerCB = cb;
+
+    const int TILE = 32;
+    s_checkerTile = new Bitmap(TILE, TILE, PixelFormat32bppARGB);
+    if (!s_checkerTile || s_checkerTile->GetLastStatus() != Ok) {
+        FreeCheckerTile();
+        return;
+    }
+    for (int y = 0; y < TILE; ++y) {
+        for (int x = 0; x < TILE; ++x) {
+            const COLORREF col = (((x / 16) + (y / 16)) & 1) ? ca : cb;
+            s_checkerTile->SetPixel(x, y, Color(255, GetRValue(col), GetGValue(col), GetBValue(col)));
+        }
+    }
+    s_checkerBrush = new TextureBrush(s_checkerTile, WrapModeTile);
+    if (!s_checkerBrush || s_checkerBrush->GetLastStatus() != Ok) {
+        FreeCheckerTile();
+    }
+}
+
 void DrawCheckerboard(Graphics& g, float x, float y, float w, float h) {
+    EnsureCheckerTile();
+    if (s_checkerBrush) {
+        g.FillRectangle(s_checkerBrush, x, y, w, h);
+        return;
+    }
+    // Respaldo: patrón por rectángulos solo si no se pudo crear la baldosa
     const float tileSize = 16.0f;
     SolidBrush brushA(Color(255, GetRValue(CHECKER_A), GetGValue(CHECKER_A), GetBValue(CHECKER_A)));
     SolidBrush brushB(Color(255, GetRValue(CHECKER_B), GetGValue(CHECKER_B), GetBValue(CHECKER_B)));
@@ -2614,13 +2687,22 @@ void DrawCheckerboard(Graphics& g, float x, float y, float w, float h) {
     }
 }
 
-void RenderImage() {
+void RenderImage(const RECT* clipRect = nullptr) {
     if (!g_state.hdcMem || !g_state.hwnd) return;
     RECT rect{};
     GetClientRect(g_state.hwnd, &rect);
 
     Graphics graphics(g_state.hdcMem);
-    
+
+    // Repintado parcial: solo se re-rasteriza la región sucia (OSD, dock o
+    // hover). El doble buffer conserva el resto del fotograma anterior, así
+    // que el movimiento del ratón ya no vuelve a escalar la foto 4K completa.
+    if (clipRect && clipRect->right > clipRect->left && clipRect->bottom > clipRect->top) {
+        graphics.SetClip(Rect(clipRect->left, clipRect->top,
+                              clipRect->right - clipRect->left,
+                              clipRect->bottom - clipRect->top));
+    }
+
     // Renderizado adaptativo: durante interacción (arrastre o animación de zoom)
     // se usa el modo rápido para mantener 60 FPS; en reposo, máxima calidad.
     const bool interacting = g_state.isDragging || g_state.zoomAnimActive;
@@ -2634,7 +2716,12 @@ void RenderImage() {
         graphics.SetCompositingQuality(CompositingQualityAssumeLinear);
         graphics.SetSmoothingMode(SmoothingModeAntiAlias);
         const bool pixelPerfectZoom = std::fabs(g_state.zoom - std::round(g_state.zoom)) < 0.01f && g_state.zoom >= 1.0f;
-        if (pixelPerfectZoom || g_state.zoom > 3.5f) {
+        if (g_state.zoom < 1.0f) {
+            // Reducción (foto grande ajustada a la ventana): bilineal — al
+            // encoger es visualmente casi idéntica a bicúbica y mucho más ligera.
+            graphics.SetInterpolationMode(InterpolationModeBilinear);
+            graphics.SetPixelOffsetMode(PixelOffsetModeHalf);
+        } else if (pixelPerfectZoom || g_state.zoom > 3.5f) {
             // Píxel perfecto (100%, 200%, etc.) o zoom profundo (> 350%): nitidez cristalina sin borrosidad
             graphics.SetInterpolationMode(InterpolationModeNearestNeighbor);
             graphics.SetPixelOffsetMode(PixelOffsetModeHalf);
@@ -3992,6 +4079,13 @@ void ShowContextMenu(HWND hwnd, int x, int y) {
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     static bool s_trackingMouse = false;
     switch (msg) {
+        case WM_SETCURSOR:
+            // Cursor de mano sobre los botones del dock (solo si está visible)
+            if (LOWORD(lParam) == HTCLIENT && DockShouldShow() && g_state.hudHot != HUD_NONE) {
+                SetCursor(LoadCursorW(nullptr, IDC_HAND));
+                return TRUE;
+            }
+            break;
         case WM_CREATE: {
             g_state.hwnd = hwnd;
             DragAcceptFiles(hwnd, TRUE);
@@ -4062,7 +4156,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 CreateDoubleBuffer(client.right, client.bottom);
             }
             if (g_state.hdcMem) {
-                RenderImage();
+                RenderImage(&ps.rcPaint);
                 BitBlt(hdc, ps.rcPaint.left, ps.rcPaint.top,
                        ps.rcPaint.right - ps.rcPaint.left,
                        ps.rcPaint.bottom - ps.rcPaint.top,
@@ -4166,9 +4260,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 case 'I':
                     if (ctrl) ShowExifDialog(hwnd);
                     else {
+                        // ShowOSD ya repinta solo la banda del OSD
                         g_state.osdPinned = !g_state.osdPinned;
                         ShowOSD(g_state.osdPinned ? L"Info fija" : L"Info auto");
-                        InvalidateRect(hwnd, nullptr, FALSE);
                     }
                     break;
                 case 'F':
@@ -4283,7 +4377,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (distanceFromBottom < DOCK_PROXIMITY_THRESHOLD) {
                 const bool wasHidden = !DockShouldShow();
                 g_state.dockLastActivity = GetTickCount();
-                if (wasHidden) InvalidateRect(hwnd, nullptr, FALSE);
+                if (wasHidden) InvalidateDockRegion();
                 KillTimer(hwnd, TIMER_DOCK_HIDE);
                 SetTimer(hwnd, TIMER_DOCK_HIDE, DOCK_HIDE_MS, nullptr);
             }
@@ -4291,7 +4385,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             const HudId hot = HitTestHud(x, y);
             if (hot != g_state.hudHot) {
                 g_state.hudHot = hot;
-                InvalidateRect(hwnd, nullptr, FALSE);
+                InvalidateDockRegion();
             }
             if (g_state.isDragging) {
                 g_state.offsetX = g_state.dragStartOffsetX + static_cast<float>(x - g_state.dragStartX);
@@ -4306,7 +4400,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             s_trackingMouse = false;
             if (g_state.hudHot != HUD_NONE) {
                 g_state.hudHot = HUD_NONE;
-                InvalidateRect(hwnd, nullptr, FALSE);
+                InvalidateDockRegion();
             }
             return 0;
         }
@@ -4317,7 +4411,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     g_state.statusMessage.clear();
                 }
                 g_state.showOSD = false;
-                InvalidateRect(hwnd, nullptr, FALSE);
+                InvalidateOsdRegion();
             } else if (wParam == TIMER_SLIDESHOW) {
                 NextImage();
             } else if (wParam == TIMER_DOCK_HIDE) {
@@ -4334,7 +4428,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     // puntero vuelva a la franja inferior (equivale a ocultarlo)
                     g_state.dockLastActivity = GetTickCount() - DOCK_HIDE_MS;
                     KillTimer(hwnd, TIMER_DOCK_HIDE);
-                    if (wasVisible) InvalidateRect(hwnd, nullptr, FALSE);
+                    if (wasVisible) InvalidateDockRegion();
                 } else {
                     g_state.dockLastActivity = GetTickCount();
                 }
