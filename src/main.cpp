@@ -35,6 +35,8 @@
 #include <dwmapi.h>
 #include <wincodec.h>
 #include <gdiplus.h>
+#include <d2d1.h>
+#include <dwrite.h>
 #include "../resource.h"
 
 // Bibliotecas estándar de C++
@@ -69,6 +71,8 @@
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "windowscodecs.lib")
 #pragma comment(lib, "comdlg32.lib")
+#pragma comment(lib, "d2d1.lib")
+#pragma comment(lib, "dwrite.lib")
 
 using namespace Gdiplus;
 
@@ -537,6 +541,11 @@ void ZoomAt(float factor, int pivotX, int pivotY);
 void CancelZoomAnimation();
 void DeleteCurrentImage();
 void OpenInExplorer();
+
+// Renderizador GPU (Direct2D): declaraciones usadas antes de su definición
+bool GpuRenderFrame();
+void GpuReleaseAll();
+void GpuShutdown();
 
 static bool SafePixelBytes(int width, int height, size_t& outBytes) {
     if (width <= 0 || height <= 0) return false;
@@ -1301,6 +1310,7 @@ void StopPrefetchThread() {
 }
 
 void CleanupGDIPlus() {
+    GpuShutdown();
     StopPrefetchThread();
     {
         std::lock_guard<std::mutex> lock(g_state.cacheMutex);
@@ -2318,7 +2328,8 @@ void ZoomAt(float factor, int pivotX, int pivotY) {
     g_state.zoomAnimStartOffsetY = g_state.offsetY;
     g_state.zoomAnimStartTime = GetTickCount();
     g_state.zoomAnimActive = true;
-    SetTimer(g_state.hwnd, TIMER_ZOOM, 8, nullptr);
+    // ~60 FPS suaves en el zoom animado (antes 8 ms = hasta 125 FPS innecesarios)
+    SetTimer(g_state.hwnd, TIMER_ZOOM, 16, nullptr);
     InvalidateRect(g_state.hwnd, nullptr, FALSE);
 }
 
@@ -2702,6 +2713,643 @@ void RenderImage() {
     graphics.SetCompositingMode(CompositingModeSourceOver);
 
     RenderHud(graphics, rect);
+}
+
+// ============================================================================
+// Renderizador GPU: Direct2D + DirectWrite
+// ----------------------------------------------------------------------------
+// La escena (foto, tablero de transparencias, OSD, dock y pantalla vacía) se
+// dibuja con Direct2D, que escala/interpola la imagen por hardware (GPU o WARP)
+// a 60 FPS con CPU ~0%. Los efectos (B/N, negativo, claridad) y el premultipli-
+// cado alfa se "hornean" UNA vez por cambio (no por fotograma) en un buffer
+// reutilizable y se suben al bitmap de vídeo solo cuando cambian los píxeles
+// (carga de imagen o avance de fotograma GIF).
+//
+// Si Direct2D no está disponible (Windows antiguo, sin GPU y WARP fallido o
+// pérdida del dispositivo) el programa vuelve al trazador GDI+ clásico. Se
+// puede forzar GDI+ con la variable de entorno ARTPICST_NO_GPU=1.
+// ============================================================================
+
+// Efectos horneables (bitset)
+const int GPUEFF_GRAY = 1;
+const int GPUEFF_INVERT = 2;
+const int GPUEFF_CLARITY = 4;
+
+struct GpuState {
+    bool factoryCreated = false;
+    bool enabled = false;          // target activo y funcionando
+    bool attemptFailed = false;    // se desactivó tras un fallo permanente
+    bool retryRequested = false;   // reintentar tras un cambio de ventana
+
+    ID2D1Factory* factory = nullptr;
+    IDWriteFactory* dwrite = nullptr;
+    ID2D1HwndRenderTarget* target = nullptr;
+
+    // Pinceles (dependen del target y del tema activo)
+    ID2D1SolidColorBrush* brushBg = nullptr;
+    ID2D1SolidColorBrush* brushDockBg = nullptr;
+    ID2D1SolidColorBrush* brushDockBorder = nullptr;
+    ID2D1SolidColorBrush* brushBtnNormal = nullptr;
+    ID2D1SolidColorBrush* brushBtnHot = nullptr;
+    ID2D1SolidColorBrush* brushBtnActive = nullptr;
+    ID2D1SolidColorBrush* brushTextPrimary = nullptr;
+    ID2D1SolidColorBrush* brushTextSecondary = nullptr;
+    ID2D1SolidColorBrush* brushTextOnAccent = nullptr;
+    ID2D1SolidColorBrush* brushShadow = nullptr;
+    ID2D1SolidColorBrush* brushOsdBg = nullptr;
+    ID2D1SolidColorBrush* brushOsdBorder = nullptr;
+
+    // Baldosa de ajedrez y su pincel (patrón repetible en GPU)
+    ID2D1Bitmap* checkerTile = nullptr;
+    ID2D1BitmapBrush* checkerBrush = nullptr;
+
+    // Bitmap de vídeo del fotograma actual + buffer de horneado reutilizable
+    ID2D1Bitmap* image = nullptr;
+    unsigned char* staging = nullptr;
+    size_t stagingBytes = 0;
+
+    int lastUploadW = -1;
+    int lastUploadH = -1;
+    const unsigned char* lastUploadSrc = nullptr;
+    int lastUploadEffects = 0;
+    bool lastUploadAlpha = false;
+    DWORD themeKey = 0;
+
+    // Formatos de texto DirectWrite (solo dependen de la fábrica)
+    IDWriteTextFormat* fmtHud = nullptr;
+    IDWriteTextFormat* fmtOsd = nullptr;
+    IDWriteTextFormat* fmtTitle = nullptr;
+    IDWriteTextFormat* fmtHint = nullptr;
+};
+
+GpuState g_gpu;
+
+static D2D1_COLOR_F GpuColorOf(const Gdiplus::Color& c) {
+    return D2D1::ColorF(c.GetR() / 255.0f, c.GetG() / 255.0f, c.GetB() / 255.0f, c.GetA() / 255.0f);
+}
+
+static D2D1_COLOR_F GpuColorRef(COLORREF c, BYTE alpha = 255) {
+    return D2D1::ColorF(GetRValue(c) / 255.0f, GetGValue(c) / 255.0f, GetBValue(c) / 255.0f, alpha / 255.0f);
+}
+
+static bool GpuTryInitFactory() {
+    if (g_gpu.factoryCreated) return g_gpu.factory != nullptr;
+    g_gpu.factoryCreated = true;
+
+    // Escapatoria: ARTPICST_NO_GPU=1 fuerza el trazador GDI+
+    wchar_t env[8] = {};
+    const DWORD envLen = GetEnvironmentVariableW(L"ARTPICST_NO_GPU", env, 8);
+    if (envLen > 0 && envLen < 8 && env[0] == L'1') {
+        return false; // factoryCreated=true y factory=null: GDI+ queda fijo
+    }
+
+    HRESULT hr = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, IID_ID2D1Factory,
+                                   nullptr, reinterpret_cast<void**>(&g_gpu.factory));
+    if (FAILED(hr) || !g_gpu.factory) {
+        g_gpu.factory = nullptr;
+        return false;
+    }
+    if (FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, IID_IDWriteFactory,
+                                   reinterpret_cast<IUnknown**>(&g_gpu.dwrite))) || !g_gpu.dwrite) {
+        g_gpu.dwrite = nullptr;
+        if (g_gpu.factory) {
+            g_gpu.factory->Release();
+            g_gpu.factory = nullptr;
+        }
+        return false;
+    }
+    return true;
+}
+
+static bool GpuCreateTextFormats() {
+    if (!g_gpu.dwrite) return false;
+    if (g_gpu.fmtHud && g_gpu.fmtOsd && g_gpu.fmtTitle && g_gpu.fmtHint) return true;
+
+    auto makeFormat = [](FLOAT size, DWRITE_FONT_WEIGHT weight, IDWriteTextFormat** out) -> bool {
+        if (*out) return true;
+        IDWriteTextFormat* fmt = nullptr;
+        if (FAILED(g_gpu.dwrite->CreateTextFormat(L"Segoe UI", nullptr, weight,
+                                                  DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+                                                  size, L"es-es", &fmt)) || !fmt) {
+            return false;
+        }
+        fmt->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+        fmt->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        fmt->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+        *out = fmt;
+        return true;
+    };
+
+    bool ok = true;
+    ok = makeFormat(12.0f, DWRITE_FONT_WEIGHT_BOLD, &g_gpu.fmtHud) && ok;
+    ok = makeFormat(14.0f, DWRITE_FONT_WEIGHT_BOLD, &g_gpu.fmtOsd) && ok;
+    ok = makeFormat(36.0f, DWRITE_FONT_WEIGHT_BOLD, &g_gpu.fmtTitle) && ok;
+    ok = makeFormat(14.0f, DWRITE_FONT_WEIGHT_NORMAL, &g_gpu.fmtHint) && ok;
+    if (g_gpu.fmtHint) {
+        // La pista de la pantalla vacía puede envolver en ventanas estrechas
+        g_gpu.fmtHint->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
+    }
+    return ok;
+}
+
+static DWORD GpuThemeKey() {
+    DWORD key = g_state.darkModeDetected ? 1u : 0u;
+    key = key * 31u + static_cast<DWORD>(BG_COLOR);
+    key = key * 31u + static_cast<DWORD>(CHECKER_A);
+    key = key * 31u + static_cast<DWORD>(CHECKER_B);
+    return key;
+}
+
+static void GpuSafeRelease(IUnknown*& ptr) {
+    if (ptr) {
+        ptr->Release();
+        ptr = nullptr;
+    }
+}
+
+// Libera todo lo que depende del target (pinceles, bitmap de imagen, ajedrez)
+static void GpuReleaseTargetAssets() {
+    GpuSafeRelease(g_gpu.checkerBrush);
+    GpuSafeRelease(g_gpu.checkerTile);
+    GpuSafeRelease(g_gpu.image);
+    GpuSafeRelease(g_gpu.brushOsdBorder);
+    GpuSafeRelease(g_gpu.brushOsdBg);
+    GpuSafeRelease(g_gpu.brushShadow);
+    GpuSafeRelease(g_gpu.brushTextOnAccent);
+    GpuSafeRelease(g_gpu.brushTextSecondary);
+    GpuSafeRelease(g_gpu.brushTextPrimary);
+    GpuSafeRelease(g_gpu.brushBtnActive);
+    GpuSafeRelease(g_gpu.brushBtnHot);
+    GpuSafeRelease(g_gpu.brushBtnNormal);
+    GpuSafeRelease(g_gpu.brushDockBorder);
+    GpuSafeRelease(g_gpu.brushDockBg);
+    GpuSafeRelease(g_gpu.brushBg);
+    g_gpu.lastUploadW = -1;
+    g_gpu.lastUploadH = -1;
+    g_gpu.lastUploadSrc = nullptr;
+    g_gpu.lastUploadEffects = 0;
+    g_gpu.lastUploadAlpha = false;
+    g_gpu.themeKey = 0;
+}
+
+void GpuReleaseAll() {
+    GpuReleaseTargetAssets();
+    if (g_gpu.target) {
+        g_gpu.target->Release();
+        g_gpu.target = nullptr;
+    }
+    g_gpu.enabled = false;
+}
+
+void GpuShutdown() {
+    GpuReleaseAll();
+    if (g_gpu.staging) {
+        free(g_gpu.staging);
+        g_gpu.staging = nullptr;
+        g_gpu.stagingBytes = 0;
+    }
+    GpuSafeRelease(g_gpu.fmtHint);
+    GpuSafeRelease(g_gpu.fmtTitle);
+    GpuSafeRelease(g_gpu.fmtOsd);
+    GpuSafeRelease(g_gpu.fmtHud);
+    if (g_gpu.dwrite) {
+        g_gpu.dwrite->Release();
+        g_gpu.dwrite = nullptr;
+    }
+    if (g_gpu.factory) {
+        g_gpu.factory->Release();
+        g_gpu.factory = nullptr;
+    }
+    g_gpu.enabled = false;
+    g_gpu.factoryCreated = false;
+    g_gpu.attemptFailed = false;
+}
+
+// (Re)crea el render target del tamaño del cliente. Devuelve true si quedó listo.
+static bool GpuEnsureTarget() {
+    if (!g_gpu.factory || !g_state.hwnd) return false;
+
+    RECT client{};
+    GetClientRect(g_state.hwnd, &client);
+    const UINT w = static_cast<UINT>(std::max(0L, client.right - client.left));
+    const UINT h = static_cast<UINT>(std::max(0L, client.bottom - client.top));
+    if (w == 0 || h == 0) return false;
+
+    D2D1_SIZE_U size = D2D1::SizeU(w, h);
+    if (g_gpu.target) {
+        const D2D1_SIZE_U cur = g_gpu.target->GetPixelSize();
+        if (cur.width == w && cur.height == h) return true;
+        GpuReleaseAll(); // cambió el tamaño: recrear en el siguiente intento
+    }
+
+    D2D1_RENDER_TARGET_PROPERTIES rtProps = D2D1::RenderTargetProperties(
+        D2D1_RENDER_TARGET_TYPE_HARDWARE,
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE),
+        96.0f, 96.0f,                       // 1 unidad D2D = 1 píxel (DPIs fijos)
+        D2D1_RENDER_TARGET_USAGE_NONE,
+        D2D1_FEATURE_LEVEL_DEFAULT);
+
+    HRESULT hr = g_gpu.factory->CreateHwndRenderTarget(
+        rtProps,
+        D2D1::HwndRenderTargetProperties(g_state.hwnd, size, D2D1_PRESENT_OPTIONS_NONE),
+        &g_gpu.target);
+    if (FAILED(hr) || !g_gpu.target) {
+        g_gpu.target = nullptr;
+        return false;
+    }
+    g_gpu.target->SetDpi(96.0f, 96.0f); // coordenadas = píxeles físicos
+    return true;
+}
+
+// Crea pinceles y el patrón de ajedrez para el tema activo
+static bool GpuEnsureThemeAssets() {
+    if (!g_gpu.target) return false;
+    const DWORD key = GpuThemeKey();
+    if (g_gpu.brushBg && g_gpu.themeKey == key) return true;
+
+    GpuReleaseTargetAssets();
+    g_gpu.themeKey = key;
+
+    const bool dark = g_state.darkModeDetected;
+    ID2D1RenderTarget* rt = g_gpu.target;
+
+    auto solid = [rt](const D2D1_COLOR_F& color, ID2D1SolidColorBrush** out) -> bool {
+        if (*out) return true;
+        return SUCCEEDED(rt->CreateSolidColorBrush(color, out));
+    };
+
+    const Color dockBg = dark ? GLASS_DOCK_BG_DARK : GLASS_DOCK_BG_LIGHT;
+    const Color dockBorder = dark ? GLASS_DOCK_BORDER_DARK : GLASS_DOCK_BORDER_LIGHT;
+    const Color btnNormal = dark ? GLASS_BTN_NORMAL_DARK : GLASS_BTN_NORMAL_LIGHT;
+    const Color btnHot = dark ? GLASS_BTN_HOT_DARK : GLASS_BTN_HOT_LIGHT;
+    const Color btnActive = dark ? GLASS_BTN_ACTIVE_DARK : GLASS_BTN_ACTIVE_LIGHT;
+    const Color shadow = dark ? GLASS_DOCK_SHADOW_DARK : GLASS_DOCK_SHADOW_LIGHT;
+    const Color osdBg = dark ? Color(245, 24, 25, 30) : Color(245, 255, 255, 255);
+    const Color osdBorder = dark ? Color(255, 60, 62, 74) : Color(255, 210, 214, 222);
+    const Color textPrimary = dark ? Color(255, 230, 235, 242) : Color(255, 30, 32, 38);
+    const Color textSecondary = dark ? Color(255, 165, 175, 190) : Color(255, 105, 113, 125);
+
+    bool ok = true;
+    ok = solid(GpuColorRef(BG_COLOR), &g_gpu.brushBg) && ok;
+    ok = solid(GpuColorOf(dockBg), &g_gpu.brushDockBg) && ok;
+    ok = solid(GpuColorOf(dockBorder), &g_gpu.brushDockBorder) && ok;
+    ok = solid(GpuColorOf(btnNormal), &g_gpu.brushBtnNormal) && ok;
+    ok = solid(GpuColorOf(btnHot), &g_gpu.brushBtnHot) && ok;
+    ok = solid(GpuColorOf(btnActive), &g_gpu.brushBtnActive) && ok;
+    ok = solid(GpuColorOf(textPrimary), &g_gpu.brushTextPrimary) && ok;
+    ok = solid(GpuColorOf(textSecondary), &g_gpu.brushTextSecondary) && ok;
+    ok = solid(D2D1::ColorF(1.0f, 1.0f, 1.0f, 1.0f), &g_gpu.brushTextOnAccent) && ok;
+    ok = solid(GpuColorOf(shadow), &g_gpu.brushShadow) && ok;
+    ok = solid(GpuColorOf(osdBg), &g_gpu.brushOsdBg) && ok;
+    ok = solid(GpuColorOf(osdBorder), &g_gpu.brushOsdBorder) && ok;
+
+    // Baldosa de ajedrez 32x32 (cuadros de 16) con los colores del tema
+    const int TILE = 32;
+    std::vector<unsigned char> tile(static_cast<size_t>(TILE) * TILE * 4);
+    const COLORREF ca = CHECKER_A;
+    const COLORREF cb = CHECKER_B;
+    for (int y = 0; y < TILE; ++y) {
+        for (int x = 0; x < TILE; ++x) {
+            const COLORREF col = (((x / 16) + (y / 16)) & 1) ? cb : ca;
+            unsigned char* px = tile.data() + (static_cast<size_t>(y) * TILE + static_cast<size_t>(x)) * 4;
+            px[0] = GetBValue(col);
+            px[1] = GetGValue(col);
+            px[2] = GetRValue(col);
+            px[3] = 255;
+        }
+    }
+    if (SUCCEEDED(rt->CreateBitmap(D2D1::SizeU(TILE, TILE), tile.data(), TILE * 4,
+                                   D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
+                                                                           D2D1_ALPHA_MODE_PREMULTIPLIED)),
+                                   &g_gpu.checkerTile))) {
+        D2D1_BITMAP_BRUSH_PROPERTIES bmpProps = D2D1::BitmapBrushProperties(
+            D2D1_EXTEND_MODE_WRAP, D2D1_EXTEND_MODE_WRAP, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR);
+        rt->CreateBitmapBrush(g_gpu.checkerTile, bmpProps, D2D1::BrushProperties(), &g_gpu.checkerBrush);
+    }
+
+    if (!ok) {
+        GpuReleaseAll();
+        return false;
+    }
+    return true;
+}
+
+// Hornea efectos + premultiplicación alfa en el buffer reutilizable (g_gpu.staging)
+static unsigned char* GpuBakePixels(unsigned char* src, int w, int h, bool hasAlpha, int effects) {
+    const size_t bytes = static_cast<size_t>(w) * static_cast<size_t>(h) * 4u;
+    if (bytes > g_gpu.stagingBytes) {
+        unsigned char* bigger = static_cast<unsigned char*>(realloc(g_gpu.staging, bytes));
+        if (!bigger) return nullptr;
+        g_gpu.staging = bigger;
+        g_gpu.stagingBytes = bytes;
+    }
+    unsigned char* dst = g_gpu.staging;
+
+    for (int y = 0; y < h; ++y) {
+        const unsigned char* in = src + static_cast<size_t>(y) * static_cast<size_t>(w) * 4u;
+        unsigned char* out = dst + static_cast<size_t>(y) * static_cast<size_t>(w) * 4u;
+        for (int x = 0; x < w; ++x) {
+            const size_t idx = (static_cast<size_t>(x)) * 4u;
+            const unsigned char* p = in + idx;
+            unsigned char* q = out + idx;
+            int b = p[0], g = p[1], r = p[2];
+            const int a = p[3];
+
+            // Efectos en espacio de color (sin alfa): mismo resultado que las
+            // matrices GDI+ anteriores, horneado solo cuando cambia el estado.
+            if (effects & GPUEFF_GRAY) {
+                const int lum = (299 * r + 587 * g + 114 * b) / 1000;
+                b = g = r = lum;
+            } else if (effects & GPUEFF_INVERT) {
+                b = 255 - b; g = 255 - g; r = 255 - r;
+            } else if (effects & GPUEFF_CLARITY) {
+                const auto conv = [](int v) -> int {
+                    float f = 128.0f + (static_cast<float>(v) - 128.0f) * 1.12f;
+                    if (f < 0.0f) f = 0.0f;
+                    if (f > 255.0f) f = 255.0f;
+                    return static_cast<int>(f + 0.5f);
+                };
+                b = conv(b); g = conv(g); r = conv(r);
+            }
+
+            if (hasAlpha && a != 255) {
+                // Direct2D requiere alfa premultiplicado
+                q[0] = static_cast<unsigned char>((b * a + 127) / 255);
+                q[1] = static_cast<unsigned char>((g * a + 127) / 255);
+                q[2] = static_cast<unsigned char>((r * a + 127) / 255);
+                q[3] = static_cast<unsigned char>(a);
+            } else {
+                q[0] = static_cast<unsigned char>(b);
+                q[1] = static_cast<unsigned char>(g);
+                q[2] = static_cast<unsigned char>(r);
+                q[3] = static_cast<unsigned char>(a);
+            }
+        }
+    }
+    return dst;
+}
+
+// Sube (o actualiza) el bitmap del fotograma actual solo cuando cambia algo
+static bool GpuUpdateImage() {
+    if (!g_gpu.target) return false;
+    if (!g_state.imageData) {
+        GpuSafeRelease(g_gpu.image);
+        return true;
+    }
+
+    unsigned char* src = g_state.imageData;
+    if (g_state.gif.animated()) {
+        unsigned char* frame = g_state.gif.currentFramePixels();
+        if (frame) src = frame;
+    }
+
+    const int w = g_state.imageWidth;
+    const int h = g_state.imageHeight;
+    if (w <= 0 || h <= 0) return false;
+
+    const int effects = (g_state.effectGrayscale ? GPUEFF_GRAY : 0) |
+                        (g_state.effectInvert ? GPUEFF_INVERT : 0) |
+                        (g_state.effectUltraClarity ? GPUEFF_CLARITY : 0);
+    const bool alpha = g_state.hasAlpha;
+
+    if (g_gpu.image && w == g_gpu.lastUploadW && h == g_gpu.lastUploadH &&
+        src == g_gpu.lastUploadSrc && effects == g_gpu.lastUploadEffects &&
+        alpha == g_gpu.lastUploadAlpha) {
+        return true; // nada cambió: el bitmap de vídeo sigue siendo válido
+    }
+
+    // ¿Hay que transformar píxeles? Solo si hay efecto o transparencia real.
+    unsigned char* uploadSrc = src;
+    if (effects != 0 || alpha) {
+        uploadSrc = GpuBakePixels(src, w, h, alpha, effects);
+        if (!uploadSrc) return false;
+    }
+
+    const UINT stride = static_cast<UINT>(w) * 4u;
+    D2D1_SIZE_U size = D2D1::SizeU(static_cast<UINT>(w), static_cast<UINT>(h));
+    if (!g_gpu.image) {
+        HRESULT hr = g_gpu.target->CreateBitmap(
+            size, uploadSrc, stride,
+            D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
+                                                     D2D1_ALPHA_MODE_PREMULTIPLIED)),
+            &g_gpu.image);
+        if (FAILED(hr) || !g_gpu.image) {
+            g_gpu.image = nullptr;
+            return false;
+        }
+    } else if (w != g_gpu.lastUploadW || h != g_gpu.lastUploadH) {
+        GpuSafeRelease(g_gpu.image);
+        HRESULT hr = g_gpu.target->CreateBitmap(
+            size, uploadSrc, stride,
+            D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
+                                                     D2D1_ALPHA_MODE_PREMULTIPLIED)),
+            &g_gpu.image);
+        if (FAILED(hr) || !g_gpu.image) {
+            g_gpu.image = nullptr;
+            return false;
+        }
+    } else {
+        // Mismo tamaño: actualizar el contenido (fotogramas GIF, efectos)
+        if (FAILED(g_gpu.image->CopyFromMemory(nullptr, uploadSrc, stride))) {
+            return false;
+        }
+    }
+
+    g_gpu.lastUploadW = w;
+    g_gpu.lastUploadH = h;
+    g_gpu.lastUploadSrc = src;
+    g_gpu.lastUploadEffects = effects;
+    g_gpu.lastUploadAlpha = alpha;
+
+    // El buffer de horneado solo hace falta mientras haya GIF animado (se sube
+    // un fotograma cada vez); en el resto, liberarlo para no retener RAM.
+    if (!g_state.gif.animated() && g_gpu.staging) {
+        free(g_gpu.staging);
+        g_gpu.staging = nullptr;
+        g_gpu.stagingBytes = 0;
+    }
+    return true;
+}
+
+static void GpuDrawRoundedRect(ID2D1RenderTarget* rt, const D2D1_RECT_F& rc, float radius,
+                               ID2D1Brush* fill, ID2D1Brush* border, float borderWidth = 1.0f) {
+    D2D1_ROUNDED_RECT rr = D2D1::RoundedRect(rc, radius, radius);
+    if (fill) rt->FillRoundedRectangle(rr, fill);
+    if (border && borderWidth > 0.0f) rt->DrawRoundedRectangle(rr, border, borderWidth);
+}
+
+static void GpuDrawText(ID2D1RenderTarget* rt, const wchar_t* text, IDWriteTextFormat* fmt,
+                        const D2D1_RECT_F& rc, ID2D1Brush* brush) {
+    if (!text || !*text || !fmt || !brush) return;
+    // Forma de puntero explícito (válida en SDK MSVC y MinGW por igual)
+    rt->DrawText(text, static_cast<UINT32>(wcslen(text)), fmt, &rc, brush,
+                 D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+}
+
+// Dibuja el fotograma actual con su transformación (zoom, rotación, volteos)
+static void GpuDrawImage(ID2D1RenderTarget* rt) {
+    if (!g_gpu.image) return;
+
+    int boxW = 0, boxH = 0;
+    DisplaySize(boxW, boxH);
+    const float zoom = g_state.zoom;
+    const float destW = static_cast<float>(boxW) * zoom;
+    const float destH = static_cast<float>(boxH) * zoom;
+
+    // Centro en pantalla (respetando el desplazamiento del pan) y centro local
+    const float centerX = g_state.offsetX + destW * 0.5f;
+    const float centerY = g_state.offsetY + destH * 0.5f;
+    const float localCx = static_cast<float>(g_state.imageWidth) * zoom * 0.5f;
+    const float localCy = static_cast<float>(g_state.imageHeight) * zoom * 0.5f;
+
+    // Misma composición que el trazador GDI+: T(centro) * R * F * T(-centro local)
+    const D2D1_MATRIX_3X2_F m =
+        D2D1::Matrix3x2F::Translation(centerX, centerY) *
+        D2D1::Matrix3x2F::Rotation(static_cast<float>(g_state.currentRotation)) *
+        D2D1::Matrix3x2F::Scale(g_state.currentFlipH ? -1.0f : 1.0f,
+                                g_state.currentFlipV ? -1.0f : 1.0f) *
+        D2D1::Matrix3x2F::Translation(-localCx, -localCy);
+    rt->SetTransform(m);
+
+    const D2D1_RECT_F dst = D2D1::RectF(0.0f, 0.0f,
+                                        static_cast<float>(g_state.imageWidth) * zoom,
+                                        static_cast<float>(g_state.imageHeight) * zoom);
+
+    // Tablero de ajedrez detrás de imágenes con transparencia
+    if (g_state.hasAlpha && g_gpu.checkerBrush) {
+        rt->FillRectangle(dst, g_gpu.checkerBrush);
+    }
+
+    // Interpolación: vecino más próximo a 100%/200%/… y en zooms profundos;
+    // bilineal (GPU) para el resto, con bloqueos al mínimo en reposo.
+    const bool pixelPerfect = std::fabs(zoom - std::round(zoom)) < 0.01f && zoom >= 1.0f;
+    const D2D1_BITMAP_INTERPOLATION_MODE interp =
+        (pixelPerfect || zoom > 3.5f) ? D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR
+                                      : D2D1_BITMAP_INTERPOLATION_MODE_LINEAR;
+    // Forma de puntero: la sobrecarga con referencia de DrawBitmap no admite el
+    // parámetro perspectiveTransform (6.º), así que se pasa &dst explícito.
+    rt->DrawBitmap(g_gpu.image, &dst, 1.0f, interp, nullptr, nullptr);
+    rt->SetTransform(D2D1::Matrix3x2F::Identity());
+}
+
+static void GpuDrawEmptyState(ID2D1RenderTarget* rt, const RECT& client) {
+    if (!g_gpu.fmtTitle || !g_gpu.fmtHint) return;
+    const float h = static_cast<float>(client.bottom);
+    const float w = static_cast<float>(client.right);
+    const D2D1_RECT_F titleRc = D2D1::RectF(0.0f, h * 0.38f - 30.0f, w, h * 0.38f + 20.0f);
+    const D2D1_RECT_F hintRc = D2D1::RectF(0.0f, h * 0.38f + 25.0f, w, h * 0.38f + 65.0f);
+    GpuDrawText(rt, L"ARTPICST", g_gpu.fmtTitle, titleRc, g_gpu.brushTextPrimary);
+    GpuDrawText(rt,
+                L"Arrastre una imagen aquí  ·  Ctrl + O para abrir  ·  F11 pantalla completa  ·  F1 para ayuda",
+                g_gpu.fmtHint, hintRc, g_gpu.brushTextSecondary);
+}
+
+static void GpuDrawOsd(ID2D1RenderTarget* rt, const RECT& client) {
+    if (!g_gpu.fmtOsd || g_state.statusMessage.empty()) return;
+    if (!g_state.osdPinned && GetTickCount() - g_state.osdDisplayTime >= OSD_MS) return;
+
+    const std::wstring& msg = g_state.statusMessage;
+    const float textW = static_cast<float>(msg.size()) * 8.2f + 40.0f;
+    const float w = std::max(80.0f, std::min(textW, static_cast<float>(client.right) - 20.0f));
+    const float h = 32.0f;
+    const float x = (static_cast<float>(client.right) - w) * 0.5f;
+    const float y = 14.0f;
+    const D2D1_RECT_F rc = D2D1::RectF(x, y, x + w, y + h);
+    GpuDrawRoundedRect(rt, rc, 8.0f, g_gpu.brushOsdBg, g_gpu.brushOsdBorder);
+    GpuDrawText(rt, msg.c_str(), g_gpu.fmtOsd, rc, g_gpu.brushTextPrimary);
+}
+
+static void GpuDrawDock(ID2D1RenderTarget* rt, const RECT& client) {
+    if (g_state.isDragging || !DockShouldShow() || !g_gpu.fmtHud) return;
+
+    LayoutHud(client);
+    const float left = static_cast<float>(g_state.dockRect.left);
+    const float top = static_cast<float>(g_state.dockRect.top);
+    const float width = static_cast<float>(g_state.dockRect.right - g_state.dockRect.left);
+    const float height = static_cast<float>(g_state.dockRect.bottom - g_state.dockRect.top);
+
+    // Sombra suave
+    const D2D1_RECT_F shadowRc = D2D1::RectF(left, top + 2.0f, left + width, top + height + 2.0f);
+    GpuDrawRoundedRect(rt, shadowRc, 10.0f, g_gpu.brushShadow, nullptr);
+
+    // Fondo y borde
+    const D2D1_RECT_F dockRc = D2D1::RectF(left, top, left + width, top + height);
+    GpuDrawRoundedRect(rt, dockRc, 10.0f, g_gpu.brushDockBg, g_gpu.brushDockBorder);
+
+    for (int i = 0; i < g_state.hudCount; ++i) {
+        const HudItem& item = g_state.hud[i];
+        const bool hot = (item.id == g_state.hudHot);
+        const bool active = (item.id == HUD_CLARITY && g_state.effectUltraClarity);
+        const D2D1_RECT_F rc = D2D1::RectF(static_cast<float>(item.rc.left),
+                                           static_cast<float>(item.rc.top),
+                                           static_cast<float>(item.rc.right),
+                                           static_cast<float>(item.rc.bottom));
+
+        ID2D1SolidColorBrush* fill = nullptr;
+        if (active) {
+            fill = g_gpu.brushBtnActive;
+        } else if (hot) {
+            fill = g_gpu.brushBtnHot;
+        } else {
+            fill = g_gpu.brushBtnNormal;
+        }
+        const bool accent = hot || active;
+        GpuDrawRoundedRect(rt, rc, 6.0f, fill, accent ? g_gpu.brushBtnActive : g_gpu.brushDockBorder, accent ? 1.2f : 1.0f);
+        GpuDrawText(rt, item.label, g_gpu.fmtHud, rc, accent ? g_gpu.brushTextOnAccent : g_gpu.brushTextPrimary);
+    }
+}
+
+// Dibuja la escena completa por GPU. Devuelve false si hay que usar GDI+.
+bool GpuRenderFrame() {
+    if (g_gpu.attemptFailed && !g_gpu.retryRequested) return false;
+    if (!GpuTryInitFactory()) return false;
+    if (!g_gpu.factory) return false;
+    g_gpu.retryRequested = false;
+
+    if (!GpuEnsureTarget()) return false;
+    if (!GpuCreateTextFormats()) return false;
+    if (!GpuEnsureThemeAssets()) return false;
+    if (!GpuUpdateImage()) return false;
+
+    ID2D1RenderTarget* rt = g_gpu.target;
+    RECT client{};
+    GetClientRect(g_state.hwnd, &client);
+    const float cw = static_cast<float>(client.right - client.left);
+    const float ch = static_cast<float>(client.bottom - client.top);
+    if (cw <= 0.0f || ch <= 0.0f) return false;
+
+    rt->BeginDraw();
+
+    // Fondo
+    const D2D1_RECT_F bg = D2D1::RectF(0.0f, 0.0f, cw, ch);
+    rt->FillRectangle(bg, g_gpu.brushBg);
+
+    if (g_state.imageData && g_gpu.image) {
+        GpuDrawImage(rt);
+    } else {
+        GpuDrawEmptyState(rt, client);
+    }
+
+    GpuDrawOsd(rt, client);
+    GpuDrawDock(rt, client);
+
+    HRESULT hr = rt->EndDraw();
+    if (hr == D2DERR_RECREATE_TARGET) {
+        GpuReleaseAll();
+        g_gpu.attemptFailed = true;
+        return false;
+    }
+    if (FAILED(hr)) {
+        GpuReleaseAll();
+        return false;
+    }
+
+    if (!g_gpu.enabled) {
+        g_gpu.enabled = true;
+        // GPU operativo: liberar el doble buffer GDI+ (~8 MB) que ya no se usa
+        FreeDoubleBuffer();
+    }
+    return true;
 }
 
 int GetEncoderClsid(const WCHAR* format, CLSID* pClsid) {
@@ -3325,13 +3973,20 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_SIZE: {
             if (wParam == SIZE_MINIMIZED) {
                 CancelZoomAnimation();
+                GpuReleaseAll(); // liberar recursos de vídeo al minimizar
                 FreeDoubleBuffer();
                 TrimProcessMemory();
                 return 0;
             }
+            g_gpu.retryRequested = true; // nuevo tamaño: reintentar GPU si falló
             const int width = LOWORD(lParam);
             const int height = HIWORD(lParam);
-            CreateDoubleBuffer(width, height);
+            if (g_gpu.enabled) {
+                // GPU activo: no se usa el doble buffer GDI+ (ahorra ~8 MB de RAM)
+                FreeDoubleBuffer();
+            } else {
+                CreateDoubleBuffer(width, height);
+            }
             if (g_state.imageData && width > 0 && height > 0) {
                 if (g_state.fitMode) FitImageToWindow(width, height);
                 else EnsureImageVisible();
@@ -3357,6 +4012,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_PAINT: {
             PAINTSTRUCT ps{};
             HDC hdc = BeginPaint(hwnd, &ps);
+            
+            // Trazado GPU (Direct2D): si funciona, toda la escena se dibuja por
+            // hardware (60 FPS, CPU ~0%) y no se usa el buffer GDI+.
+            if (GpuRenderFrame()) {
+                EndPaint(hwnd, &ps);
+                return 0;
+            }
+            
             if (!g_state.hdcMem) {
                 RECT client{};
                 GetClientRect(hwnd, &client);
@@ -3698,6 +4361,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
         }
         case WM_DESTROY:
+            GpuShutdown();
             KillTimer(hwnd, TIMER_OSD);
             KillTimer(hwnd, TIMER_SLIDESHOW);
             KillTimer(hwnd, TIMER_DOCK_HIDE);

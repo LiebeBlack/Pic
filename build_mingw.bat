@@ -37,7 +37,7 @@ if %ERRORLEVEL% EQU 0 (
         echo Warning: windres failed, building without icon/version resources
     )
 )
-g++ -std=c++17 -O2 -static -static-libgcc -static-libstdc++ -municode -DUNICODE -D_UNICODE -DNOMINMAX -DWIN32_LEAN_AND_MEAN -DSTBI_WINDOWS_UTF8 -D_WIN32_WINNT=0x0601 -I. -Iinclude -o build\artpicst.exe src\main.cpp %RES_OBJ% -lgdiplus -luser32 -lkernel32 -lshell32 -lshlwapi -lgdi32 -lmsimg32 -lole32 -loleaut32 -luuid -ldwmapi -lwindowscodecs -lcomdlg32 -mwindows
+g++ -std=c++17 -O2 -static -static-libgcc -static-libstdc++ -municode -DUNICODE -D_UNICODE -DNOMINMAX -DWIN32_LEAN_AND_MEAN -DSTBI_WINDOWS_UTF8 -D_WIN32_WINNT=0x0601 -I. -Iinclude -o build\artpicst.exe src\main.cpp %RES_OBJ% -lgdiplus -luser32 -lkernel32 -lshell32 -lshlwapi -lgdi32 -lmsimg32 -lole32 -loleaut32 -luuid -ldwmapi -lwindowscodecs -lcomdlg32 -ld2d1 -ldwrite -mwindows
 
 if %ERRORLEVEL% NEQ 0 (
     echo Error building main program

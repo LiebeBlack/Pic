@@ -48,7 +48,7 @@ if(WIN32)
         _WIN32_WINNT=0x0601
     )
     target_link_libraries(artpicst PRIVATE
-        gdiplus user32 kernel32 shell32 shlwapi gdi32 msimg32 ole32 oleaut32 uuid dwmapi windowscodecs comdlg32
+        gdiplus user32 kernel32 shell32 shlwapi gdi32 msimg32 ole32 oleaut32 uuid dwmapi windowscodecs comdlg32 d2d1 dwrite
     )
     target_link_libraries(artpicst_installer PRIVATE
         gdiplus shlwapi shell32 comctl32 dwmapi user32 advapi32 gdi32 ole32 uuid
