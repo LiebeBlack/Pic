@@ -1,0 +1,652 @@
+<!DOCTYPE html>
+<html lang="es" data-theme="auto">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ARTPICST — Visor de imágenes premium para Windows</title>
+<meta name="description" content="ARTPICST: visor de imágenes nativo premium para Windows 10/11. Renderizado GPU, calidad de zoom perfecta, consumo ultra-ligero (RAM ≤ 80 MB) y asistente de instalación moderno.">
+<link rel="icon" href="../resources/artpicst.ico">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="ARTPICST">
+<meta property="og:title" content="ARTPICST — Visor de imágenes premium para Windows">
+<meta property="og:description" content="Visor de imágenes nativo y ultraligero: renderizado GPU, zoom píxel-perfecto, 30+ formatos y RAM ≤ 80 MB.">
+<meta property="og:url" content="https://github.com/LiebeBlack/Pic">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="ARTPICST — Visor de imágenes premium para Windows">
+<meta name="twitter:description" content="Visor de imágenes nativo y ultraligero: renderizado GPU, zoom píxel-perfecto, 30+ formatos y RAM ≤ 80 MB.">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "ARTPICST",
+  "operatingSystem": "Windows 10, Windows 11",
+  "applicationCategory": "MultimediaApplication",
+  "softwareVersion": "1.2.0",
+  "description": "Visor de imágenes nativo premium para Windows: renderizado GPU Direct2D, zoom píxel-perfecto, más de 30 formatos y consumo ultra-ligero.",
+  "url": "https://github.com/LiebeBlack/Pic"
+}
+</script>
+<style>
+  /* ============ Paleta (consistente con la app y el instalador) ============ */
+  :root{
+    --acc-a:#2F7CF6; --acc-b:#825CF6;
+    --bg:#0B0E15; --bg2:#080A0F; --panel:#121724; --panel2:#171D2D;
+    --border:#232B3E; --border2:#2E3A55;
+    --text:#E9EDF5; --text-soft:#AAB4C8; --text-dim:#7C879C;
+    --shadow:0 10px 40px rgba(0,0,0,.45);
+    --code-bg:#0A0D15;
+    --grad:linear-gradient(135deg,var(--acc-a),var(--acc-b));
+  }
+  [data-theme="light"]{
+    --bg:#F4F6FB; --bg2:#E9EDF6; --panel:#FFFFFF; --panel2:#F6F8FD;
+    --border:#D9DFEC; --border2:#C6CFE2;
+    --text:#18202F; --text-soft:#46536B; --text-dim:#75829A;
+    --shadow:0 10px 30px rgba(30,50,90,.10);
+    --code-bg:#F1F4FA;
+  }
+  @media (prefers-reduced-motion: reduce){
+    *,*::before,*::after{animation:none !important; transition:none !important; scroll-behavior:auto !important;}
+  }
+  *{box-sizing:border-box; margin:0; padding:0;}
+  html{scroll-behavior:smooth;}
+  body{
+    font-family:"Segoe UI",system-ui,-apple-system,Roboto,sans-serif;
+    background:var(--bg); color:var(--text); line-height:1.6;
+    transition:background .3s ease,color .3s ease;
+    overflow-x:hidden;
+  }
+  ::selection{background:rgba(47,124,246,.35);}
+  a{color:var(--acc-a); text-decoration:none;}
+  a:hover{text-decoration:underline;}
+  .wrap{max-width:1080px; margin:0 auto; padding:0 24px;}
+  .grad-text{background:var(--grad); -webkit-background-clip:text; background-clip:text; color:transparent;}
+  .btn{
+    display:inline-flex; align-items:center; gap:10px; padding:13px 26px; border-radius:12px;
+    font-weight:600; font-size:15px; cursor:pointer; border:1px solid transparent;
+    transition:transform .15s ease, box-shadow .2s ease, filter .2s ease;
+  }
+  .btn:hover{transform:translateY(-2px); text-decoration:none;}
+  .btn-primary{background:var(--grad); color:#fff; box-shadow:0 6px 20px rgba(47,124,246,.35);}
+  .btn-primary:hover{filter:brightness(1.08); box-shadow:0 10px 28px rgba(47,124,246,.45);}
+  .btn-ghost{background:transparent; border-color:var(--border2); color:var(--text);}
+  .btn-ghost:hover{background:var(--panel2);}
+
+  /* ============ Barra superior ============ */
+  header.nav{
+    position:sticky; top:0; z-index:50;
+    background:color-mix(in srgb, var(--bg) 82%, transparent);
+    backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px);
+    border-bottom:1px solid var(--border);
+  }
+  .nav-inner{display:flex; align-items:center; gap:22px; height:62px;}
+  .brand{display:flex; align-items:center; gap:11px; font-weight:700; font-size:17px; letter-spacing:.2px; color:var(--text);}
+  .brand:hover{text-decoration:none;}
+  .logo-tile{
+    width:34px; height:34px; border-radius:9px; background:var(--grad);
+    display:grid; place-items:center; color:#fff; font-weight:800; font-size:18px;
+    box-shadow:0 3px 12px rgba(47,124,246,.4);
+  }
+  .nav-links{display:flex; gap:20px; margin-left:auto;}
+  .nav-links a{color:var(--text-soft); font-size:14.5px; font-weight:500;}
+  .nav-links a:hover{color:var(--text); text-decoration:none;}
+  .nav-links a.active{color:var(--acc-a);}
+  #themeBtn{
+    background:var(--panel); border:1px solid var(--border2); color:var(--text);
+    width:38px; height:38px; border-radius:10px; cursor:pointer; font-size:16px;
+    display:grid; place-items:center; transition:background .2s;
+  }
+  #themeBtn:hover{background:var(--panel2);}
+
+  /* ============ Hero ============ */
+  .hero{position:relative; padding:96px 0 78px; overflow:hidden;}
+  .hero::before{
+    content:""; position:absolute; inset:0; pointer-events:none;
+    background:
+      radial-gradient(600px 320px at 15% 0%, rgba(47,124,246,.16), transparent 65%),
+      radial-gradient(700px 380px at 88% 12%, rgba(130,92,246,.14), transparent 65%);
+  }
+  .hero::after{
+    content:""; position:absolute; inset:0; pointer-events:none;
+    background-image:
+      linear-gradient(rgba(140,160,210,.06) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(140,160,210,.06) 1px, transparent 1px);
+    background-size:42px 42px;
+    -webkit-mask-image:radial-gradient(700px 420px at 50% 0%, #000 35%, transparent 78%);
+    mask-image:radial-gradient(700px 420px at 50% 0%, #000 35%, transparent 78%);
+  }
+  .hero-badge{
+    display:inline-flex; align-items:center; gap:8px; padding:7px 15px; border-radius:999px;
+    background:var(--panel); border:1px solid var(--border2);
+    font-size:13px; color:var(--text-soft); font-weight:600; margin-bottom:22px;
+  }
+  .hero-badge .dot{width:8px; height:8px; border-radius:50%; background:var(--grad); box-shadow:0 0 10px rgba(130,92,246,.8);}
+  .hero h1{font-size:clamp(38px,6vw,62px); font-weight:800; line-height:1.08; letter-spacing:-1px;}
+  .hero .tagline{margin:18px 0 30px; font-size:clamp(16px,2vw,19px); color:var(--text-soft); max-width:640px;}
+  .hero-actions{display:flex; gap:14px; flex-wrap:wrap;}
+  .hero-meta{margin-top:26px; font-size:13.5px; color:var(--text-dim);}
+
+  .stats{
+    display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin:0 auto 0;
+    padding-bottom:20px;
+  }
+  .stat{
+    background:var(--panel); border:1px solid var(--border); border-radius:16px;
+    padding:20px 18px; text-align:center;
+  }
+  .stat b{display:block; font-size:clamp(22px,3vw,30px); background:var(--grad); -webkit-background-clip:text; background-clip:text; color:transparent; font-weight:800;}
+  .stat span{font-size:12.5px; color:var(--text-dim); font-weight:600; text-transform:uppercase; letter-spacing:.6px;}
+
+  /* ============ Secciones ============ */
+  section.block{padding:62px 0;}
+  section.block:nth-child(even){background:var(--bg2);}
+  .kicker{font-size:12.5px; font-weight:700; letter-spacing:1.6px; text-transform:uppercase; color:var(--acc-a); margin-bottom:8px;}
+  h2.sec-title{font-size:clamp(26px,3.6vw,36px); font-weight:800; letter-spacing:-.4px; margin-bottom:14px;}
+  .sec-sub{color:var(--text-soft); max-width:700px; margin-bottom:38px;}
+
+  .grid{display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); gap:18px;}
+  .card{
+    background:var(--panel); border:1px solid var(--border); border-radius:18px;
+    padding:26px 24px; transition:transform .18s ease, border-color .2s ease, box-shadow .2s ease;
+  }
+  .card:hover{transform:translateY(-4px); border-color:var(--border2); box-shadow:var(--shadow);}
+  .card .ico{
+    width:44px; height:44px; border-radius:12px; display:grid; place-items:center; font-size:21px;
+    background:color-mix(in srgb, var(--acc-a) 16%, transparent);
+    border:1px solid color-mix(in srgb, var(--acc-a) 35%, transparent);
+    margin-bottom:16px;
+  }
+  .card h3{font-size:17px; font-weight:700; margin-bottom:7px;}
+  .card p{font-size:14.2px; color:var(--text-soft);}
+
+  .two-col{display:grid; grid-template-columns:1.05fr .95fr; gap:40px; align-items:center;}
+  @media(max-width:860px){.two-col{grid-template-columns:1fr;}}
+
+  .perf-list{display:flex; flex-direction:column; gap:14px;}
+  .perf-item{
+    display:flex; gap:15px; background:var(--panel); border:1px solid var(--border);
+    border-radius:14px; padding:17px 18px;
+  }
+  .perf-item .tag{flex:0 0 auto; width:40px; height:40px; border-radius:11px; display:grid; place-items:center; font-size:18px; background:var(--grad); color:#fff;}
+  .perf-item h4{font-size:15.5px;}
+  .perf-item p{font-size:13.5px; color:var(--text-soft);}
+  .perf-item code{background:var(--code-bg); border:1px solid var(--border); padding:1px 6px; border-radius:6px; font-size:12.5px;}
+
+  .bar{height:10px; border-radius:999px; background:var(--panel2); overflow:hidden; margin:7px 0 4px;}
+  .bar i{display:block; height:100%; border-radius:999px; background:var(--grad);}
+  .legend{display:flex; justify-content:space-between; font-size:12px; color:var(--text-dim); margin-bottom:18px;}
+
+  table.shortcuts{width:100%; border-collapse:collapse; background:var(--panel); border:1px solid var(--border); border-radius:16px; overflow:hidden;}
+  table.shortcuts th, table.shortcuts td{padding:11px 16px; text-align:left; font-size:14.3px; border-bottom:1px solid var(--border);}
+  table.shortcuts thead th{background:var(--panel2); font-size:12px; text-transform:uppercase; letter-spacing:1px; color:var(--text-dim);}
+  table.shortcuts tr:last-child td{border-bottom:none;}
+  table.shortcuts td:first-child{color:var(--text-soft); white-space:nowrap;}
+  kbd{
+    display:inline-block; padding:2px 8px; border-radius:6px; font-family:"Segoe UI",inherit; font-size:12.5px; font-weight:600;
+    background:var(--panel2); border:1px solid var(--border2); border-bottom-width:2.5px; color:var(--text);
+  }
+  .chip{display:inline-block; padding:3px 11px; border-radius:999px; border:1px solid var(--border2); font-size:12.5px; color:var(--text-soft); background:var(--panel); margin:0 6px 8px 0;}
+  .chip b{color:var(--text); font-weight:600;}
+
+  pre{
+    background:var(--code-bg); border:1px solid var(--border); border-radius:14px;
+    padding:20px 22px; overflow-x:auto; font-size:13.5px; line-height:1.7;
+    font-family:Consolas,"Cascadia Mono",Menlo,monospace;
+  }
+  pre .c{color:var(--text-dim);}
+  .copy-btn{
+    float:right; margin:-34px 6px 0 0; position:relative; z-index:2;
+    background:var(--panel2); border:1px solid var(--border2); color:var(--text-soft);
+    font-size:12px; padding:5px 12px; border-radius:8px; cursor:pointer;
+  }
+  .copy-btn:hover{color:var(--text);}
+  details.faq-item{background:var(--panel); border:1px solid var(--border); border-radius:14px; padding:2px 22px; margin-bottom:12px;}
+  details.faq-item summary{cursor:pointer; padding:15px 0; font-weight:700; font-size:15.5px; list-style:none; display:flex; justify-content:space-between; align-items:center; gap:14px;}
+  details.faq-item summary::-webkit-details-marker{display:none;}
+  details.faq-item summary::after{content:"+"; color:var(--acc-a); font-size:20px; font-weight:700; line-height:1; transition:transform .2s ease;}
+  details.faq-item[open] summary::after{transform:rotate(45deg);}
+  details.faq-item p{padding:0 0 18px; color:var(--text-soft); font-size:14.3px;}
+  .steps{counter-reset:step; display:flex; flex-direction:column; gap:0;}
+  .step{display:flex; gap:18px; padding:16px 0;}
+  .step::before{
+    counter-increment:step; content:counter(step);
+    flex:0 0 auto; width:34px; height:34px; border-radius:50%;
+    background:var(--grad); color:#fff; font-weight:800; font-size:15px;
+    display:grid; place-items:center; margin-top:2px;
+  }
+  .step h4{font-size:15.5px;}
+  .step p{font-size:14px; color:var(--text-soft);}
+  .step code, .inline-code{background:var(--code-bg); border:1px solid var(--border); border-radius:6px; padding:1px 7px; font-size:13px; font-family:Consolas,Menlo,monospace;}
+
+  footer{border-top:1px solid var(--border); padding:40px 0; color:var(--text-dim); font-size:13.5px;}
+  .foot-flex{display:flex; justify-content:space-between; gap:16px; flex-wrap:wrap; align-items:center;}
+
+  /* Animaciones al hacer scroll */
+  .reveal{opacity:0; transform:translateY(22px); transition:opacity .55s ease, transform .55s ease;}
+  .reveal.on{opacity:1; transform:none;}
+  @media (prefers-reduced-motion:reduce){.reveal{opacity:1; transform:none;}}
+</style>
+</head>
+<body>
+
+<header class="nav">
+  <div class="wrap nav-inner">
+    <a class="brand" href="#inicio"><span class="logo-tile">A</span> ARTPICST</a>
+    <nav class="nav-links">
+      <a href="#caracteristicas">Características</a>
+      <a href="#rendimiento">Rendimiento</a>
+      <a href="#formatos">Formatos</a>
+      <a href="#atajos">Atajos</a>
+      <a href="#descargar">Descargar</a>
+      <a href="#faq">FAQ</a>
+    </nav>
+    <button id="themeBtn" type="button" aria-label="Cambiar tema" title="Cambiar tema claro/oscuro">🌙</button>
+  </div>
+</header>
+
+<!-- ============================ HERO ============================ -->
+<div class="hero" id="inicio">
+  <div class="wrap">
+    <span class="hero-badge"><span class="dot"></span> v1.2.0 · Build 29 · Windows 10 / 11</span>
+    <h1>El visor de imágenes<br><span class="grad-text">premium y ultraligero</span> para Windows</h1>
+    <p class="tagline">
+      Navega tus fotos a máxima fidelidad con renderizado GPU, zoom píxel-perfecto sin pérdida de nitidez,
+      soporte completo de formatos y una huella de memoria mínima. Hecho en C++ nativo — sin Electron, sin peso.
+    </p>
+    <div class="hero-actions">
+      <a class="btn btn-primary" href="#descargar">⬇ Descargar ARTPICST</a>
+      <a class="btn btn-ghost" href="#compilar">Compilar desde el código</a>
+    </div>
+    <p class="hero-meta">Instalador con asistente moderno incluido · Portable disponible · Open source en GitHub</p>
+  </div>
+</div>
+
+<div class="wrap">
+  <div class="stats">
+    <div class="stat"><b>≤ 80 MB</b><span>RAM típica</span></div>
+    <div class="stat"><b>~0%</b><span>CPU en reposo</span></div>
+    <div class="stat"><b>30+</b><span>formatos</span></div>
+    <div class="stat"><b>60 FPS</b><span>renderizado GPU</span></div>
+  </div>
+</div>
+
+<!-- ============================ CARACTERÍSTICAS ============================ -->
+<section class="block" id="caracteristicas">
+  <div class="wrap">
+    <p class="kicker">Características premium</p>
+    <h2 class="sec-title">Todo lo que un visor de fotos debería ser</h2>
+    <p class="sec-sub">Una interfaz acrílica moderna sobre un motor de imagen serio: calidad de estudio con el tacto y la velocidad de una app nativa.</p>
+    <div class="grid">
+      <div class="card reveal">
+        <div class="ico">🎨</div>
+        <h3>Interfaz Glassmorphism</h3>
+        <p>Estética acrílica inspirada en Windows 11 con dock flotante compacto, tema claro/oscuro automático según el sistema y ventana redondeada.</p>
+      </div>
+      <div class="card reveal">
+        <div class="ico">🖥️</div>
+        <h3>Renderizado GPU Direct2D</h3>
+        <p>Escena dibujada por hardware a 60 FPS con CPU ~0%. Si Direct2D no está disponible, se vuelca automáticamente al trazador GDI+ clásico.</p>
+      </div>
+      <div class="card reveal">
+        <div class="ico">🔍</div>
+        <h3>Zoom píxel-perfecto</h3>
+        <p>Auto-snap a 100%, 200%… con interpolación de vecino más próximo (nitidez cristalina) y bicúbica fotográfica de alta precisión en escalas intermedias. Hasta 200×.</p>
+      </div>
+      <div class="card reveal">
+        <div class="ico">✨</div>
+        <h3>Ultra-Claridad HDR</h3>
+        <p>Modo de realce de micro-contraste y detalles finos, horneado una sola vez por cambio — cero coste por fotograma.</p>
+      </div>
+      <div class="card reveal">
+        <div class="ico">🧊</div>
+        <h3>Transparencia clara</h3>
+        <p>Fondo ajedrezado inteligente (una sola llamada de textura en vez de miles de rectángulos) para PNG, WebP, ICO y GIF.</p>
+      </div>
+      <div class="card reveal">
+        <div class="ico">📷</div>
+        <h3>EXIF automático</h3>
+        <p>Detecta y corrige la orientación de fotos de móviles y cámaras, con panel de propiedades y metadatos integrado.</p>
+      </div>
+      <div class="card reveal">
+        <div class="ico">🎞️</div>
+        <h3>GIF animados fluidos</h3>
+        <p>Sincronización proporcional al tiempo transcurrido: si el sistema va retrasado se saltan fotogramas para no perder el ritmo.</p>
+      </div>
+      <div class="card reveal">
+        <div class="ico">🧠</div>
+        <h3>Caché LRU inteligente</h3>
+        <p>Prefetch en segundo plano a prioridad mínima, presupuesto de caché ajustado y devolución de RAM al sistema tras cada carga (Working Set Trim).</p>
+      </div>
+      <div class="card reveal">
+        <div class="ico">🖱️</div>
+        <h3>Navegación avanzada</h3>
+        <p>Flechas para imágenes y zoom, arrastre para panorámica, rueda centrada en el cursor, botones X1/X2 del ratón y dock con atajos de un clic.</p>
+      </div>
+      <div class="card reveal">
+        <div class="ico">🖼️</div>
+        <h3>Fondo y portapapeles</h3>
+        <p>Establece la imagen como fondo de escritorio con un atajo y copia al portapapeles en calidad máxima (exportación 100%).</p>
+      </div>
+      <div class="card reveal">
+        <div class="ico">📤</div>
+        <h3>Guardar / exportar</h3>
+        <p>Exporta con rotación y volteos aplicados a PNG, JPEG (calidad 100%) o BMP mediante el diálogo nativo de Windows.</p>
+      </div>
+      <div class="card reveal">
+        <div class="ico">🛡️</div>
+        <h3>Ligero por diseño</h3>
+        <p>Arrastra y suelta, línea de comandos, presentación F5, pantalla completa F11 y arranque instantáneo. Sin telemetría, sin servicios en segundo plano.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================ RENDIMIENTO ============================ -->
+<section class="block" id="rendimiento">
+  <div class="wrap two-col">
+    <div>
+      <p class="kicker">Rendimiento y recursos</p>
+      <h2 class="sec-title">Rápido de verdad, no solo de apariencia</h2>
+      <p class="sec-sub" style="margin-bottom:26px;">
+        Cada fotograma se repinta por regiones (solo lo que cambió), los efectos se hornean una vez y los
+        buffers de decodificación vuelven al sistema. Así se ve el consumo real:
+      </p>
+      <div class="perf-list">
+        <div class="perf-item">
+          <div class="tag">💾</div>
+          <div>
+            <h4>Memoria durante la navegación</h4>
+            <p>Caché compacta de 4 imágenes con tope de 64 MB, sin copias duplicadas al rotar o voltear.</p>
+            <div class="bar"><i style="width:12%"></i></div>
+          </div>
+        </div>
+        <div class="perf-item">
+          <div class="tag">⚡</div>
+          <div>
+            <h4>CPU en reposo y al mover el ratón</h4>
+            <p>El dock y el OSD repintan solo su banda; el fotograma 4K no se vuelve a escalar en cada hover.</p>
+            <div class="bar"><i style="width:3%"></i></div>
+          </div>
+        </div>
+        <div class="perf-item">
+          <div class="tag">🎞️</div>
+          <div>
+            <h4>Reproducción GIF animado</h4>
+            <p>Avance por temporizador con salto de fotogramas atrasados y subida al GPU solo cuando cambia el contenido.</p>
+            <div class="bar"><i style="width:18%"></i></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div>
+      <p class="kicker">Motor de imagen</p>
+      <h2 class="sec-title">Tres decodificadores, uno superior</h2>
+      <p class="sec-sub" style="margin-bottom:26px;">El código elige el mejor motor para cada archivo — calidad sin concesiones con el mínimo coste.</p>
+      <div class="perf-list">
+        <div class="perf-item">
+          <div class="tag" style="background:none; border:1px solid var(--border2); color:var(--acc-a);">GPU</div>
+          <div>
+            <h4>Direct2D + DirectWrite</h4>
+            <p>Escena completa (foto, ajedrez, OSD, dock) por hardware. Interpolación lineal GPU con bloqueos al mínimo en reposo.</p>
+          </div>
+        </div>
+        <div class="perf-item">
+          <div class="tag" style="background:none; border:1px solid var(--border2); color:var(--acc-a);">CPU</div>
+          <div>
+            <h4>GDI+ con trazado optimizado</h4>
+            <p>Respaldo automático (o forzable con <code>ARTPICST_NO_GPU=1</code>) con repintado parcial, bicúbica solo al ampliar y patrón de transparencia en una llamada.</p>
+          </div>
+        </div>
+        <div class="perf-item">
+          <div class="tag" style="background:none; border:1px solid var(--border2); color:var(--acc-a);">📂</div>
+          <div>
+            <h4>Decodificadores stb_image / WIC / GDI+</h4>
+            <p>stb para los formatos ligeros, Windows Imaging Component para WebP/HEIC/RAW y GDI+ para metarchivos. Decodificación en el hilo justo y prefetch a prioridad mínima.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================ FORMATOS ============================ -->
+<section class="block" id="formatos">
+  <div class="wrap">
+    <p class="kicker">Formatos soportados</p>
+    <h2 class="sec-title">30+ formatos, sin complementos</h2>
+    <p class="sec-sub">Cada formato se enruta al motor que mejor lo decodifica, con límite de dimensiones para mantener la RAM contenida.</p>
+    <div>
+      <span class="chip"><b>stb_image:</b> JPG · PNG · BMP · GIF · TGA · PSD · HDR · PIC · PNM/PPM/PGM</span>
+      <span class="chip"><b>WIC (Windows):</b> TIFF · ICO · WebP · HEIC/HEIF · AVIF · JPEG-XR/WDP</span>
+      <span class="chip"><b>WIC RAW:</b> CR2 · NEF · ARW · DNG · y otros RAW de cámaras</span>
+      <span class="chip"><b>GDI+:</b> TIFF · EMF · WMF · códecs del sistema</span>
+    </div>
+  </div>
+</section>
+
+<!-- ============================ ATAJOS ============================ -->
+<section class="block" id="atajos">
+  <div class="wrap">
+    <p class="kicker">Controles y atajos</p>
+    <h2 class="sec-title">Todo a un toque de tecla</h2>
+    <p class="sec-sub">Del ratón a la papelera sin soltar el teclado. El dock inferior agrupa los accesos más usados con un clic.</p>
+    <table class="shortcuts reveal">
+      <thead>
+        <tr><th>Acción</th><th>Atajo</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Siguiente imagen</td><td><kbd>→</kbd> <kbd>Espacio</kbd> <kbd>▶</kbd></td></tr>
+        <tr><td>Imagen anterior</td><td><kbd>←</kbd> <kbd>Retroceso</kbd> <kbd>◀</kbd></td></tr>
+        <tr><td>Zoom in / out</td><td><kbd>↑</kbd>/<kbd>↓</kbd> · rueda · <kbd>+</kbd>/<kbd>−</kbd></td></tr>
+        <tr><td>Primera / última imagen</td><td><kbd>Inicio</kbd> / <kbd>Fin</kbd></td></tr>
+        <tr><td>Ajustar a la ventana</td><td><kbd>F</kbd> o botón <b>Ajustar</b></td></tr>
+        <tr><td>Tamaño real 100%</td><td><kbd>1</kbd> o <kbd>0</kbd></td></tr>
+        <tr><td>Pantalla completa</td><td><kbd>F11</kbd> o doble clic · <kbd>Esc</kbd> para salir</td></tr>
+        <tr><td>Rotar 90° / antihorario</td><td><kbd>R</kbd> / <kbd>Shift</kbd>+<kbd>R</kbd></td></tr>
+        <tr><td>Volteo horizontal / vertical</td><td><kbd>H</kbd> / <kbd>V</kbd></td></tr>
+        <tr><td>Ultra-Claridad HDR</td><td><kbd>D</kbd></td></tr>
+        <tr><td>Escala de grises / invertir</td><td><kbd>G</kbd> / <kbd>N</kbd></td></tr>
+        <tr><td>Presentación</td><td><kbd>F5</kbd></td></tr>
+        <tr><td>Eliminar a la papelera</td><td><kbd>Supr</kbd></td></tr>
+        <tr><td>Mostrar en el Explorador</td><td><kbd>Ctrl</kbd>+<kbd>E</kbd></td></tr>
+        <tr><td>Copiar imagen / ruta</td><td><kbd>Ctrl</kbd>+<kbd>C</kbd> / <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd></td></tr>
+        <tr><td>Abrir archivo / carpeta</td><td><kbd>Ctrl</kbd>+<kbd>O</kbd> / <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>O</kbd></td></tr>
+        <tr><td>Panorámica</td><td>Clic izquierdo + arrastrar</td></tr>
+        <tr><td>Menú contextual / ayuda</td><td>Clic derecho / <kbd>F1</kbd></td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ============================ DESCARGAR / COMPILAR ============================ -->
+<section class="block" id="descargar">
+  <div class="wrap">
+    <p class="kicker">Instalación y código</p>
+    <h2 class="sec-title">Descárgalo o compílalo tú mismo</h2>
+    <p class="sec-sub">El instalador incluye un asistente gráfico moderno (tema oscuro, icono de la app y registro de desinstalación). También puedes compilar desde el código con Visual Studio o MinGW.</p>
+
+    <div class="grid" style="margin-bottom:36px;">
+      <div class="card reveal">
+        <div class="ico">📦</div>
+        <h3>Instalador (recomendado)</h3>
+        <p>Asistente premium paso a paso: carpeta de instalación, accesos en escritorio y menú Inicio, asociación de formatos y desinstalador limpio.</p>
+        <p style="margin-top:14px;"><a class="btn btn-primary" href="https://github.com/LiebeBlack/Pic/releases/latest/download/artpicst-installer.exe">⬇ artpicst-installer.exe</a></p>
+        <p style="font-size:12.5px; color:var(--text-dim); margin-top:10px;">Enlace directo a la última versión publicada en GitHub Releases.</p>
+      </div>
+      <div class="card reveal">
+        <div class="ico">🧳</div>
+        <h3>Portable</h3>
+        <p>Un solo <code>artpicst.exe</code> sin instalación: cópialo a un USB y llévalo contigo. Incluye el visor y el icono de la app.</p>
+        <p style="margin-top:14px;"><a class="btn btn-ghost" href="https://github.com/LiebeBlack/Pic/releases/latest/download/artpicst-portable.zip">⬇ artpicst-portable.zip</a></p>
+        <p style="font-size:12.5px; color:var(--text-dim); margin-top:10px;">Generado automáticamente por la CI en cada release.</p>
+      </div>
+    </div>
+
+    <div class="two-col" id="compilar">
+      <div>
+        <p class="kicker">Compilar desde el código</p>
+        <h2 class="sec-title">Requisitos</h2>
+        <div class="steps">
+          <div class="step">
+            <div><h4>Windows 10 / 11</h4>
+            <p>Sistema operativo de destino. La app detecta el tema claro/oscuro y escala por DPI del monitor.</p></div>
+          </div>
+          <div class="step">
+            <div><h4>Visual Studio 2019/2022+ con escritorio en C++</h4>
+            <p>O MinGW-w64 como alternativa. También se ofrece un CMakeLists.txt para otros flujos.</p></div>
+          </div>
+          <div class="step">
+            <div><h4>Git</h4>
+            <p>Para clonar el repositorio: <code class="inline-code">git clone https://github.com/LiebeBlack/Pic</code></p></div>
+          </div>
+        </div>
+      </div>
+      <div>
+        <p class="kicker">Build en tres sabores</p>
+        <h2 class="sec-title">Compilación de un toque</h2>
+        <p style="margin-bottom:18px; color:var(--text-soft); font-size:14.5px;">Cualquiera de estos comandos produce <code class="inline-code">artpicst.exe</code> y <code class="inline-code">artpicst_installer.exe</code> en <code class="inline-code">dist\</code>:</p>
+        <pre id="code-ps"><span class="c"># Opción 1 — PowerShell (recomendada)</span>
+powershell -ExecutionPolicy Bypass -File build.ps1</pre>
+        <pre id="code-bat"><span class="c"># Opción 2 — Batch</span>
+build.bat
+
+<span class="c"># Opción 3 — MinGW</span>
+build_mingw.bat</pre>
+        <p style="margin-top:16px; color:var(--text-dim); font-size:13px;">Cada ejecución compila el visor, el instalador premium y copia icono y versión a <code class="inline-code">dist\</code>. En CI (GitHub Actions) se compila automáticamente en cada push.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================ CLI ============================ -->
+<section class="block" id="cli">
+  <div class="wrap">
+    <p class="kicker">Línea de comandos</p>
+    <h2 class="sec-title">Integra ARTPICST en tu flujo</h2>
+    <pre id="code-cli"><span class="c"># Abre el visor, una carpeta o una imagen concreta</span>
+artpicst.exe
+artpicst.exe "C:\Fotos"
+artpicst.exe "C:\Fotos\imagen.jpg"
+
+<span class="c"># Modos de ventana y registro del instalador</span>
+artpicst.exe --maximized "C:\Fotos"
+artpicst.exe --fullscreen "C:\Fotos"
+artpicst.exe --register
+artpicst.exe --unregister</pre>
+  </div>
+</section>
+
+<!-- ============================ ARQUITECTURA ============================ -->
+<section class="block" id="arquitectura">
+  <div class="wrap">
+    <p class="kicker">Arquitectura</p>
+    <h2 class="sec-title">C++ nativo, sin dependencias pesadas</h2>
+    <div class="grid">
+      <div class="card reveal">
+        <div class="ico">⚙️</div>
+        <h3>Programa principal</h3>
+        <p>C++17 + API Win32 con GDI+, WIC, stb_image y Direct2D/DirectWrite. Todo el renderizado, la caché LRU, el prefetch y la animación de zoom viven en un único binario compacto.</p>
+      </div>
+      <div class="card reveal">
+        <div class="ico">🛠️</div>
+        <h3>Instalador</h3>
+        <p>C++ con GDI+: asistente gráfico con degradados, esquinas redondeadas, detección de DPI y barra de título oscura. Icono y metadatos de versión integrados en el ejecutable.</p>
+      </div>
+      <div class="card reveal">
+        <div class="ico">🤖</div>
+        <h3>Integración continua</h3>
+        <p>GitHub Actions compila visor e instalador en cada push, empaqueta el ZIP portable y publica los artefactos en el release.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================ FAQ / SOPORTE ============================ -->
+<section class="block" id="faq">
+  <div class="wrap">
+    <p class="kicker">Preguntas frecuentes</p>
+    <h2 class="sec-title">Soporte y dudas habituales</h2>
+    <p class="sec-sub">¿Algo no funciona? Abre un issue en GitHub con el error y el paso a paso; la respuesta suele llegar en horas.</p>
+    <div class="faq-list">
+      <details class="faq-item reveal">
+        <summary>¿Es realmente gratis?</summary>
+        <p>Sí. ARTPICST es gratuito y de código abierto: úsalo, cópialo y modifícalo libremente para fines personales. No está permitida su venta ni su redistribución comercial sin autorización previa.</p>
+      </details>
+      <details class="faq-item reveal">
+        <summary>¿Necesito permisos de administrador para instalarlo?</summary>
+        <p>No. El instalador trabaja por usuario en <code class="inline-code">%LOCALAPPDATA%\Programs\ARTPICST</code>, sin elevación UAC. Es ideal para equipos corporativos o cuentas sin derechos de administrador.</p>
+      </details>
+      <details class="faq-item reveal">
+        <summary>Mi equipo no tiene GPU. ¿Funcionará igual?</summary>
+        <p>Sí. Si Direct2D no está disponible, el visor usa automáticamente el trazador GDI+ optimizado (repintado parcial, patrones en una sola llamada). También puedes forzarlo con la variable de entorno <code class="inline-code">ARTPICST_NO_GPU=1</code>.</p>
+      </details>
+      <details class="faq-item reveal">
+        <summary>¿Puedo abrir fotos RAW de mi cámara?</summary>
+        <p>Sí: CR2, NEF, ARW, DNG y otros RAW se decodifican a través de Windows Imaging Component. El soporte depende de los códecs WIC instalados en tu Windows (los de tu marca de cámara si el RAW no está cubierto por defecto).</p>
+      </details>
+      <details class="faq-item reveal">
+        <summary>¿Cómo desinstalo ARTPICST?</summary>
+        <p>Abre <b>Menú Inicio → ARTPICST → Desinstalar ARTPICST</b>, o ejecuta <code class="inline-code">artpicst_installer.exe --unregister</code>. Se eliminan archivos, accesos directos y asociaciones de archivo.</p>
+      </details>
+      <details class="faq-item reveal">
+        <summary>¿Se guarda mi configuración en la nube?</summary>
+        <p>No. ARTPICST no tiene telemetría, no crea cuentas ni envía datos a ningún servidor: al abrirlo solo lee la carpeta que le indiques y sigue el tema claro/oscuro de Windows.</p>
+      </details>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap foot-flex">
+    <div><strong>ARTPICST</strong> v1.2.0 · Visor de imágenes premium para Windows</div>
+    <div>Hecho con C++ nativo · <a href="https://github.com/LiebeBlack/Pic">GitHub</a> · <a href="https://github.com/LiebeBlack/Pic/issues">Soporte</a></div>
+  </div>
+</footer>
+
+<script>
+  /* ===== Tema: detecta el sistema, permite alternar (como la propia app) ===== */
+  (function(){
+    var saved = null;
+    try { saved = localStorage.getItem('artpicst-theme'); } catch(e){}
+    var root = document.documentElement;
+    function apply(theme){
+      root.setAttribute('data-theme', theme);
+      document.getElementById('themeBtn').textContent = theme === 'dark' ? '🌙' : '☀️';
+    }
+    if (!saved){
+      var auto = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+      saved = auto ? 'dark' : 'light';
+    }
+    apply(saved);
+    document.getElementById('themeBtn').addEventListener('click', function(){
+      var next = root.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+      try { localStorage.setItem('artpicst-theme', next); } catch(e){}
+      apply(next);
+    });
+  })();
+
+  /* ===== Revelado suave al hacer scroll ===== */
+  var io = new IntersectionObserver(function(entries){
+    entries.forEach(function(en){
+      if (en.isIntersecting){ en.target.classList.add('on'); io.unobserve(en.target); }
+    });
+  }, {threshold: .12});
+  document.querySelectorAll('.reveal').forEach(function(el){ io.observe(el); });
+
+  /* ===== Navegación: resalta la sección visible (scrollspy) ===== */
+  var spy = new IntersectionObserver(function(entries){
+    entries.forEach(function(en){
+      if (en.isIntersecting){
+        var id = en.target.id;
+        document.querySelectorAll('.nav-links a').forEach(function(a){
+          a.classList.toggle('active', a.getAttribute('href') === '#' + id);
+        });
+      }
+    });
+  }, {rootMargin:'-35% 0px -60% 0px'});
+  ['caracteristicas','rendimiento','formatos','atajos','descargar','faq'].forEach(function(id){
+    var el = document.getElementById(id);
+    if (el) spy.observe(el);
+  });
+</script>
+</body>
+</html>

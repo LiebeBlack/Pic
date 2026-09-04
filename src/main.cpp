@@ -178,6 +178,7 @@ const UINT DOCK_HIDE_MS = 2000;
 const int DOCK_PROXIMITY_THRESHOLD = 80;
 const UINT_PTR TIMER_GIF = 4;
 const UINT_PTR TIMER_ZOOM = 5;
+const UINT_PTR TIMER_GPU_RETRY = 6;
 const DWORD ZOOM_ANIM_MS = 110;   // Duración de la animación de zoom suave
 
 template <typename T>
@@ -3460,12 +3461,19 @@ bool GpuRenderFrame() {
     if (hr == D2DERR_RECREATE_TARGET) {
         GpuReleaseAll();
         g_gpu.attemptFailed = true;
+        // Recuperación automática: si el dispositivo GPU se perdió (cambio de
+        // monitor, controlador, TDR...) se reintenta en 1,5 s sin necesidad de
+        // redimensionar la ventana; antes quedaba en GDI+ hasta el próximo WM_SIZE.
+        if (g_state.hwnd) SetTimer(g_state.hwnd, TIMER_GPU_RETRY, 1500, nullptr);
         return false;
     }
     if (FAILED(hr)) {
         GpuReleaseAll();
         return false;
     }
+
+    // GPU operativo: cancelar cualquier reintento pendiente
+    if (g_state.hwnd) KillTimer(g_state.hwnd, TIMER_GPU_RETRY);
 
     if (!g_gpu.enabled) {
         g_gpu.enabled = true;
@@ -4080,10 +4088,26 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     static bool s_trackingMouse = false;
     switch (msg) {
         case WM_SETCURSOR:
-            // Cursor de mano sobre los botones del dock (solo si está visible)
-            if (LOWORD(lParam) == HTCLIENT && DockShouldShow() && g_state.hudHot != HUD_NONE) {
-                SetCursor(LoadCursorW(nullptr, IDC_HAND));
-                return TRUE;
+            if (LOWORD(lParam) == HTCLIENT) {
+                // Agarrar (panorámica en curso) / mano sobre el dock / mano sobre la imagen
+                if (g_state.isDragging) {
+                    SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
+                    return TRUE;
+                }
+                if (DockShouldShow() && g_state.hudHot != HUD_NONE) {
+                    SetCursor(LoadCursorW(nullptr, IDC_HAND));
+                    return TRUE;
+                }
+                if (g_state.imageData) {
+                    POINT pt{};
+                    GetCursorPos(&pt);
+                    ScreenToClient(hwnd, &pt);
+                    if (!(pt.x >= g_state.dockRect.left && pt.x < g_state.dockRect.right &&
+                          pt.y >= g_state.dockRect.top && pt.y < g_state.dockRect.bottom)) {
+                        SetCursor(LoadCursorW(nullptr, IDC_HAND));
+                        return TRUE;
+                    }
+                }
             }
             break;
         case WM_CREATE: {
@@ -4109,6 +4133,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 return 0;
             }
             g_gpu.retryRequested = true; // nuevo tamaño: reintentar GPU si falló
+            KillTimer(hwnd, TIMER_GPU_RETRY);
             const int width = LOWORD(lParam);
             const int height = HIWORD(lParam);
             if (g_gpu.enabled) {
@@ -4137,6 +4162,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             info->ptMinTrackSize.y = 360;
             return 0;
         }
+        case WM_DISPLAYCHANGE:
+            // Resolución o monitor cambiado: si la GPU se perdió, reintentar
+            if (g_gpu.attemptFailed) {
+                g_gpu.retryRequested = true;
+                KillTimer(hwnd, TIMER_GPU_RETRY);
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+            return 0;
         case WM_ERASEBKGND:
             return TRUE;
         case WM_PAINT: {
@@ -4414,6 +4447,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 InvalidateOsdRegion();
             } else if (wParam == TIMER_SLIDESHOW) {
                 NextImage();
+            } else if (wParam == TIMER_GPU_RETRY) {
+                KillTimer(hwnd, TIMER_GPU_RETRY);
+                g_gpu.retryRequested = true;
+                InvalidateRect(hwnd, nullptr, FALSE);
             } else if (wParam == TIMER_DOCK_HIDE) {
                 RECT client{};
                 GetClientRect(hwnd, &client);
@@ -4497,6 +4534,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             KillTimer(hwnd, TIMER_DOCK_HIDE);
             KillTimer(hwnd, TIMER_GIF);
             KillTimer(hwnd, TIMER_ZOOM);
+            KillTimer(hwnd, TIMER_GPU_RETRY);
             StopPrefetchThread();
             FreeCurrentImage();
             FreeDoubleBuffer();

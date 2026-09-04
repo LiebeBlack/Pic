@@ -70,7 +70,9 @@ const Color COL_DISABLED_TEXT(255, 112, 120, 136);
 const float DESIGN_W = 640.0f;
 const float DESIGN_H = 540.0f;
 const float MIN_DESIGN_W = 560.0f;
-const float MIN_DESIGN_H = 480.0f;
+// Mínimo = alto de diseño: las filas de opciones terminan en y=436 y los
+// botones viven en y=H-58; por debajo de 540 se solaparían.
+const float MIN_DESIGN_H = 540.0f;
 float g_scale = 1.0f; // factor DPI real / 96
 
 enum class InstallStep {
@@ -666,6 +668,13 @@ void RenderLicense(Graphics& g, const Fonts& fonts, float W, float H, const Layo
         RectF labelRect(row.X + 46.0f, row.Y, row.Width - 58.0f, row.Height);
         DrawTextIn(g, rows[i].label, labelRect, fonts.fSmall, COL_TEXT, false, true);
     }
+
+    // Ruta de destino, anclada sobre los botones (y=H-82) para no solaparse
+    // con las filas ni con el pie; se recorta con elipsis si es muy larga.
+    RectF destRect(56.0f, H - 82.0f, W - 112.0f, 20.0f);
+    std::wstring dest = L"Se instalará en:  " + g_state.installPath;
+    DrawTextIn(g, dest.c_str(), destRect, fonts.fTiny, COL_TEXT_DIM, false, true,
+               StringTrimmingEllipsisCharacter, true);
 }
 
 void RenderInstall(Graphics& g, const Fonts& fonts, float W, float H) {
