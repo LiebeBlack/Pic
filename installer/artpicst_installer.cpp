@@ -17,7 +17,6 @@
 #include <shellapi.h>
 #include <shlobj.h>
 #include <shobjidl.h>
-#include <comdef.h>
 #include <gdiplus.h>
 #include <dwmapi.h>
 #include <string>

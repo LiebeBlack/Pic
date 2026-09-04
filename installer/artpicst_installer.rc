@@ -1,10 +1,11 @@
 // Icono y versión del instalador de ARTPICST.
-// El icono se localiza desde el directorio de compilación o la ruta INCLUDE
-// (los scripts de compilación añaden la raíz del repositorio a INCLUDE).
+// La ruta del icono es relativa a este archivo .rc (..\resources desde
+// installer\), así rc.exe lo encuentra desde cualquier directorio de
+// compilación (build.bat, build_installer.bat o CI de GitHub Actions).
 
 #define IDI_APP_ICON 101
 
-IDI_APP_ICON ICON "resources/artpicst.ico"
+IDI_APP_ICON ICON "..\resources\artpicst.ico"
 
 VS_VERSION_INFO VERSIONINFO
 FILEVERSION 1,2,0,0

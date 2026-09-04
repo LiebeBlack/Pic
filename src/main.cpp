@@ -2687,7 +2687,7 @@ void DrawCheckerboard(Graphics& g, float x, float y, float w, float h) {
     }
 }
 
-void RenderImage(const RECT* clipRect = nullptr) {
+void RenderImage(const RECT* clipRect) {
     if (!g_state.hdcMem || !g_state.hwnd) return;
     RECT rect{};
     GetClientRect(g_state.hwnd, &rect);
