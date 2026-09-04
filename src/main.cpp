@@ -2809,7 +2809,10 @@ static bool GpuTryInitFactory() {
         g_gpu.factory = nullptr;
         return false;
     }
-    if (FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, IID_IDWriteFactory,
+    // dwrite.h del SDK de MS no declara IID_IDWriteFactory (solo el de MinGW);
+    // se pasa el GUID canonico de IDWriteFactory, valido en MSVC y MinGW.
+    const GUID kIidIDWriteFactory = {0xb859ee5a, 0xd838, 0x4b5b, {0xa2, 0xe8, 0x1a, 0xdc, 0x7d, 0x93, 0xdb, 0x48}};
+    if (FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, kIidIDWriteFactory,
                                    reinterpret_cast<IUnknown**>(&g_gpu.dwrite))) || !g_gpu.dwrite) {
         g_gpu.dwrite = nullptr;
         if (g_gpu.factory) {
@@ -2860,7 +2863,8 @@ static DWORD GpuThemeKey() {
     return key;
 }
 
-static void GpuSafeRelease(IUnknown*& ptr) {
+template <typename T>
+static void GpuSafeRelease(T*& ptr) {
     if (ptr) {
         ptr->Release();
         ptr = nullptr;
@@ -3226,9 +3230,10 @@ static void GpuDrawImage(ID2D1RenderTarget* rt) {
     const D2D1_BITMAP_INTERPOLATION_MODE interp =
         (pixelPerfect || zoom > 3.5f) ? D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR
                                       : D2D1_BITMAP_INTERPOLATION_MODE_LINEAR;
-    // Forma de puntero: la sobrecarga con referencia de DrawBitmap no admite el
-    // parámetro perspectiveTransform (6.º), así que se pasa &dst explícito.
-    rt->DrawBitmap(g_gpu.image, &dst, 1.0f, interp, nullptr, nullptr);
+    // ID2D1RenderTarget::DrawBitmap acepta como máximo 5 parámetros (la
+    // transformación de perspectiva es de ID2D1DeviceContext). Se pasa &dst
+    // explícito: forma puntero, válida en MSVC y MinGW.
+    rt->DrawBitmap(g_gpu.image, &dst, 1.0f, interp, nullptr);
     rt->SetTransform(D2D1::Matrix3x2F::Identity());
 }
 
