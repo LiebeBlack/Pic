@@ -4,6 +4,9 @@
 #ifndef _UNICODE
 #define _UNICODE
 #endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -19,9 +22,10 @@
 #include <dwmapi.h>
 #include <string>
 #include <vector>
-#include <memory>
 #include <algorithm>
 #include <cstring>
+#include <cstdio>
+#include <wchar.h>
 #include <fstream>
 #include <sstream>
 
@@ -45,15 +49,30 @@ const wchar_t UNINSTALL_SWITCH[] = L"--uninstall";
 const wchar_t UNINSTALL_REG_KEY[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\ARTPICST";
 const wchar_t APP_URL[] = L"https://github.com/LiebeBlack/Pic";
 
-// Colores premium
-const Color BG_COLOR(255, 8, 10, 14);
-const Color ACCENT_COLOR(255, 48, 120, 235);
-const Color TEXT_COLOR(255, 242, 245, 250);
-const Color CARD_BG(255, 16, 18, 23);
-const Color CARD_BORDER(255, 80, 80, 80);
-const Color BUTTON_NORMAL(255, 55, 55, 55);
-const Color BUTTON_HOT(255, 48, 120, 235);
-const Color BUTTON_BORDER(255, 40, 40, 40);
+// ============================================================================
+// Paleta moderna (tema oscuro refinado con acentos degradados azul-violeta)
+// ============================================================================
+const Color COL_TEXT(255, 238, 242, 248);          // Texto principal
+const Color COL_TEXT_SOFT(255, 168, 178, 194);     // Texto secundario
+const Color COL_TEXT_DIM(255, 116, 126, 146);      // Texto terciario / etiquetas
+const Color COL_PANEL(255, 20, 25, 35);            // Tarjetas / paneles
+const Color COL_PANEL_BORDER(255, 39, 49, 66);     // Borde de tarjetas
+const Color COL_BTN_GHOST(255, 28, 35, 48);        // Botón secundario
+const Color COL_BTN_GHOST_HOT(255, 42, 53, 72);
+const Color COL_BTN_GHOST_BORDER(255, 54, 66, 88);
+const Color COL_BTN_GHOST_BORDER_HOT(255, 112, 140, 185);
+const Color COL_ACCENT_A(255, 47, 124, 246);       // Degradado: azul
+const Color COL_ACCENT_B(255, 130, 92, 246);       // Degradado: violeta
+const Color COL_SUCCESS(255, 52, 199, 105);
+const Color COL_ERROR(255, 229, 72, 77);
+const Color COL_DISABLED_TEXT(255, 112, 120, 136);
+
+// Tamaño de diseño (unidades lógicas 96 DPI); la ventana se escala por g_scale
+const float DESIGN_W = 640.0f;
+const float DESIGN_H = 540.0f;
+const float MIN_DESIGN_W = 560.0f;
+const float MIN_DESIGN_H = 480.0f;
+float g_scale = 1.0f; // factor DPI real / 96
 
 enum class InstallStep {
     Welcome,
@@ -74,7 +93,6 @@ struct InstallerState {
     bool isInstalling = false;
     bool installSucceeded = false;
     int installProgress = 0;
-    // UI: zona bajo el puntero para efectos hover y cursor de mano
     int hoverZone = 0;
     bool mouseTracking = false;
     GdiplusStartupInput gdiplusStartupInput;
@@ -83,42 +101,70 @@ struct InstallerState {
 
 InstallerState g_state;
 
-// Zonas hover de la interfaz (coinciden con los botones dibujados)
+// Zonas hover de la interfaz
 enum HoverZone {
     HOVER_NONE = 0,
     HOVER_BACK,
     HOVER_NEXT,
-    HOVER_CANCEL
+    HOVER_CANCEL,
+    HOVER_ROW_DESKTOP,
+    HOVER_ROW_STARTMENU,
+    HOVER_ROW_ASSOC
 };
 
-struct ButtonRects {
+// Una sola fuente de verdad para la geometría (dibujo, clic y hover)
+struct LayoutRects {
     RectF back;
     RectF next;
     RectF cancel;
+    RectF rows[3];
+    int rowCount = 0;
 };
 
-// Geometría compartida por el dibujado, el clic y el hover (una sola fuente)
-ButtonRects GetButtonRects(const RECT& client) {
-    ButtonRects r;
-    const float buttonHeight = 36.0f;
-    const float buttonWidth = 120.0f;
-    const float buttonY = static_cast<float>(client.bottom) - 60.0f;
-    r.back = RectF(20.0f, buttonY, buttonWidth, buttonHeight);
-    r.next = RectF(static_cast<REAL>(client.right) - buttonWidth - 20.0f, buttonY, buttonWidth, buttonHeight);
-    r.cancel = RectF(static_cast<REAL>(client.right) - 90.0f, 10.0f, 70.0f, 24.0f);
+float DesignX(int physicalX) { return static_cast<float>(physicalX) / g_scale; }
+float DesignY(int physicalY) { return static_cast<float>(physicalY) / g_scale; }
+
+LayoutRects ComputeLayout(float W, float H) {
+    LayoutRects r;
+    const float margin = 48.0f;
+    const float buttonH = 42.0f;
+    const float buttonY = H - buttonH - 16.0f;
+
+    // Botón primario (derecha) y secundario Atrás (izquierda)
+    r.next = RectF(W - margin - 150.0f, buttonY, 150.0f, buttonH);
+    r.back = RectF(margin, buttonY, 118.0f, buttonH);
+
+    // Cancelar discreto (arriba a la derecha)
+    r.cancel = RectF(W - margin - 84.0f, 14.0f, 84.0f, 26.0f);
+
+    // Filas de opciones de la página de licencia
+    if (g_state.currentStep == InstallStep::License) {
+        const float rowX = 56.0f;
+        const float rowW = W - rowX * 2.0f;
+        const float rowH = 38.0f;
+        const float gap = 8.0f;
+        float y = 306.0f;
+        for (int i = 0; i < 3; ++i) {
+            r.rows[i] = RectF(rowX, y, rowW, rowH);
+            y += rowH + gap;
+        }
+        r.rowCount = 3;
+    }
     return r;
 }
 
-int HoverZoneAt(const RECT& client, int x, int y) {
+int HoverZoneAt(const LayoutRects& r, float lx, float ly) {
     if (g_state.currentStep == InstallStep::Install) return HOVER_NONE;
-    const float fx = static_cast<float>(x);
-    const float fy = static_cast<float>(y);
     auto hit = [&](const RectF& rc) {
-        return fx >= rc.X && fx <= rc.X + rc.Width && fy >= rc.Y && fy <= rc.Y + rc.Height;
+        return lx >= rc.X && lx <= rc.X + rc.Width && ly >= rc.Y && ly <= rc.Y + rc.Height;
     };
-    const ButtonRects r = GetButtonRects(client);
     if (hit(r.cancel)) return HOVER_CANCEL;
     if (g_state.currentStep == InstallStep::License && hit(r.back)) return HOVER_BACK;
+    if (g_state.currentStep == InstallStep::License) {
+        for (int i = 0; i < r.rowCount; ++i) {
+            if (hit(r.rows[i])) return HOVER_ROW_DESKTOP + i;
+        }
+    }
     if ((g_state.currentStep == InstallStep::Welcome ||
          g_state.currentStep == InstallStep::License ||
          g_state.currentStep == InstallStep::Complete) && hit(r.next)) {
@@ -367,272 +413,414 @@ void PerformUninstall() {
 }
 
 // ============================================================================
-// Interfaz gráfica
+// Dibujo: primitivas modernas (todo en unidades de diseño 96 DPI)
 // ============================================================================
 
-void DrawRoundedRect(Graphics& g, const RectF& rect, float radius, const Color& fillColor, const Color& borderColor, float borderWidth = 1.0f) {
-    GraphicsPath path;
-    float diameter = radius * 2.0f;
-    path.AddArc(rect.X, rect.Y, diameter, diameter, 180, 90);
-    path.AddArc(rect.X + rect.Width - diameter, rect.Y, diameter, diameter, 270, 90);
-    path.AddArc(rect.X + rect.Width - diameter, rect.Y + rect.Height - diameter, diameter, diameter, 0, 90);
-    path.AddArc(rect.X, rect.Y + rect.Height - diameter, diameter, diameter, 90, 90);
+static void RoundPath(GraphicsPath& path, const RectF& rc, float radius) {
+    const float w = rc.Width;
+    const float h = rc.Height;
+    float rad = radius;
+    if (rad < 0.0f) rad = 0.0f;
+    const float maxRad = (std::min)(w, h) * 0.5f;
+    if (rad > maxRad) rad = maxRad;
+    const float d = rad * 2.0f;
+    path.Reset();
+    path.StartFigure();
+    path.AddArc(rc.X, rc.Y, d, d, 180.0f, 90.0f);
+    path.AddArc(rc.X + w - d, rc.Y, d, d, 270.0f, 90.0f);
+    path.AddArc(rc.X + w - d, rc.Y + h - d, d, d, 0.0f, 90.0f);
+    path.AddArc(rc.X, rc.Y + h - d, d, d, 90.0f, 90.0f);
     path.CloseFigure();
-    
-    SolidBrush fillBrush(fillColor);
-    g.FillPath(&fillBrush, &path);
-    
-    if (borderWidth > 0) {
-        Pen borderPen(borderColor, borderWidth);
-        g.DrawPath(&borderPen, &path);
-    }
 }
 
-void DrawButton(Graphics& g, const RectF& rect, const wchar_t* text, bool isHot, bool isEnabled) {
-    Color bgColor = isEnabled ? (isHot ? BUTTON_HOT : BUTTON_NORMAL) : Color(255, 40, 40, 40);
-    Color borderColor = isEnabled ? BUTTON_BORDER : Color(255, 60, 60, 60);
-    
-    DrawRoundedRect(g, rect, 8.0f, bgColor, borderColor);
-    
-    if (isEnabled) {
-        Gdiplus::FontFamily fontFamily(L"Segoe UI");
-        Gdiplus::Font font(&fontFamily, 11.0f, FontStyleBold, UnitPoint);
-        StringFormat format;
-        format.SetAlignment(StringAlignmentCenter);
-        format.SetLineAlignment(StringAlignmentCenter);
-        
-        SolidBrush textBrush(TEXT_COLOR);
-        g.DrawString(text, -1, &font, rect, &format, &textBrush);
-    }
+static void FillRound(Graphics& g, const RectF& rc, float radius, const Color& fill) {
+    GraphicsPath path;
+    RoundPath(path, rc, radius);
+    SolidBrush brush(fill);
+    g.FillPath(&brush, &path);
 }
 
-void DrawProgress(Graphics& g, const RectF& rect, int progress) {
-    // Fondo
-    DrawRoundedRect(g, rect, 6.0f, Color(255, 24, 27, 32), Color(255, 60, 60, 60));
-    
-    // Progreso
-    if (progress > 0) {
-        float progressWidth = rect.Width * (progress / 100.0f);
-        RectF progressRect(rect.X, rect.Y, progressWidth, rect.Height);
-        
-        // Clip region for progress
-        Region clipRegion(progressRect);
-        g.SetClip(&clipRegion);
-        
-        DrawRoundedRect(g, rect, 6.0f, ACCENT_COLOR, Color(255, 100, 180, 255));
-        
-        g.ResetClip();
-    }
+static void FillRoundGradient(Graphics& g, const RectF& rc, float radius, const Color& c1, const Color& c2, bool vertical = false) {
+    GraphicsPath path;
+    RoundPath(path, rc, radius);
+    LinearGradientBrush brush(rc, c1, c2, vertical ? 90.0f : 0.0f);
+    g.FillPath(&brush, &path);
 }
 
-void RenderWelcome(Graphics& g, const RECT& client) {
-    float centerX = client.right / 2.0f;
-    float centerY = client.bottom / 2.0f;
-    
-    // Logo/Title
-    Gdiplus::FontFamily titleFamily(L"Segoe UI");
-    Gdiplus::Font titleFont(&titleFamily, 32.0f, FontStyleBold, UnitPoint);
-    Gdiplus::Font subtitleFont(&titleFamily, 14.0f, FontStyleRegular, UnitPoint);
-    
+static void StrokeRound(Graphics& g, const RectF& rc, float radius, const Color& border, float width = 1.0f) {
+    GraphicsPath path;
+    RoundPath(path, rc, radius);
+    Pen pen(border, width);
+    g.DrawPath(&pen, &path);
+}
+
+static void DrawTextIn(Graphics& g, const wchar_t* text, const RectF& rc, const Font& font,
+                       const Color& color, bool centerH = true, bool centerV = true,
+                       StringTrimming trimming = StringTrimmingNone, bool noWrap = false) {
     StringFormat format;
-    format.SetAlignment(StringAlignmentCenter);
-    format.SetLineAlignment(StringAlignmentCenter);
-    
-    SolidBrush textBrush(TEXT_COLOR);
-    
-    RectF titleRect(0.0f, centerY - 120.0f, static_cast<REAL>(client.right), 50.0f);
-    g.DrawString(APP_NAME, -1, &titleFont, titleRect, &format, &textBrush);
-    
-    RectF subtitleRect(0.0f, centerY - 70.0f, static_cast<REAL>(client.right), 30.0f);
-    g.DrawString(L"Visor de imágenes premium con interfaz acrílica moderna", -1, &subtitleFont, subtitleRect, &format, &textBrush);
-    
-    // Feature card (compacta: que no se solape con los botones inferiores)
-    RectF cardRect(centerX - 200.0f, centerY - 55.0f, 400.0f, 175.0f);
-    DrawRoundedRect(g, cardRect, 16.0f, CARD_BG, CARD_BORDER);
-    
-    Gdiplus::Font featureFont(&titleFamily, 10.5f, FontStyleRegular, UnitPoint);
-    SolidBrush featureBrush(Color(255, 200, 210, 220));
-    
-    const wchar_t* features[] = {
-        L"• Interfaz Glassmorphism/Acrílica premium",
-        L"• Soporte para más de 30 formatos de imagen",
-        L"• Ultra-Claridad HDR y efectos avanzados",
-        L"• Navegación fluida con zoom y pan",
-        L"• Rendimiento ultra-ligero y bajo consumo"
+    format.SetAlignment(centerH ? StringAlignmentCenter : StringAlignmentNear);
+    format.SetLineAlignment(centerV ? StringAlignmentCenter : StringAlignmentNear);
+    if (trimming != StringTrimmingNone) {
+        format.SetTrimming(trimming);
+        if (noWrap) format.SetFormatFlags(StringFormatFlagsNoWrap);
+    }
+    SolidBrush brush(color);
+    g.DrawString(text, -1, &font, rc, &format, &brush);
+}
+
+static void DrawCheckMark(Graphics& g, float cx0, float cy0, float cx1, float cy1, float cx2, float cy2, float width, const Color& color) {
+    Pen pen(color, width);
+    pen.SetStartCap(LineCapRound);
+    pen.SetEndCap(LineCapRound);
+    g.DrawLine(&pen, cx0, cy0, cx1, cy1);
+    g.DrawLine(&pen, cx1, cy1, cx2, cy2);
+}
+
+// Caja de verificación cuadrada de las filas de opciones
+static void DrawCheckBox(Graphics& g, const RectF& rc, bool checked) {
+    FillRound(g, rc, 6.0f, checked ? COL_ACCENT_A : Color(255, 16, 20, 29));
+    if (checked) {
+        // Degradado sutil sobre la casilla activa
+        FillRoundGradient(g, rc, 6.0f, COL_ACCENT_A, COL_ACCENT_B);
+        DrawCheckMark(g, rc.X + rc.Width * 0.22f, rc.Y + rc.Height * 0.52f,
+                      rc.X + rc.Width * 0.42f, rc.Y + rc.Height * 0.72f,
+                      rc.X + rc.Width * 0.80f, rc.Y + rc.Height * 0.28f,
+                      2.0f, Color(255, 255, 255, 255));
+    } else {
+        StrokeRound(g, rc, 6.0f, Color(255, 66, 80, 102), 1.0f);
+    }
+}
+
+// ============================================================================
+// Textos y fuentes reutilizables (UnitPixel: escalan con la transformación DPI)
+// ============================================================================
+
+struct Fonts {
+    FontFamily family;
+    Font fLogo;      // 30 px
+    Font fTitle;     // 26 px
+    Font fHeading;   // 20 px
+    Font fBody;      // 14 px
+    Font fSmall;     // 13 px
+    Font fLabel;     // 11 px, negrita (etiquetas)
+    Font fTiny;      // 10.5 px
+    Fonts()
+        : family(L"Segoe UI"),
+          fLogo(&family, 30.0f, FontStyleBold, UnitPixel),
+          fTitle(&family, 26.0f, FontStyleBold, UnitPixel),
+          fHeading(&family, 20.0f, FontStyleBold, UnitPixel),
+          fBody(&family, 14.0f, FontStyleRegular, UnitPixel),
+          fSmall(&family, 13.0f, FontStyleRegular, UnitPixel),
+          fLabel(&family, 11.0f, FontStyleBold, UnitPixel),
+          fTiny(&family, 10.5f, FontStyleRegular, UnitPixel) {}
+};
+
+// Logo: baldosa redondeada con degradado de marca y la letra inicial
+static void DrawLogo(Graphics& g, const Fonts& fonts, float cx, float cy, float size) {
+    const RectF tile(cx - size * 0.5f, cy - size * 0.5f, size, size);
+    FillRoundGradient(g, tile, size * 0.24f, COL_ACCENT_A, COL_ACCENT_B);
+    // Brillo superior sutil (efecto cristal)
+    const RectF shine(tile.X, tile.Y, tile.Width, tile.Height * 0.5f);
+    FillRound(g, shine, size * 0.24f, Color(30, 255, 255, 255));
+    DrawTextIn(g, L"A", tile, fonts.fLogo, Color(255, 255, 255, 255), true, true);
+}
+
+// Fondo general: degradado vertical profundo + barra de acento superior
+static void DrawChrome(Graphics& g, const Fonts&, float W, float H) {
+    LinearGradientBrush bg(RectF(0.0f, 0.0f, W, H), Color(255, 15, 19, 27), Color(255, 8, 10, 15), 90.0f);
+    g.FillRectangle(&bg, 0.0f, 0.0f, W, H);
+
+    // Barra superior degradada (firma de la marca)
+    const RectF topBar(0.0f, 0.0f, W, 3.0f);
+    LinearGradientBrush accent(topBar, COL_ACCENT_A, COL_ACCENT_B, 0.0f);
+    g.FillRectangle(&accent, topBar);
+}
+
+// Botón primario con degradado
+static void DrawPrimaryButton(Graphics& g, const Fonts& fonts, const RectF& rc, const wchar_t* text, bool hot) {
+    FillRoundGradient(g, rc, 9.0f, COL_ACCENT_A, COL_ACCENT_B);
+    if (hot) {
+        FillRound(g, rc, 9.0f, Color(24, 255, 255, 255)); // realce hover
+    }
+    DrawTextIn(g, text, rc, fonts.fSmall, Color(255, 255, 255, 255), true, true);
+}
+
+// Botón secundario discreto (Atrás / Cerrar / Reintentar / Cancelar)
+static void DrawGhostButton(Graphics& g, const Fonts& fonts, const RectF& rc, const wchar_t* text, bool hot) {
+    FillRound(g, rc, 9.0f, hot ? COL_BTN_GHOST_HOT : COL_BTN_GHOST);
+    StrokeRound(g, rc, 9.0f, hot ? COL_BTN_GHOST_BORDER_HOT : COL_BTN_GHOST_BORDER, 1.0f);
+    DrawTextIn(g, text, rc, fonts.fSmall, COL_TEXT, true, true);
+}
+
+// ============================================================================
+// Pantallas del asistente
+// ============================================================================
+
+void RenderWelcome(Graphics& g, const Fonts& fonts, float W, float H) {
+    const float cx = W * 0.5f;
+
+    DrawLogo(g, fonts, cx, 88.0f, 64.0f);
+
+    RectF nameRect(cx - 200.0f, 128.0f, 400.0f, 44.0f);
+    DrawTextIn(g, APP_NAME, nameRect, fonts.fTitle, COL_TEXT, true, false);
+
+    RectF tagRect(cx - 260.0f, 176.0f, 520.0f, 26.0f);
+    DrawTextIn(g, L"Visor de imágenes premium para Windows — rápido, ligero y moderno",
+               tagRect, fonts.fSmall, COL_TEXT_SOFT, true, true);
+
+    // Tarjeta de características
+    const float cardY = 222.0f;
+    const RectF card(cx - 256.0f, cardY, 512.0f, 176.0f);
+    FillRound(g, card, 16.0f, COL_PANEL);
+    StrokeRound(g, card, 16.0f, COL_PANEL_BORDER, 1.0f);
+
+    struct Feature { const wchar_t* text; };
+    const Feature features[] = {
+        { L"Interfaz moderna: modo oscuro/claro y acabados acrílicos" },
+        { L"Más de 30 formatos: PNG, WebP, HEIC, AVIF, GIF, RAW y más" },
+        { L"Zoom fluido, píxel perfecto al 100% y Ultra-Claridad HDR" },
+        { L"Ultra-ligero: baja memoria y CPU ~0% en reposo" }
     };
-    
-    float featureY = cardRect.Y + 24.0f;
-    for (const wchar_t* feature : features) {
-        RectF featureRect(cardRect.X + 20.0f, featureY, cardRect.Width - 40.0f, 24.0f);
-        g.DrawString(feature, -1, &featureFont, featureRect, &format, &featureBrush);
-        featureY += 27.0f;
+
+    float fy = cardY + 22.0f;
+    for (int i = 0; i < 4; ++i) {
+        // Punto de acento degradado
+        const float dotR = 4.0f;
+        const float dotY = fy + 9.0f;
+        FillRoundGradient(g, RectF(card.X + 24.0f, dotY - dotR, dotR * 2.0f, dotR * 2.0f), dotR, COL_ACCENT_A, COL_ACCENT_B);
+        RectF featureRect(card.X + 42.0f, fy - 2.0f, card.Width - 62.0f, 24.0f);
+        DrawTextIn(g, features[i].text, featureRect, fonts.fSmall, COL_TEXT_SOFT, false, true);
+        fy += 33.0f;
     }
+
+    RectF hint(cx - 200.0f, H - 92.0f, 400.0f, 20.0f);
+    DrawTextIn(g, L"Se instalará para tu usuario, sin permisos de administrador.",
+               hint, fonts.fTiny, COL_TEXT_DIM, true, true);
 }
 
-void RenderLicense(Graphics& g, const RECT& client) {
-    float centerX = static_cast<float>(client.right) / 2.0f;
-    float centerY = static_cast<float>(client.bottom) / 2.0f;
-    
-    Gdiplus::FontFamily titleFamily(L"Segoe UI");
-    Gdiplus::Font titleFont(&titleFamily, 24.0f, FontStyleBold, UnitPoint);
-    
-    StringFormat format;
-    format.SetAlignment(StringAlignmentCenter);
-    format.SetLineAlignment(StringAlignmentCenter);
-    
-    SolidBrush textBrush(TEXT_COLOR);
-    
-    RectF titleRect(0.0f, centerY - 165.0f, static_cast<REAL>(client.right), 40.0f);
-    g.DrawString(L"Acuerdo de Licencia", -1, &titleFont, titleRect, &format, &textBrush);
-    
-    const wchar_t* licenseText = L"ARTPICST - Visor de Imágenes Premium\n\n"
-        L"Este software se proporciona tal cual, sin garantía de ningún tipo.\n"
-        L"El usuario es responsable de su uso y consecuencias.\n\n"
-        L"Características principales:\n"
-        L"- Visualización de imágenes de alta calidad\n"
-        L"- Interfaz moderna con efectos acrílicos\n"
-        L"- Soporte para múltiples formatos\n"
-        L"- Rendimiento ultra-ligero y optimizado\n\n"
-        L"Al continuar con la instalación, aceptas los términos de uso.";
-    
-    // Caja de licencia más amplia: todo el texto debe ser legible
-    RectF licenseBox(centerX - 260.0f, centerY - 90.0f, 520.0f, 235.0f);
-    DrawRoundedRect(g, licenseBox, 12.0f, Color(255, 12, 14, 18), Color(255, 60, 60, 60));
-    
+void RenderLicense(Graphics& g, const Fonts& fonts, float W, float H, const LayoutRects& layout) {
+    const float cx = W * 0.5f;
+
+    RectF titleRect(cx - 250.0f, 40.0f, 500.0f, 42.0f);
+    DrawTextIn(g, L"Licencia y opciones", titleRect, fonts.fHeading, COL_TEXT, true, true);
+
+    // Caja del acuerdo
+    const RectF box(cx - 264.0f, 92.0f, 528.0f, 184.0f);
+    FillRound(g, box, 14.0f, Color(255, 17, 21, 30));
+    StrokeRound(g, box, 14.0f, COL_PANEL_BORDER, 1.0f);
+
+    RectF boxTitle(box.X + 20.0f, box.Y + 12.0f, box.Width - 40.0f, 18.0f);
+    DrawTextIn(g, L"ACUERDO DE LICENCIA", boxTitle, fonts.fLabel, COL_TEXT_SOFT, false, true);
+
+    const wchar_t* licenseText =
+        L"ARTPICST es un visor de imágenes gratuito y de código abierto.\n"
+        L"Este software se distribuye \"tal cual\", sin garantías de ningún tipo,\n"
+        L"expresas o implícitas. El autor no será responsable de los daños que\n"
+        L"puedan derivarse de su uso.\n\n"
+        L"Puedes usarlo, copiarlo y modificarlo libremente para fines personales.\n"
+        L"No está permitida su venta ni su redistribución con fines comerciales\n"
+        L"sin autorización previa.\n\n"
+        L"Al hacer clic en \"Instalar\" aceptas estos términos.";
+
+    // Ajuste adaptativo: si el texto no cabe, se reduce el tamaño de fuente
+    const float textW = box.Width - 40.0f;
+    const float textH = box.Height - 42.0f;
+    const RectF textArea(box.X + 20.0f, box.Y + 36.0f, textW, textH);
+    float fontSize = 12.0f;
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        Font probe(&fonts.family, fontSize, FontStyleRegular, UnitPixel);
+        RectF measured;
+        StringFormat probeFormat;
+        probeFormat.SetFormatFlags(StringFormatFlagsLineLimit);
+        g.MeasureString(licenseText, -1, &probe, RectF(0.0f, 0.0f, textW, 2000.0f), &probeFormat, &measured);
+        if (measured.Height <= textH || fontSize <= 8.5f) break;
+        fontSize -= 0.5f;
+    }
+    Font licenseFont(&fonts.family, fontSize, FontStyleRegular, UnitPixel);
     StringFormat textFormat;
     textFormat.SetAlignment(StringAlignmentNear);
     textFormat.SetLineAlignment(StringAlignmentNear);
-    
-    RectF textRect(licenseBox.X + 22, licenseBox.Y + 20, licenseBox.Width - 44, licenseBox.Height - 40);
-    SolidBrush licenseBrush(Color(255, 180, 190, 200));
-    
-    // Ajuste adaptativo de fuente: si el texto no cabe, se reduce el tamaño
-    // hasta que el acuerdo completo quepa dentro de la caja (nada se recorta).
-    Gdiplus::FontFamily textFamily(L"Segoe UI");
-    float fontSize = 11.0f;
-    for (int attempt = 0; attempt < 6; ++attempt) {
-        Gdiplus::Font probe(&textFamily, fontSize, FontStyleRegular, UnitPoint);
-        RectF measured;
-        g.MeasureString(licenseText, -1, &probe, RectF(0.0f, 0.0f, textRect.Width, 5000.0f), &measured);
-        if (measured.Height <= textRect.Height || fontSize <= 8.5f) break;
-        fontSize -= 0.5f;
+    textFormat.SetFormatFlags(StringFormatFlagsLineLimit);
+    SolidBrush licenseBrush(Color(255, 176, 186, 202));
+    g.DrawString(licenseText, -1, &licenseFont, textArea, &textFormat, &licenseBrush);
+
+    // Opciones de instalación
+    RectF optTitle(cx - 264.0f, 286.0f, 528.0f, 16.0f);
+    DrawTextIn(g, L"OPCIONES DE INSTALACIÓN", optTitle, fonts.fLabel, COL_TEXT_DIM, false, true);
+
+    struct OptionRow { const wchar_t* label; bool* value; int hover; };
+    const OptionRow rows[] = {
+        { L"Crear acceso directo en el Escritorio", &g_state.createDesktopShortcut, HOVER_ROW_DESKTOP },
+        { L"Crear acceso directo en el Menú Inicio", &g_state.createStartMenuShortcut, HOVER_ROW_STARTMENU },
+        { L"Asociar formatos de imagen a ARTPICST", &g_state.registerFileAssociations, HOVER_ROW_ASSOC }
+    };
+
+    for (int i = 0; i < 3; ++i) {
+        const RectF& row = layout.rows[i];
+        const bool hot = g_state.hoverZone == rows[i].hover;
+        FillRound(g, row, 10.0f, hot ? Color(255, 26, 33, 46) : Color(255, 22, 27, 38));
+        StrokeRound(g, row, 10.0f, hot ? COL_BTN_GHOST_BORDER_HOT : COL_PANEL_BORDER, 1.0f);
+
+        const RectF boxRect(row.X + 14.0f, row.Y + (row.Height - 20.0f) * 0.5f, 20.0f, 20.0f);
+        DrawCheckBox(g, boxRect, *rows[i].value);
+
+        RectF labelRect(row.X + 46.0f, row.Y, row.Width - 58.0f, row.Height);
+        DrawTextIn(g, rows[i].label, labelRect, fonts.fSmall, COL_TEXT, false, true);
     }
-    Gdiplus::Font textFont(&textFamily, fontSize, FontStyleRegular, UnitPoint);
-    g.DrawString(licenseText, -1, &textFont, textRect, &textFormat, &licenseBrush);
 }
 
-void RenderInstall(Graphics& g, const RECT& client) {
-    float centerX = static_cast<float>(client.right) / 2.0f;
-    float centerY = static_cast<float>(client.bottom) / 2.0f;
-    
-    Gdiplus::FontFamily titleFamily(L"Segoe UI");
-    Gdiplus::Font titleFont(&titleFamily, 24.0f, FontStyleBold, UnitPoint);
-    Gdiplus::Font textFont(&titleFamily, 11.0f, FontStyleRegular, UnitPoint);
-    
-    StringFormat format;
-    format.SetAlignment(StringAlignmentCenter);
-    format.SetLineAlignment(StringAlignmentCenter);
-    
-    SolidBrush textBrush(TEXT_COLOR);
-    
-    RectF titleRect(0.0f, centerY - 150.0f, static_cast<REAL>(client.right), 40.0f);
-    g.DrawString(L"Instalando ARTPICST", -1, &titleFont, titleRect, &format, &textBrush);
-    
-    // Progress bar
-    RectF progressRect(centerX - 200.0f, centerY - 50.0f, 400.0f, 24.0f);
-    DrawProgress(g, progressRect, g_state.installProgress);
-    
-    // Status text
+void RenderInstall(Graphics& g, const Fonts& fonts, float W, float H) {
+    const float cx = W * 0.5f;
+
+    DrawLogo(g, fonts, cx, 120.0f, 56.0f);
+
+    RectF titleRect(cx - 260.0f, 164.0f, 520.0f, 40.0f);
+    DrawTextIn(g, L"Instalando ARTPICST", titleRect, fonts.fHeading, COL_TEXT, true, true);
+
+    RectF subRect(cx - 260.0f, 206.0f, 520.0f, 22.0f);
+    DrawTextIn(g, L"Se está instalando en tu equipo. No cierres esta ventana.",
+               subRect, fonts.fSmall, COL_TEXT_SOFT, true, true);
+
+    // Barra de progreso
+    const float barY = 252.0f;
+    const RectF track(cx - 220.0f, barY, 440.0f, 12.0f);
+    FillRound(g, track, 6.0f, Color(255, 26, 31, 42));
+    StrokeRound(g, track, 6.0f, Color(255, 43, 53, 70), 1.0f);
+
+    if (g_state.installProgress > 0) {
+        const float fillW = track.Width * (g_state.installProgress / 100.0f);
+        if (fillW > 1.0f) {
+            const RectF fill(track.X, track.Y, fillW, track.Height);
+            Region clip(fill);
+            g.SetClip(&clip);
+            FillRoundGradient(g, track, 6.0f, COL_ACCENT_A, COL_ACCENT_B);
+            g.ResetClip();
+        }
+    }
+
+    // Estado y porcentaje
     wchar_t statusText[512];
-    swprintf_s(statusText, L"%s\n\nProgreso: %d%%", g_state.installStatus.c_str(), g_state.installProgress);
-    
-    RectF statusRect(0.0f, centerY - 10.0f, static_cast<REAL>(client.right), 50.0f);
-    g.DrawString(statusText, -1, &textFont, statusRect, &format, &textBrush);
+    swprintf_s(statusText, 512, L"%s", g_state.installStatus.c_str());
+    RectF statusRect(cx - 280.0f, barY + 28.0f, 560.0f, 24.0f);
+    DrawTextIn(g, statusText, statusRect, fonts.fSmall, COL_TEXT, true, true);
+
+    wchar_t percentText[32];
+    swprintf_s(percentText, 32, L"%d%%", g_state.installProgress);
+    RectF pctRect(cx - 280.0f, barY + 52.0f, 560.0f, 20.0f);
+    DrawTextIn(g, percentText, pctRect, fonts.fLabel, COL_TEXT_SOFT, true, true);
+
+    // Ruta de destino
+    std::wstring dest = L"Destino: " + g_state.installPath;
+    RectF destRect(cx - 300.0f, H - 108.0f, 600.0f, 20.0f);
+    DrawTextIn(g, dest.c_str(), destRect, fonts.fTiny, COL_TEXT_DIM, true, true, StringTrimmingEllipsisCharacter, true);
 }
 
-void RenderComplete(Graphics& g, const RECT& client) {
-    float centerY = static_cast<float>(client.bottom) / 2.0f;
-    
-    Gdiplus::FontFamily titleFamily(L"Segoe UI");
-    Gdiplus::Font titleFont(&titleFamily, 28.0f, FontStyleBold, UnitPoint);
-    Gdiplus::Font textFont(&titleFamily, 12.0f, FontStyleRegular, UnitPoint);
-    
-    StringFormat format;
-    format.SetAlignment(StringAlignmentCenter);
-    format.SetLineAlignment(StringAlignmentCenter);
-    
-    SolidBrush textBrush(TEXT_COLOR);
-    
+void RenderComplete(Graphics& g, const Fonts& fonts, float W, float H) {
+    const float cx = W * 0.5f;
+
     if (g_state.installSucceeded) {
-        RectF titleRect(0.0f, centerY - 100.0f, static_cast<REAL>(client.right), 50.0f);
-        g.DrawString(L"¡Instalación Completada!", -1, &titleFont, titleRect, &format, &textBrush);
-        
-        const wchar_t* completeText = L"ARTPICST se ha instalado correctamente en tu sistema.\n\n"
-            L"Ubicación de instalación:\n"
-            L"%s\n\n"
-            L"Puedes iniciar la aplicación desde el menú de inicio\n"
-            L"o haciendo clic en el botón de abajo.";
-        wchar_t buffer[1024];
-        swprintf_s(buffer, completeText, g_state.installPath.c_str());
-        
-        RectF textRect(0.0f, centerY - 30.0f, static_cast<REAL>(client.right), 100.0f);
-        g.DrawString(buffer, -1, &textFont, textRect, &format, &textBrush);
+        // Anillo verde con check
+        const float r = 38.0f;
+        const float cy = 132.0f;
+        const RectF ring(cx - r, cy - r, r * 2.0f, r * 2.0f);
+        GraphicsPath ringPath;
+        RoundPath(ringPath, ring, r);
+        SolidBrush ringBrush(COL_SUCCESS);
+        g.FillPath(&ringBrush, &ringPath);
+        DrawCheckMark(g, cx - 16.0f, cy + 1.0f, cx - 5.0f, cy + 12.0f, cx + 17.0f, cy - 13.0f, 4.5f, Color(255, 255, 255, 255));
+
+        RectF titleRect(cx - 260.0f, 200.0f, 520.0f, 42.0f);
+        DrawTextIn(g, L"Instalación completada", titleRect, fonts.fTitle, COL_TEXT, true, true);
+
+        RectF subRect(cx - 260.0f, 246.0f, 520.0f, 22.0f);
+        DrawTextIn(g, L"Gracias por elegir ARTPICST.", subRect, fonts.fSmall, COL_TEXT_SOFT, true, true);
+
+        // Tarjeta con la ruta
+        const RectF card(cx - 230.0f, 288.0f, 460.0f, 96.0f);
+        FillRound(g, card, 14.0f, COL_PANEL);
+        StrokeRound(g, card, 14.0f, COL_PANEL_BORDER, 1.0f);
+
+        RectF cardLabel(card.X + 20.0f, card.Y + 14.0f, card.Width - 40.0f, 16.0f);
+        DrawTextIn(g, L"UBICACIÓN DE INSTALACIÓN", cardLabel, fonts.fLabel, COL_TEXT_DIM, false, true);
+
+        RectF cardPath(card.X + 20.0f, card.Y + 38.0f, card.Width - 40.0f, 24.0f);
+        DrawTextIn(g, g_state.installPath.c_str(), cardPath, fonts.fSmall, COL_TEXT, false, true,
+                   StringTrimmingEllipsisCharacter, true);
+
+        RectF cardVer(card.X + 20.0f, card.Y + 66.0f, card.Width - 40.0f, 16.0f);
+        std::wstring ver = std::wstring(L"Versión ") + APP_VERSION + L"  ·  Instalación por usuario";
+        DrawTextIn(g, ver.c_str(), cardVer, fonts.fTiny, COL_TEXT_SOFT, false, true);
     } else {
-        RectF titleRect(0.0f, centerY - 100.0f, static_cast<REAL>(client.right), 50.0f);
-        g.DrawString(L"Error en la Instalación", -1, &titleFont, titleRect, &format, &textBrush);
-        
-        const wchar_t* errorText = L"No se pudo completar la instalación.\n\n"
-            L"Asegúrate de que el instalador se encuentre junto a\n"
-            L"artpicst.exe en la misma carpeta e inténtalo de nuevo.";
-        
-        RectF textRect(0.0f, centerY - 30.0f, static_cast<REAL>(client.right), 60.0f);
-        g.DrawString(errorText, -1, &textFont, textRect, &format, &textBrush);
+        // Anillo rojo con signo de exclamación
+        const float r = 38.0f;
+        const float cy = 132.0f;
+        const RectF ring(cx - r, cy - r, r * 2.0f, r * 2.0f);
+        GraphicsPath ringPath;
+        RoundPath(ringPath, ring, r);
+        SolidBrush ringBrush(COL_ERROR);
+        g.FillPath(&ringBrush, &ringPath);
+        Font bangFont(&fonts.family, 42.0f, FontStyleBold, UnitPixel);
+        DrawTextIn(g, L"!", ring, bangFont, Color(255, 255, 255, 255), true, true);
+
+        RectF titleRect(cx - 260.0f, 196.0f, 520.0f, 42.0f);
+        DrawTextIn(g, L"No se pudo completar la instalación", titleRect, fonts.fTitle, COL_TEXT, true, true);
+
+        RectF msgRect(cx - 260.0f, 246.0f, 520.0f, 66.0f);
+        DrawTextIn(g, L"Coloca el instalador junto a artpicst.exe, artpicst.ico y version.json\n"
+                       L"en la misma carpeta y vuelve a intentarlo.",
+                   msgRect, fonts.fSmall, COL_TEXT_SOFT, true, false);
     }
 }
+
+// ============================================================================
+// Composición de la ventana
+// ============================================================================
 
 void RenderWindow(Graphics& g, const RECT& client) {
-    // Background
-    SolidBrush bgBrush(BG_COLOR);
-    g.FillRectangle(&bgBrush, 0, 0, client.right, client.bottom);
-    
-    // Header line
-    Pen headerPen(ACCENT_COLOR, 2.0f);
-    g.DrawLine(&headerPen, 0.0f, 0.0f, static_cast<REAL>(client.right), 0.0f);
-    
-    // Render current step
+    const float W = static_cast<float>(client.right) / g_scale;
+    const float H = static_cast<float>(client.bottom) / g_scale;
+
+    Fonts fonts;
+    DrawChrome(g, fonts, W, H);
+
+    const LayoutRects layout = ComputeLayout(W, H);
+
     switch (g_state.currentStep) {
         case InstallStep::Welcome:
-            RenderWelcome(g, client);
+            RenderWelcome(g, fonts, W, H);
             break;
         case InstallStep::License:
-            RenderLicense(g, client);
+            RenderLicense(g, fonts, W, H, layout);
             break;
         case InstallStep::Install:
-            RenderInstall(g, client);
+            RenderInstall(g, fonts, W, H);
             break;
         case InstallStep::Complete:
-            RenderComplete(g, client);
+            RenderComplete(g, fonts, W, H);
             break;
     }
-    
-    // Navigation buttons (misma geometría que clic y hover)
-    const ButtonRects r = GetButtonRects(client);
-    
-    if (g_state.currentStep == InstallStep::Welcome) {
-        DrawButton(g, r.next, L"Siguiente →", g_state.hoverZone == HOVER_NEXT, true);
-    } else if (g_state.currentStep == InstallStep::License) {
-        DrawButton(g, r.back, L"← Atrás", g_state.hoverZone == HOVER_BACK, true);
-        DrawButton(g, r.next, L"Aceptar", g_state.hoverZone == HOVER_NEXT, true);
-    } else if (g_state.currentStep == InstallStep::Complete) {
-        DrawButton(g, r.next,
-                   g_state.installSucceeded ? L"Iniciar App" : L"Cerrar",
-                   g_state.hoverZone == HOVER_NEXT, true);
+
+    // Cancelar (arriba a la derecha); nunca durante la instalación
+    if (g_state.currentStep != InstallStep::Install) {
+        DrawGhostButton(g, fonts, layout.cancel, L"Cancelar",
+                        g_state.hoverZone == HOVER_CANCEL && g_state.currentStep != InstallStep::Install);
     }
-    // InstallStep::Install no dibuja botones
-    
-    // Botón Cancelar (arriba a la derecha) - nunca durante la instalación
-    const bool cancelEnabled = g_state.currentStep != InstallStep::Install;
-    DrawButton(g, r.cancel, L"Cancelar", g_state.hoverZone == HOVER_CANCEL && cancelEnabled, cancelEnabled);
+
+    // Pie: botones de navegación
+    if (g_state.currentStep == InstallStep::Welcome) {
+        DrawPrimaryButton(g, fonts, layout.next, L"Siguiente  →", g_state.hoverZone == HOVER_NEXT);
+    } else if (g_state.currentStep == InstallStep::License) {
+        DrawGhostButton(g, fonts, layout.back, L"←  Volver", g_state.hoverZone == HOVER_BACK);
+        DrawPrimaryButton(g, fonts, layout.next, L"Instalar", g_state.hoverZone == HOVER_NEXT);
+    } else if (g_state.currentStep == InstallStep::Complete) {
+        if (g_state.installSucceeded) {
+            DrawGhostButton(g, fonts, layout.back, L"Cerrar", g_state.hoverZone == HOVER_BACK);
+            DrawPrimaryButton(g, fonts, layout.next, L"Iniciar ARTPICST", g_state.hoverZone == HOVER_NEXT);
+        } else {
+            DrawGhostButton(g, fonts, layout.back, L"Reintentar", g_state.hoverZone == HOVER_BACK);
+            DrawPrimaryButton(g, fonts, layout.next, L"Cerrar", g_state.hoverZone == HOVER_NEXT);
+        }
+    }
 }
 
 // ============================================================================
@@ -640,8 +828,10 @@ void RenderWindow(Graphics& g, const RECT& client) {
 // ============================================================================
 
 void PerformInstallation() {
+    if (g_state.isInstalling) return; // evita dobles clics / Enter repetido
     g_state.isInstalling = true;
     g_state.currentStep = InstallStep::Install;
+    g_state.hoverZone = HOVER_NONE;
     g_state.installProgress = 0;
     InvalidateRect(g_state.hwnd, nullptr, FALSE);
 
@@ -667,12 +857,19 @@ void PerformInstallation() {
     }
 
     if (ok) {
-        step(20, L"Copiando el programa principal...");
+        step(18, L"Comprobando archivos de la aplicación...");
+        if (GetFileAttributesW((srcDir + L"\\artpicst.exe").c_str()) == INVALID_FILE_ATTRIBUTES) {
+            ok = false;
+        }
+    }
+
+    if (ok) {
+        step(32, L"Copiando el programa principal...");
         ok = CopyFileIfExists(srcDir + L"\\artpicst.exe", dst + L"\\artpicst.exe");
     }
 
     if (ok) {
-        step(35, L"Copiando recursos y documentación...");
+        step(48, L"Copiando recursos y documentación...");
         CopyFileIfExists(srcDir + L"\\artpicst.ico", dst + L"\\artpicst.ico");
         CopyFileIfExists(srcDir + L"\\README.md", dst + L"\\README.md");
         CopyFileIfExists(srcDir + L"\\version.json", dst + L"\\version.json");
@@ -680,7 +877,7 @@ void PerformInstallation() {
     }
 
     if (ok) {
-        step(55, L"Creando accesos directos...");
+        step(62, L"Creando accesos directos...");
         const std::wstring desktop = GetShellFolder(CSIDL_DESKTOPDIRECTORY);
         const std::wstring programs = GetShellFolder(CSIDL_PROGRAMS);
         if (g_state.createDesktopShortcut && !desktop.empty()) {
@@ -695,12 +892,12 @@ void PerformInstallation() {
     }
 
     if (ok) {
-        step(70, L"Registrando asociaciones de archivo...");
+        step(76, L"Registrando asociaciones de archivo...");
         ok = !g_state.registerFileAssociations || RegisterFileAssociations(dst + L"\\artpicst.exe");
     }
 
     if (ok) {
-        step(85, L"Registrando el desinstalador...");
+        step(88, L"Registrando el desinstalador...");
         ok = WriteUninstallEntry(dst);
     }
 
@@ -713,50 +910,140 @@ void PerformInstallation() {
     g_state.isInstalling = false;
     g_state.installSucceeded = ok;
     g_state.currentStep = InstallStep::Complete;
+    g_state.hoverZone = HOVER_NONE;
     InvalidateRect(g_state.hwnd, nullptr, FALSE);
     UpdateWindow(g_state.hwnd);
 }
 
+// Acción del botón principal (Siguiente / Instalar / Iniciar / Cerrar)
+void InvokePrimaryAction() {
+    if (g_state.isInstalling) return;
+    switch (g_state.currentStep) {
+        case InstallStep::Welcome:
+            g_state.currentStep = InstallStep::License;
+            g_state.hoverZone = HOVER_NONE;
+            InvalidateRect(g_state.hwnd, nullptr, FALSE);
+            break;
+        case InstallStep::License:
+            PerformInstallation();
+            break;
+        case InstallStep::Complete:
+            if (g_state.installSucceeded) {
+                ShellExecuteW(nullptr, L"open", (g_state.installPath + L"\\artpicst.exe").c_str(),
+                              nullptr, g_state.installPath.c_str(), SW_SHOWNORMAL);
+            }
+            PostMessageW(g_state.hwnd, WM_CLOSE, 0, 0);
+            break;
+        default:
+            break;
+    }
+}
+
+void InvokeBackAction() {
+    if (g_state.isInstalling) return;
+    switch (g_state.currentStep) {
+        case InstallStep::License:
+            g_state.currentStep = InstallStep::Welcome;
+            g_state.hoverZone = HOVER_NONE;
+            InvalidateRect(g_state.hwnd, nullptr, FALSE);
+            break;
+        case InstallStep::Complete:
+            if (g_state.installSucceeded) {
+                // Botón "Cerrar" del éxito
+                PostMessageW(g_state.hwnd, WM_CLOSE, 0, 0);
+            } else {
+                // Botón "Reintentar" del error
+                PerformInstallation();
+            }
+            break;
+        default:
+            break;
+    }
+}
+
+void ToggleOptionAt(int rowIndex) {
+    switch (rowIndex) {
+        case 0: g_state.createDesktopShortcut = !g_state.createDesktopShortcut; break;
+        case 1: g_state.createStartMenuShortcut = !g_state.createStartMenuShortcut; break;
+        case 2: g_state.registerFileAssociations = !g_state.registerFileAssociations; break;
+        default: return;
+    }
+    InvalidateRect(g_state.hwnd, nullptr, FALSE);
+}
+
+// ============================================================================
+// Ventana
+// ============================================================================
+
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     static HCURSOR s_cursorArrow = LoadCursor(nullptr, IDC_ARROW);
     static HCURSOR s_cursorHand = LoadCursor(nullptr, IDC_HAND);
+
     switch (msg) {
+        case WM_CREATE: {
+            g_state.hwnd = hwnd;
+            g_state.installPath = GetDefaultInstallPath();
+
+            // Barra de título oscura (Windows 10/11)
+            BOOL darkMode = TRUE;
+            DwmSetWindowAttribute(hwnd, 20, &darkMode, sizeof(BOOL));
+            DwmSetWindowAttribute(hwnd, 19, &darkMode, sizeof(BOOL));
+
+            // Esquinas redondeadas estilo Windows 11 (se ignora en versiones antiguas)
+            const int cornerPref = 2; // DWMWCP_ROUND
+            DwmSetWindowAttribute(hwnd, 33, &cornerPref, sizeof(cornerPref));
+
+            // Tamaño mínimo (escalado por DPI)
+            return 0;
+        }
+        case WM_GETMINMAXINFO: {
+            auto* info = reinterpret_cast<LPMINMAXINFO>(lParam);
+            if (info) {
+                info->ptMinTrackSize.x = static_cast<LONG>(MIN_DESIGN_W * g_scale + 0.5f);
+                info->ptMinTrackSize.y = static_cast<LONG>(MIN_DESIGN_H * g_scale + 0.5f);
+            }
+            return 0;
+        }
+        case WM_DPICHANGED: {
+            const UINT newDpi = HIWORD(wParam);
+            if (newDpi > 0) g_scale = newDpi / 96.0f;
+            const RECT* suggested = reinterpret_cast<const RECT*>(lParam);
+            if (suggested) {
+                SetWindowPos(hwnd, nullptr, suggested->left, suggested->top,
+                             suggested->right - suggested->left,
+                             suggested->bottom - suggested->top,
+                             SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+            InvalidateRect(hwnd, nullptr, TRUE);
+            return 0;
+        }
         case WM_CLOSE:
             // Nunca cerrar a mitad de instalación (evita instalaciones a medias)
             if (g_state.isInstalling) return 0;
             return DefWindowProcW(hwnd, msg, wParam, lParam);
-        case WM_CREATE: {
-            g_state.hwnd = hwnd;
-            g_state.installPath = GetDefaultInstallPath();
-            
-            // Enable dark title bar
-            BOOL darkMode = TRUE;
-            DwmSetWindowAttribute(hwnd, 20, &darkMode, sizeof(BOOL));
-            DwmSetWindowAttribute(hwnd, 19, &darkMode, sizeof(BOOL));
-            
-            return 0;
-        }
         case WM_PAINT: {
             PAINTSTRUCT ps;
             HDC hdc = BeginPaint(hwnd, &ps);
-            
-            Graphics graphics(hdc);
-            graphics.SetCompositingQuality(CompositingQualityHighQuality);
-            graphics.SetSmoothingMode(SmoothingModeHighQuality);
-            graphics.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
-            
-            RECT client;
-            GetClientRect(hwnd, &client);
-            RenderWindow(graphics, client);
-            
+            if (hdc) {
+                Graphics graphics(hdc);
+                graphics.ScaleTransform(g_scale, g_scale);
+                graphics.SetCompositingQuality(CompositingQualityHighQuality);
+                graphics.SetSmoothingMode(SmoothingModeHighQuality);
+                graphics.SetPixelOffsetMode(PixelOffsetModeHalf);
+                graphics.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
+
+                RECT client;
+                GetClientRect(hwnd, &client);
+                RenderWindow(graphics, client);
+            }
             EndPaint(hwnd, &ps);
             return 0;
         }
         case WM_ERASEBKGND:
             return TRUE;
         case WM_MOUSEMOVE: {
-            int x = GET_X_LPARAM(lParam);
-            int y = GET_Y_LPARAM(lParam);
+            const int x = GET_X_LPARAM(lParam);
+            const int y = GET_Y_LPARAM(lParam);
             if (!g_state.mouseTracking) {
                 TRACKMOUSEEVENT tme{};
                 tme.cbSize = sizeof(tme);
@@ -767,7 +1054,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
             RECT client;
             GetClientRect(hwnd, &client);
-            const int zone = HoverZoneAt(client, x, y);
+            const float W = static_cast<float>(client.right) / g_scale;
+            const float H = static_cast<float>(client.bottom) / g_scale;
+            const LayoutRects layout = ComputeLayout(W, H);
+            const int zone = HoverZoneAt(layout, DesignX(x), DesignY(y));
             if (zone != g_state.hoverZone) {
                 g_state.hoverZone = zone;
                 InvalidateRect(hwnd, nullptr, FALSE);
@@ -785,61 +1075,99 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
         }
         case WM_DESTROY:
-            // GDI+ se apaga una sola vez en wWinMain (evita doble shutdown)
             PostQuitMessage(0);
             return 0;
+        case WM_KEYDOWN: {
+            if (g_state.isInstalling) return 0;
+            if (wParam == VK_RETURN) {
+                InvokePrimaryAction();
+            } else if (wParam == VK_ESCAPE) {
+                PostMessageW(hwnd, WM_CLOSE, 0, 0);
+            }
+            return 0;
+        }
         case WM_LBUTTONDOWN: {
-            int x = GET_X_LPARAM(lParam);
-            int y = GET_Y_LPARAM(lParam);
-            
+            if (g_state.isInstalling) return 0;
+            const int x = GET_X_LPARAM(lParam);
+            const int y = GET_Y_LPARAM(lParam);
+            const float lx = DesignX(x);
+            const float ly = DesignY(y);
+
             RECT client;
             GetClientRect(hwnd, &client);
-            
-            const ButtonRects r = GetButtonRects(client);
-            auto hit = [](const RectF& rc, int px, int py) {
+            const float W = static_cast<float>(client.right) / g_scale;
+            const float H = static_cast<float>(client.bottom) / g_scale;
+            const LayoutRects layout = ComputeLayout(W, H);
+
+            auto hit = [](const RectF& rc, float px, float py) {
                 return px >= rc.X && px <= rc.X + rc.Width &&
                        py >= rc.Y && py <= rc.Y + rc.Height;
             };
-            
-            // Botón inferior derecho: Siguiente / Aceptar / Iniciar App / Cerrar
-            if (g_state.currentStep != InstallStep::Install && hit(r.next, x, y)) {
-                switch (g_state.currentStep) {
-                    case InstallStep::Welcome:
-                        g_state.currentStep = InstallStep::License;
-                        break;
-                    case InstallStep::License:
-                        PerformInstallation();
-                        break;
-                    case InstallStep::Complete:
-                        if (g_state.installSucceeded) {
-                            // Launch application
-                            ShellExecuteW(nullptr, L"open", (g_state.installPath + L"\\artpicst.exe").c_str(),
-                                          nullptr, g_state.installPath.c_str(), SW_SHOWNORMAL);
-                        }
-                        PostMessage(hwnd, WM_CLOSE, 0, 0);
-                        break;
-                    default:
-                        break;
+
+            // Filas de opciones (página de licencia): alternar selección
+            if (g_state.currentStep == InstallStep::License) {
+                for (int i = 0; i < layout.rowCount; ++i) {
+                    if (hit(layout.rows[i], lx, ly)) {
+                        ToggleOptionAt(i);
+                        return 0;
+                    }
                 }
-                InvalidateRect(hwnd, nullptr, FALSE);
             }
-            
-            // Botón inferior izquierdo: Atrás (solo en Licencia)
-            if (g_state.currentStep == InstallStep::License && hit(r.back, x, y)) {
-                g_state.currentStep = InstallStep::Welcome;
-                InvalidateRect(hwnd, nullptr, FALSE);
+
+            // Botón principal / Atrás / Cancelar
+            if (hit(layout.next, lx, ly)) {
+                InvokePrimaryAction();
+                return 0;
             }
-            
-            // Botón Cancelar (arriba a la derecha), nunca durante la instalación
-            if (g_state.currentStep != InstallStep::Install && hit(r.cancel, x, y)) {
-                PostMessage(hwnd, WM_CLOSE, 0, 0);
+            if (g_state.currentStep != InstallStep::Install && hit(layout.cancel, lx, ly)) {
+                PostMessageW(hwnd, WM_CLOSE, 0, 0);
+                return 0;
             }
-            
+            if (g_state.currentStep == InstallStep::License && hit(layout.back, lx, ly)) {
+                InvokeBackAction();
+                return 0;
+            }
+            if (g_state.currentStep == InstallStep::Complete && hit(layout.back, lx, ly)) {
+                InvokeBackAction();
+                return 0;
+            }
             return 0;
         }
         default:
-            return DefWindowProc(hwnd, msg, wParam, lParam);
+            return DefWindowProcW(hwnd, msg, wParam, lParam);
     }
+}
+
+// ============================================================================
+// Inicio
+// ============================================================================
+
+typedef BOOL(WINAPI* PFN_SetProcessDpiAwarenessContext)(HANDLE value);
+
+static void EnableDpiAwareness() {
+    // Prioridad 1: PerMonitorV2 (Windows 10 1607+)
+    HMODULE user32 = GetModuleHandleW(L"user32.dll");
+    if (user32) {
+        auto fn = reinterpret_cast<PFN_SetProcessDpiAwarenessContext>(
+            GetProcAddress(user32, "SetProcessDpiAwarenessContext"));
+        if (fn) {
+            const HANDLE PMV2 = reinterpret_cast<HANDLE>(-4);
+            if (fn(PMV2)) return;
+        }
+    }
+    // Prioridad 2: DPI-aware clásico (Windows Vista+)
+    SetProcessDPIAware();
+}
+
+static float GetSystemScale() {
+    HDC dc = GetDC(nullptr);
+    int dpi = 96;
+    if (dc) {
+        dpi = GetDeviceCaps(dc, LOGPIXELSY);
+        ReleaseDC(nullptr, dc);
+    }
+    if (dpi < 48) dpi = 96;
+    return dpi / 96.0f;
 }
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine, int nCmdShow) {
@@ -871,6 +1199,31 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
         return 0;
     }
 
+    // DPI: el diseño se hace en unidades 96 DPI y se escala por g_scale
+    EnableDpiAwareness();
+    g_scale = GetSystemScale();
+
+    // Limitar la escala inicial para que la ventana quepa en pantallas pequeñas
+    {
+        RECT workArea;
+        if (SystemParametersInfoW(SPI_GETWORKAREA, 0, &workArea, 0)) {
+            const float fitH = static_cast<float>(workArea.bottom - workArea.top) / (DESIGN_H + 48.0f);
+            const float fitW = static_cast<float>(workArea.right - workArea.left) / (DESIGN_W + 16.0f);
+            const float fit = fitH < fitW ? fitH : fitW;
+            if (fit < g_scale) g_scale = fit;
+            if (g_scale < 1.0f) g_scale = 1.0f;
+        }
+    }
+
+    // Una sola instancia del instalador a la vez
+    HANDLE hMutex = CreateMutexW(nullptr, TRUE, L"Local\\ARTPICST_Installer_Mutex");
+    if (!hMutex || GetLastError() == ERROR_ALREADY_EXISTS) {
+        MessageBoxW(nullptr, L"El instalador de ARTPICST ya está en ejecución.",
+                    L"ARTPICST", MB_OK | MB_ICONINFORMATION);
+        if (hMutex) CloseHandle(hMutex);
+        return 0;
+    }
+
     g_state.hInstance = hInstance;
     (void)pCmdLine;
 
@@ -878,14 +1231,15 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
     HRESULT comHr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     const bool comOk = SUCCEEDED(comHr);
 
-    // Initialize GDI+
+    // Inicializar GDI+
     if (GdiplusStartup(&g_state.gdiplusToken, &g_state.gdiplusStartupInput, nullptr) != Ok) {
         if (comOk) CoUninitialize();
+        CloseHandle(hMutex);
         MessageBoxW(nullptr, L"No se pudo inicializar la interfaz gráfica.", L"ARTPICST", MB_OK | MB_ICONERROR);
         return 1;
     }
 
-    // Register window class
+    // Registrar la clase de ventana
     WNDCLASSEXW wc = {0};
     wc.cbSize = sizeof(wc);
     wc.style = CS_HREDRAW | CS_VREDRAW;
@@ -897,49 +1251,59 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
     wc.hIcon = LoadIconW(hInstance, MAKEINTRESOURCEW(101));
     if (!wc.hIcon) wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
     wc.hIconSm = wc.hIcon;
-    
+
     if (!RegisterClassExW(&wc)) {
         MessageBoxW(nullptr, L"No se pudo registrar la ventana del instalador.", L"ARTPICST", MB_OK | MB_ICONERROR);
         GdiplusShutdown(g_state.gdiplusToken);
         if (comOk) CoUninitialize();
+        CloseHandle(hMutex);
         return 1;
     }
-    
-    // Create window
+
+    // Crear la ventana (tamaño en píxeles físicos = diseño × escala DPI)
+    const int winW = static_cast<int>(DESIGN_W * g_scale + 0.5f);
+    const int winH = static_cast<int>(DESIGN_H * g_scale + 0.5f);
     HWND hwnd = CreateWindowExW(
         WS_EX_APPWINDOW,
         CLASS_NAME,
         L"Instalador de ARTPICST",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
         CW_USEDEFAULT, CW_USEDEFAULT,
-        600, 500,
+        winW, winH,
         nullptr, nullptr, hInstance, nullptr
     );
-    
+
     if (!hwnd) {
         UnregisterClassW(CLASS_NAME, hInstance);
         GdiplusShutdown(g_state.gdiplusToken);
         if (comOk) CoUninitialize();
+        CloseHandle(hMutex);
+        MessageBoxW(nullptr, L"No se pudo crear la ventana del instalador.", L"ARTPICST", MB_OK | MB_ICONERROR);
         return 1;
     }
-    
-    // Center window
+
+    // Centrar en el área de trabajo de la pantalla principal
     RECT rect;
     GetWindowRect(hwnd, &rect);
-    int screenWidth = GetSystemMetrics(SM_CXSCREEN);
-    int screenHeight = GetSystemMetrics(SM_CYSCREEN);
-    SetWindowPos(hwnd, nullptr, (screenWidth - rect.right) / 2, (screenHeight - rect.bottom) / 2, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
-    
-    ShowWindow(hwnd, nCmdShow);
+    const int winWpx = rect.right - rect.left;
+    const int winHpx = rect.bottom - rect.top;
+    RECT workArea;
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &workArea, 0);
+    const int posX = workArea.left + (workArea.right - workArea.left - winWpx) / 2;
+    const int posY = workArea.top + (workArea.bottom - workArea.top - winHpx) / 2;
+    SetWindowPos(hwnd, nullptr, posX, posY, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+
+    ShowWindow(hwnd, nCmdShow > 0 ? nCmdShow : SW_SHOWNORMAL);
     UpdateWindow(hwnd);
-    
+
     MSG msg;
-    while (GetMessage(&msg, nullptr, 0, 0)) {
+    while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
         TranslateMessage(&msg);
-        DispatchMessage(&msg);
+        DispatchMessageW(&msg);
     }
-    
+
     GdiplusShutdown(g_state.gdiplusToken);
     if (comOk) CoUninitialize();
+    CloseHandle(hMutex);
     return static_cast<int>(msg.wParam);
 }

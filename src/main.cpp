@@ -143,12 +143,12 @@ Color GLASS_BTN_ACTIVE = GLASS_BTN_ACTIVE_DARK;
 const float MIN_ZOOM = 0.01f;
 const float MAX_ZOOM = 200.0f;
 const float ZOOM_STEP = 1.25f;
-const size_t CACHE_SIZE = 6;                           // Tamaño de caché equilibrado para navegación suave
-const size_t MAX_CACHE_BYTES = 128ull * 1024ull * 1024ull; // 128 MB límite para evitar consumo excesivo
+const size_t CACHE_SIZE = 4;                           // Caché compacta (2 previas + 2 siguientes) para consumo ultra-ligero
+const size_t MAX_CACHE_BYTES = 64ull * 1024ull * 1024ull; // 64 MB límite de caché: evita picos de RAM (~300 MB) con fotos grandes
 const int MAX_DIMENSION = 3840;
 const LONGLONG MAX_FILE_BYTES = 300LL * 1024LL * 1024LL;
-const int MAX_GIF_FRAMES = 240;
-const size_t MAX_GIF_BYTES = 96ull * 1024ull * 1024ull;
+const int MAX_GIF_FRAMES = 120;
+const size_t MAX_GIF_BYTES = 64ull * 1024ull * 1024ull;
 
 // Configuración de renderizado ultraligero - efectos desactivados
 const bool ENABLE_ULTRA_QUALITY_RENDERING = false;
@@ -2027,6 +2027,30 @@ void StoreCurrentInCache() {
     if (g_state.gif.animated()) return;
     size_t bytes = 0;
     if (!SafePixelBytes(g_state.imageWidth, g_state.imageHeight, bytes) || bytes > MAX_CACHE_BYTES) return;
+
+    // Si la imagen ya está en caché (carga desde caché o rotación/volteo),
+    // basta con actualizar sus metadatos EN EL MISMO nodo: no se duplica el
+    // buffer de píxeles (hasta ~59 MB por imagen en 4K), que era el motivo de
+    // que el consumo de RAM se disparase al navegar o transformar fotos.
+    const std::wstring key = CacheKey(g_state.currentFilePath);
+    {
+        std::lock_guard<std::mutex> lock(g_state.cacheMutex);
+        auto it = g_state.cacheIndex.find(key);
+        if (it != g_state.cacheIndex.end() && it->second != g_state.imageCache.end()) {
+            CachedImage& entry = *it->second;
+            entry.rotation = g_state.currentRotation;
+            entry.flipH = g_state.currentFlipH;
+            entry.flipV = g_state.currentFlipV;
+            entry.channels = g_state.imageChannels;
+            entry.hasAlpha = g_state.hasAlpha;
+            entry.decoder = g_state.decoderName;
+            // Mover al extremo MRU de la lista LRU sin copiar píxeles
+            g_state.imageCache.splice(g_state.imageCache.end(), g_state.imageCache, it->second);
+            it->second = std::prev(g_state.imageCache.end());
+            return;
+        }
+    }
+
     unsigned char* copy = static_cast<unsigned char*>(malloc(bytes));
     if (!copy) return;
     memcpy(copy, g_state.imageData, bytes);
@@ -2087,6 +2111,9 @@ bool LoadImageFromPath(const std::wstring& filepath) {
         ApplyLoadedImage(cached.data, cached.width, cached.height, cached.channels, cached.rotation,
                          cached.flipH, cached.flipV, cached.hasAlpha, filepath, cached.decoder);
         cached.data = nullptr;
+        // Devolver al sistema las páginas del buffer de la imagen anterior:
+        // el heap de Windows retiene los bloques libres y la RAM subiría sin parar.
+        TrimProcessMemory();
         return true;
     }
 
@@ -2105,6 +2132,10 @@ bool LoadImageFromPath(const std::wstring& filepath) {
     g_state.gif = std::move(decodedGif);
     StoreCurrentInCache();
     StartGifTimer();
+    // Liberar las páginas de los buffers temporales de decodificación (un JPEG
+    // de hasta 300 MB se lee entero en memoria) y de la imagen reemplazada, para
+    // que el consumo real no se quede anclado en el pico de RAM (~300 MB).
+    TrimProcessMemory();
     return true;
 }
 

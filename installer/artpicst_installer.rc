@@ -1,0 +1,36 @@
+// Icono y versión del instalador de ARTPICST.
+// El icono se localiza desde el directorio de compilación o la ruta INCLUDE
+// (los scripts de compilación añaden la raíz del repositorio a INCLUDE).
+
+#define IDI_APP_ICON 101
+
+IDI_APP_ICON ICON "resources/artpicst.ico"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION 1,2,0,0
+PRODUCTVERSION 1,2,0,0
+FILEFLAGSMASK 0x3FL
+FILEFLAGS 0x0L
+FILEOS 0x40004L
+FILETYPE 0x1L
+FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904E4"
+        BEGIN
+            VALUE "CompanyName", "ARTPICST"
+            VALUE "FileDescription", "ARTPICST Installer"
+            VALUE "FileVersion", "1.2.0"
+            VALUE "InternalName", "artpicst_installer"
+            VALUE "LegalCopyright", "Copyright (C) 2026 ARTPICST"
+            VALUE "OriginalFilename", "artpicst_installer.exe"
+            VALUE "ProductName", "ARTPICST"
+            VALUE "ProductVersion", "1.2.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1252
+    END
+END
