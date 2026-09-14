@@ -2474,14 +2474,14 @@ void LayoutHud(const RECT& client) {
     for (int i = 0; i < count; ++i) totalItemsWidth += items[i].w + (i > 0 ? gap : 0);
 
     const int naturalDockWidth = totalItemsWidth + (paddingX * 2);
-    const int availableWidth = std::max(320, client.right - 20);
+    const int availableWidth = std::max(320, static_cast<int>(client.right) - 20);
     const float scale = std::min(1.0f, static_cast<float>(availableWidth) / naturalDockWidth);
     const int scaledGap = std::max(3, static_cast<int>(gap * scale + 0.5f));
     const int scaledPaddingX = std::max(6, static_cast<int>(paddingX * scale + 0.5f));
     const int dockWidth = std::min(naturalDockWidth, availableWidth);
-    const int dockX = std::max(10, (client.right - dockWidth) / 2);
+    const int dockX = std::max(10, (static_cast<int>(client.right) - dockWidth) / 2);
     const int bottomMargin = g_state.isFullscreen ? (compact ? 12 : 24) : 16;
-    const int dockY = std::max(4, client.bottom - dockHeight - bottomMargin);
+    const int dockY = std::max(4, static_cast<int>(client.bottom) - dockHeight - bottomMargin);
 
     g_state.dockRect = { dockX, dockY, dockX + dockWidth, dockY + dockHeight };
 
