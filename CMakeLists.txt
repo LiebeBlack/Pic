@@ -17,9 +17,16 @@ add_executable(artpicst WIN32
     artpicst.rc
 )
 
+file(TO_CMAKE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/resources/artpicst.ico" ARTPICST_ICON_PATH)
+configure_file(
+    installer/artpicst_installer.rc.in
+    "${CMAKE_CURRENT_BINARY_DIR}/artpicst_installer.rc"
+    @ONLY
+)
+
 add_executable(artpicst_installer WIN32
     installer/artpicst_installer.cpp
-    installer/artpicst_installer.rc
+    "${CMAKE_CURRENT_BINARY_DIR}/artpicst_installer.rc"
 )
 
 target_include_directories(artpicst PRIVATE
