@@ -19,6 +19,7 @@ add_executable(artpicst WIN32
 
 add_executable(artpicst_installer WIN32
     installer/artpicst_installer.cpp
+    installer/artpicst_installer.rc
 )
 
 target_include_directories(artpicst PRIVATE

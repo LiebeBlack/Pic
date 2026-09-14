@@ -53,6 +53,7 @@
 #include <fstream>
 #include <iterator>
 #include <list>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -358,6 +359,7 @@ struct AppState {
 
     // Sincronización de fotogramas GIF (evita deriva de tiempo)
     DWORD gifLastTick = 0;
+    bool gifPaused = false;
 
     // Animación de zoom suave (interpolada por temporizador)
     bool zoomAnimActive = false;
@@ -539,6 +541,7 @@ std::wstring WideToLower(std::wstring value);
 std::string WideToUtf8(const std::wstring& value);
 void ApplyWindowMode(HWND hwnd, WindowMode mode);
 std::wstring NormalizePath(const std::wstring& path);
+std::wstring CacheKey(const std::wstring& path);
 void ZoomAt(float factor, int pivotX, int pivotY);
 void CancelZoomAnimation();
 void DeleteCurrentImage();
@@ -560,7 +563,16 @@ static bool SafePixelBytes(int width, int height, size_t& outBytes) {
 
 // Libera páginas de memoria física no utilizadas devolviéndolas al sistema operativo
 static void TrimProcessMemory() {
-    SetProcessWorkingSetSize(GetCurrentProcess(), static_cast<SIZE_T>(-1), static_cast<SIZE_T>(-1));
+    // Recortar el working set es costoso y puede forzar a Windows a volver a
+    // paginar datos inmediatamente. Solo se solicita en transiciones reales
+    // de memoria, no durante cada cambio de imagen o actualización de caché.
+    static DWORD lastTrimTick = 0;
+    const DWORD now = GetTickCount();
+    if (lastTrimTick != 0 && now - lastTrimTick < 1500) return;
+    if (SetProcessWorkingSetSize(GetCurrentProcess(), static_cast<SIZE_T>(-1),
+                                 static_cast<SIZE_T>(-1))) {
+        lastTrimTick = now;
+    }
 }
 
 static void DownscaleImageIfTooLarge(unsigned char*& pixels, int& width, int& height) {
@@ -632,10 +644,12 @@ std::wstring WideToLower(std::wstring value) {
 
 // Utilidades de rutas
 bool PathsEqualCaseInsensitive(const std::wstring& a, const std::wstring& b) {
-    return WideToLower(a) == WideToLower(b);
+    return CacheKey(a) == CacheKey(b);
 }
 
-std::wstring CacheKey(const std::wstring& path) { return WideToLower(path); }
+std::wstring CacheKey(const std::wstring& path) {
+    return WideToLower(NormalizePath(path));
+}
 
 std::wstring NormalizePath(const std::wstring& path) {
     if (path.empty()) return path;
@@ -688,9 +702,22 @@ void StopGifTimer() {
 
 void StartGifTimer() {
     StopGifTimer();
-    if (!g_state.hwnd || !g_state.gif.animated()) return;
+    if (!g_state.hwnd || !g_state.gif.animated() || g_state.gifPaused) return;
     g_state.gifLastTick = GetTickCount();
     SetTimer(g_state.hwnd, TIMER_GIF, static_cast<UINT>(g_state.gif.delayAt(g_state.gif.current)), nullptr);
+}
+
+void ToggleGifPlayback() {
+    if (!g_state.gif.animated()) return;
+    g_state.gifPaused = !g_state.gifPaused;
+    if (g_state.gifPaused) {
+        StopGifTimer();
+        ShowOSD(L"GIF pausado");
+    } else {
+        StartGifTimer();
+        ShowOSD(L"GIF reproducido");
+    }
+    InvalidateRect(g_state.hwnd, nullptr, FALSE);
 }
 
 LRESULT CALLBACK ThemedDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -1456,6 +1483,7 @@ void FreeCurrentImage() {
     g_state.currentFlipH = false;
     g_state.currentFlipV = false;
     g_state.hasAlpha = false;
+    g_state.gifPaused = false;
     g_state.effectUltraClarity = false;
     g_state.effectGrayscale = false;
     g_state.effectInvert = false;
@@ -1562,6 +1590,7 @@ void ShowProgramInfoDialog(HWND hwnd) {
     info += L"  Rueda / + / - : Acercar / alejar zoom\n";
     info += L"  F : Ajustar imagen a la ventana\n";
     info += L"  1 o 0 : Tamaño real al 100%\n";
+    info += L"  P : Pausar / reproducir GIF animado\n";
     info += L"  D : Alternar modo Ultra-Claridad\n";
     info += L"  R / Shift+R : Girar 90° horario / antihorario\n";
     info += L"  H / V : Volteo horizontal / vertical\n";
@@ -2415,6 +2444,7 @@ std::wstring GetFileName(const std::wstring& filepath) {
 }
 
 void AddRoundedRect(GraphicsPath& path, const RectF& rect, float radius) {
+    radius = std::max(0.0f, std::min(radius, std::min(rect.Width, rect.Height) * 0.5f));
     float diameter = radius * 2.0f;
     path.AddArc(rect.X, rect.Y, diameter, diameter, 180, 90);
     path.AddArc(rect.X + rect.Width - diameter, rect.Y, diameter, diameter, 270, 90);
@@ -2425,7 +2455,12 @@ void AddRoundedRect(GraphicsPath& path, const RectF& rect, float radius) {
 
 void LayoutHud(const RECT& client) {
     g_state.hudCount = 0;
-    const int dockHeight = 44, itemH = 32, gap = 6, paddingX = 10, paddingY = 6;
+    const bool compact = client.bottom < 560 || client.right < 900;
+    const int dockHeight = compact ? 42 : 48;
+    const int itemH = compact ? 30 : 34;
+    const int gap = compact ? 5 : 7;
+    const int paddingX = compact ? 8 : 12;
+    const int paddingY = (dockHeight - itemH) / 2;
 
     struct ItemDef { HudId id; const wchar_t* label; int w; } items[] = {
         { HUD_PREV, L"◀", 32 }, { HUD_NEXT, L"▶", 32 }, { HUD_FIT, L"Ajustar", 60 },
@@ -2438,20 +2473,27 @@ void LayoutHud(const RECT& client) {
     const int count = sizeof(items) / sizeof(items[0]);
     for (int i = 0; i < count; ++i) totalItemsWidth += items[i].w + (i > 0 ? gap : 0);
 
-    const int dockWidth = totalItemsWidth + (paddingX * 2);
-    const int dockX = std::max(10, static_cast<int>((client.right - dockWidth) / 2));
-    const int dockY = client.bottom - dockHeight - 16;
+    const int naturalDockWidth = totalItemsWidth + (paddingX * 2);
+    const int availableWidth = std::max(320, client.right - 20);
+    const float scale = std::min(1.0f, static_cast<float>(availableWidth) / naturalDockWidth);
+    const int scaledGap = std::max(3, static_cast<int>(gap * scale + 0.5f));
+    const int scaledPaddingX = std::max(6, static_cast<int>(paddingX * scale + 0.5f));
+    const int dockWidth = std::min(naturalDockWidth, availableWidth);
+    const int dockX = std::max(10, (client.right - dockWidth) / 2);
+    const int bottomMargin = g_state.isFullscreen ? (compact ? 12 : 24) : 16;
+    const int dockY = std::max(4, client.bottom - dockHeight - bottomMargin);
 
     g_state.dockRect = { dockX, dockY, dockX + dockWidth, dockY + dockHeight };
 
-    int curX = dockX + paddingX;
+    int curX = dockX + scaledPaddingX;
     const int curY = dockY + paddingY;
 
     for (int i = 0; i < count && g_state.hudCount < 12; ++i) {
         HudItem& item = g_state.hud[g_state.hudCount++];
         item.id = items[i].id; item.label = items[i].label;
-        item.rc = { curX, curY, curX + items[i].w, curY + itemH };
-        curX += items[i].w + gap;
+        const int itemWidth = std::max(28, static_cast<int>(items[i].w * scale + 0.5f));
+        item.rc = { curX, curY, curX + itemWidth, curY + itemH };
+        curX += itemWidth + scaledGap;
     }
 }
 
@@ -2718,9 +2760,9 @@ void RenderImage(const RECT* clipRect) {
         graphics.SetSmoothingMode(SmoothingModeAntiAlias);
         const bool pixelPerfectZoom = std::fabs(g_state.zoom - std::round(g_state.zoom)) < 0.01f && g_state.zoom >= 1.0f;
         if (g_state.zoom < 1.0f) {
-            // Reducción (foto grande ajustada a la ventana): bilineal — al
-            // encoger es visualmente casi idéntica a bicúbica y mucho más ligera.
-            graphics.SetInterpolationMode(InterpolationModeBilinear);
+            // Reducción: bilineal de alta calidad evita aliasing sin el coste
+            // sostenido de bicúbica en fotografías grandes.
+            graphics.SetInterpolationMode(InterpolationModeHighQualityBilinear);
             graphics.SetPixelOffsetMode(PixelOffsetModeHalf);
         } else if (pixelPerfectZoom || g_state.zoom > 3.5f) {
             // Píxel perfecto (100%, 200%, etc.) o zoom profundo (> 350%): nitidez cristalina sin borrosidad
@@ -3650,7 +3692,11 @@ bool CopyPathToClipboard() {
     }
     wcscpy_s(dest, g_state.currentFilePath.size() + 1, g_state.currentFilePath.c_str());
     GlobalUnlock(mem);
-    SetClipboardData(CF_UNICODETEXT, mem);
+    if (!SetClipboardData(CF_UNICODETEXT, mem)) {
+        GlobalFree(mem);
+        CloseClipboard();
+        return false;
+    }
     CloseClipboard();
     ShowOSD(L"Ruta copiada");
     InvalidateRect(g_state.hwnd, nullptr, FALSE);
@@ -3693,7 +3739,11 @@ bool CopyImageToClipboard() {
         return false;
     }
     EmptyClipboard();
-    SetClipboardData(CF_BITMAP, hBitmap);
+    if (!SetClipboardData(CF_BITMAP, hBitmap)) {
+        DeleteObject(hBitmap);
+        CloseClipboard();
+        return false;
+    }
     CloseClipboard();
     ShowOSD(L"Imagen copiada al portapapeles (Calidad Máxima)");
     InvalidateRect(g_state.hwnd, nullptr, FALSE);
@@ -3713,14 +3763,18 @@ void ApplyWindowMode(HWND hwnd, WindowMode mode) {
             g_state.windowedPlacement.length = sizeof(WINDOWPLACEMENT);
             GetWindowPlacement(hwnd, &g_state.windowedPlacement);
         }
-        SetWindowLongW(hwnd, GWL_STYLE, WS_POPUP | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS);
+        SetWindowLongPtrW(hwnd, GWL_STYLE,
+                          WS_POPUP | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS);
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, WS_EX_APPWINDOW | WS_EX_ACCEPTFILES);
         SetWindowPos(hwnd, HWND_TOP,
                      mi.rcMonitor.left, mi.rcMonitor.top,
                      mi.rcMonitor.right - mi.rcMonitor.left,
                      mi.rcMonitor.bottom - mi.rcMonitor.top,
-                     SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+                     SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOACTIVATE);
         g_state.isFullscreen = true;
         g_state.windowMode = WindowMode::Fullscreen;
+        EnableDarkTitleBar(hwnd, g_state.darkModeDetected);
+        InvalidateRect(hwnd, nullptr, FALSE);
         return;
     }
 
@@ -3728,9 +3782,9 @@ void ApplyWindowMode(HWND hwnd, WindowMode mode) {
     if (g_state.windowedStyle) style = g_state.windowedStyle | WS_VISIBLE;
     style |= WS_OVERLAPPEDWINDOW;
     style &= ~WS_POPUP;
-    SetWindowLongW(hwnd, GWL_STYLE, style);
+    SetWindowLongPtrW(hwnd, GWL_STYLE, style);
     if (g_state.windowedExStyle) {
-        SetWindowLongW(hwnd, GWL_EXSTYLE, g_state.windowedExStyle);
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, g_state.windowedExStyle);
     }
     EnableDarkTitleBar(hwnd, g_state.darkModeDetected);
     g_state.isFullscreen = false;
@@ -3742,6 +3796,7 @@ void ApplyWindowMode(HWND hwnd, WindowMode mode) {
         if (mode == WindowMode::Maximized) ShowWindow(hwnd, SW_MAXIMIZE);
         else ShowWindow(hwnd, SW_RESTORE);
         SetWindowPos(hwnd, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+        InvalidateRect(hwnd, nullptr, FALSE);
         return;
     }
 
@@ -3750,6 +3805,7 @@ void ApplyWindowMode(HWND hwnd, WindowMode mode) {
     if (mode == WindowMode::Maximized) {
         ShowWindow(hwnd, SW_SHOWMAXIMIZED);
         SetWindowPos(hwnd, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+        InvalidateRect(hwnd, nullptr, FALSE);
         return;
     }
     int width = std::min(std::max(1100, monitorW - 160), monitorW);
@@ -3757,6 +3813,7 @@ void ApplyWindowMode(HWND hwnd, WindowMode mode) {
     const int x = mi.rcWork.left + (monitorW - width) / 2;
     const int y = mi.rcWork.top + (monitorH - height) / 2;
     SetWindowPos(hwnd, HWND_TOP, x, y, width, height, SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+    InvalidateRect(hwnd, nullptr, FALSE);
 }
 
 void ToggleFullscreen() {
@@ -3914,10 +3971,17 @@ void DeleteCurrentImage() {
 }
 
 std::wstring GetExecutablePath() {
-    wchar_t path[MAX_PATH] = {};
-    DWORD len = GetModuleFileNameW(nullptr, path, MAX_PATH);
-    if (len == 0 || len >= MAX_PATH) return {};
-    return path;
+    std::vector<wchar_t> path(MAX_PATH);
+    for (;;) {
+        const DWORD len = GetModuleFileNameW(nullptr, path.data(),
+                                             static_cast<DWORD>(path.size()));
+        if (len == 0) return {};
+        if (len < path.size() - 1) {
+            return std::wstring(path.data(), len);
+        }
+        if (path.size() >= 32768) return {};
+        path.resize(path.size() * 2);
+    }
 }
 
 std::wstring GetExecutableFolder() {
@@ -4127,10 +4191,23 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_SIZE: {
             if (wParam == SIZE_MINIMIZED) {
                 CancelZoomAnimation();
+                StopGifTimer();
                 GpuReleaseAll(); // liberar recursos de vídeo al minimizar
                 FreeDoubleBuffer();
                 TrimProcessMemory();
                 return 0;
+            }
+            if ((wParam == SIZE_RESTORED || wParam == SIZE_MAXIMIZED) &&
+                g_state.gif.animated() && !g_state.gifPaused) {
+                StartGifTimer();
+            }
+            if (!g_state.isFullscreen) {
+                if (wParam == SIZE_MAXIMIZED) {
+                    g_state.windowMode = WindowMode::Maximized;
+                } else if (wParam == SIZE_RESTORED &&
+                           g_state.windowMode == WindowMode::Maximized) {
+                    g_state.windowMode = WindowMode::Normal;
+                }
             }
             g_gpu.retryRequested = true; // nuevo tamaño: reintentar GPU si falló
             KillTimer(hwnd, TIMER_GPU_RETRY);
@@ -4276,6 +4353,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 case 'N':
                     ToggleInvert();
                     break;
+                case 'T':
+                    if (!ctrl) ToggleTheme();
+                    break;
                 case VK_OEM_PLUS:
                 case VK_ADD: {
                     RECT client{};
@@ -4300,6 +4380,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     break;
                 case 'F':
                     InvokeHud(HUD_FIT);
+                    break;
+                case 'P':
+                    ToggleGifPlayback();
                     break;
                 case 'R':
                     RotateImage(shift ? -90 : 90);
@@ -4470,7 +4553,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     g_state.dockLastActivity = GetTickCount();
                 }
             } else if (wParam == TIMER_GIF) {
-                if (g_state.gif.animated()) {
+                if (g_state.gif.animated() && !g_state.gifPaused) {
                     // Avance proporcional al tiempo transcurrido: si el sistema va
                     // retrasado se saltan fotogramas para mantener la animación en sync.
                     const int frameCount = g_state.gif.frameCount();
@@ -4514,14 +4597,21 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_DROPFILES: {
             HDROP hDrop = reinterpret_cast<HDROP>(wParam);
             const UINT fileCount = DragQueryFileW(hDrop, 0xFFFFFFFF, nullptr, 0);
-            if (fileCount > 0) {
-                const UINT chars = DragQueryFileW(hDrop, 0, nullptr, 0);
+            for (UINT fileIndex = 0; fileIndex < fileCount; ++fileIndex) {
+                const UINT chars = DragQueryFileW(hDrop, fileIndex, nullptr, 0);
                 // El buffer debe alojar chars + el terminador nulo que escribe DragQueryFileW
                 std::wstring filePath(chars + 1, L'\0');
-                const UINT written = DragQueryFileW(hDrop, 0, filePath.data(), chars + 1);
+                const UINT written = DragQueryFileW(hDrop, fileIndex, filePath.data(), chars + 1);
                 if (written > 0) {
                     filePath.resize(written);
-                    OpenPath(filePath);
+                    const std::wstring ext = GetExtensionLower(filePath);
+                    const DWORD attributes = GetFileAttributesW(filePath.c_str());
+                    if ((attributes != INVALID_FILE_ATTRIBUTES &&
+                         (attributes & FILE_ATTRIBUTE_DIRECTORY)) ||
+                        IsSupportedImageExtension(ext)) {
+                        OpenPath(filePath);
+                        break;
+                    }
                 }
             }
             DragFinish(hDrop);
@@ -4607,7 +4697,8 @@ bool UnregisterFileAssociationForCurrentUser() {
     };
     bool ok = true;
     for (const auto& key : keys) {
-        ok = ok && (RegDeleteTreeW(HKEY_CURRENT_USER, key.c_str()) == ERROR_SUCCESS || RegDeleteTreeW(HKEY_CURRENT_USER, key.c_str()) == ERROR_FILE_NOT_FOUND);
+        const LSTATUS status = RegDeleteTreeW(HKEY_CURRENT_USER, key.c_str());
+        ok = ok && (status == ERROR_SUCCESS || status == ERROR_FILE_NOT_FOUND);
     }
     return ok;
 }
@@ -4752,8 +4843,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
         return 0;
     }
 
-    g_state.windowMode = startMode;
-    g_state.isFullscreen = (startMode == WindowMode::Fullscreen);
+    // ApplyWindowMode captura aquí la colocación normal antes de entrar en
+    // pantalla completa, permitiendo volver exactamente al estado anterior.
+    g_state.windowMode = WindowMode::Normal;
+    g_state.isFullscreen = false;
     if (!folderPath.empty()) ScanFolderForImages(folderPath);
 
     HWND hwnd = CreateWindowExW(

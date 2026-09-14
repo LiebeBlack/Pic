@@ -179,10 +179,15 @@ int HoverZoneAt(const LayoutRects& r, float lx, float ly) {
 // ============================================================================
 
 std::wstring GetModulePath() {
-    wchar_t path[MAX_PATH] = {};
-    DWORD len = GetModuleFileNameW(nullptr, path, MAX_PATH);
-    if (len == 0 || len >= MAX_PATH) return {};
-    return path;
+    std::vector<wchar_t> path(MAX_PATH);
+    for (;;) {
+        const DWORD len = GetModuleFileNameW(nullptr, path.data(),
+                                             static_cast<DWORD>(path.size()));
+        if (len == 0) return {};
+        if (len < path.size() - 1) return std::wstring(path.data(), len);
+        if (path.size() >= 32768) return {};
+        path.resize(path.size() * 2);
+    }
 }
 
 std::wstring GetModuleFolder() {
@@ -215,6 +220,7 @@ std::wstring GetDefaultInstallPath() {
 
 bool CopyFileIfExists(const std::wstring& src, const std::wstring& dst) {
     if (src.empty() || dst.empty()) return false;
+    if (_wcsicmp(src.c_str(), dst.c_str()) == 0) return true;
     if (GetFileAttributesW(src.c_str()) == INVALID_FILE_ATTRIBUTES) return false;
     return CopyFileW(src.c_str(), dst.c_str(), FALSE) != FALSE;
 }
@@ -222,25 +228,10 @@ bool CopyFileIfExists(const std::wstring& src, const std::wstring& dst) {
 // Crea todos los directorios intermedios de una ruta ("C:\A\B\C" -> C, C\A, ...)
 bool CreateDirectoryTree(const std::wstring& path) {
     if (path.empty()) return false;
-    std::wstring current;
-    size_t start = 0;
-    if (path.size() >= 3 && path[1] == L':' && (path[2] == L'\\' || path[2] == L'/')) {
-        current = path.substr(0, 3); // raíz "X:\"
-        start = 3;
-    }
-    for (size_t i = start; i <= path.size(); ++i) {
-        if (i == path.size() || path[i] == L'\\' || path[i] == L'/') {
-            if (i > start) {
-                current += path.substr(start, i - start);
-                if (!CreateDirectoryW(current.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS) {
-                    return false;
-                }
-                current += L'\\';
-            }
-            start = i + 1; // salta el separador (o segmentos vacíos)
-        }
-    }
-    return true;
+    const DWORD attrs = GetFileAttributesW(path.c_str());
+    if (attrs != INVALID_FILE_ATTRIBUTES) return (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    const int result = SHCreateDirectoryExW(nullptr, path.c_str(), nullptr);
+    return result == ERROR_SUCCESS || result == ERROR_ALREADY_EXISTS;
 }
 
 bool SetRegStringValue(HKEY root, const std::wstring& key, const std::wstring& name, const std::wstring& value) {
@@ -265,13 +256,21 @@ bool SetRegDwordValue(HKEY root, const std::wstring& key, const std::wstring& na
 bool ReadRegStringValue(HKEY root, const std::wstring& key, const std::wstring& name, std::wstring& outValue) {
     HKEY hKey = nullptr;
     if (RegOpenKeyExW(root, key.c_str(), 0, KEY_READ, &hKey) != ERROR_SUCCESS) return false;
-    wchar_t buffer[512] = {};
-    DWORD size = sizeof(buffer);
-    const LSTATUS result = RegQueryValueExW(hKey, name.empty() ? nullptr : name.c_str(), nullptr, nullptr,
-                                            reinterpret_cast<LPBYTE>(buffer), &size);
+    DWORD type = 0;
+    DWORD size = 0;
+    LSTATUS result = RegQueryValueExW(hKey, name.empty() ? nullptr : name.c_str(), nullptr,
+                                      &type, nullptr, &size);
+    if (result != ERROR_SUCCESS || (type != REG_SZ && type != REG_EXPAND_SZ) ||
+        size < sizeof(wchar_t)) {
+        RegCloseKey(hKey);
+        return false;
+    }
+    std::vector<wchar_t> buffer((size / sizeof(wchar_t)) + 1, L'\0');
+    result = RegQueryValueExW(hKey, name.empty() ? nullptr : name.c_str(), nullptr,
+                              &type, reinterpret_cast<LPBYTE>(buffer.data()), &size);
     RegCloseKey(hKey);
     if (result != ERROR_SUCCESS) return false;
-    outValue = buffer;
+    outValue.assign(buffer.data());
     return true;
 }
 
@@ -299,15 +298,26 @@ bool CreateShortcut(const std::wstring& lnkPath, const std::wstring& target, con
 // Registro de asociaciones de archivo (por usuario, sin administrador)
 // ============================================================================
 
+const std::vector<std::wstring>& SupportedAssociationExtensions() {
+    static const std::vector<std::wstring> extensions = {
+        L".jpg", L".jpeg", L".jpe", L".jfif", L".jif",
+        L".png", L".apng", L".bmp", L".dib", L".rle", L".gif",
+        L".tif", L".tiff", L".webp", L".heic", L".heif", L".hif",
+        L".avif", L".jxl", L".jxr", L".wdp", L".hdp", L".ico",
+        L".cur", L".tga", L".tpic", L".psd", L".hdr", L".pic",
+        L".pnm", L".ppm", L".pgm", L".pbm", L".jp2", L".j2k",
+        L".jpx", L".emf", L".wmf", L".exif", L".dng", L".cr2",
+        L".cr3", L".nef", L".arw", L".orf", L".rw2", L".raf",
+        L".sr2", L".kdc", L".raw"
+    };
+    return extensions;
+}
+
 bool RegisterFileAssociations(const std::wstring& exePath) {
     if (exePath.empty()) return false;
     const std::wstring fileType = L"ARTPICST.Image";
     const std::wstring command = L"\"" + exePath + L"\" \"%1\"";
     const std::wstring base = L"Software\\Classes\\" + fileType;
-    const std::vector<std::wstring> extensions = {
-        L".png", L".jpg", L".jpeg", L".bmp", L".gif", L".tif", L".tiff",
-        L".webp", L".ico", L".heic", L".heif", L".avif", L".jfif"
-    };
 
     bool ok = true;
     ok = ok && SetRegStringValue(HKEY_CURRENT_USER, base, L"", L"ARTPICST Image");
@@ -321,9 +331,10 @@ bool RegisterFileAssociations(const std::wstring& exePath) {
     ok = ok && SetRegStringValue(HKEY_CURRENT_USER, L"Software\\Classes\\Applications\\artpicst.exe\\shell\\open\\command", L"", command);
     ok = ok && SetRegStringValue(HKEY_CURRENT_USER, L"Software\\Classes\\Applications\\artpicst.exe\\shell\\open", L"MuiVerb", L"Abrir");
     ok = ok && SetRegStringValue(HKEY_CURRENT_USER, L"Software\\Classes\\Applications\\artpicst.exe\\shell\\open", L"Icon", L"\"" + exePath + L"\",0");
-    for (const auto& ext : extensions) {
+    for (const auto& ext : SupportedAssociationExtensions()) {
         ok = ok && SetRegStringValue(HKEY_CURRENT_USER, L"Software\\Classes\\" + ext, L"", fileType);
     }
+    if (ok) SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
     return ok;
 }
 
@@ -354,9 +365,10 @@ bool WriteUninstallEntry(const std::wstring& installDir) {
 // Desinstalación
 // ============================================================================
 
-void PerformUninstall() {
+bool PerformUninstall() {
     const std::wstring installDir = GetModuleFolder();
     const std::wstring selfPath = GetModulePath();
+    if (installDir.empty() || selfPath.empty()) return false;
 
     // Accesos directos
     const std::wstring desktop = GetShellFolder(CSIDL_DESKTOPDIRECTORY);
@@ -373,11 +385,7 @@ void PerformUninstall() {
     RegDeleteTreeW(HKEY_CURRENT_USER, UNINSTALL_REG_KEY);
     RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\Classes\\ARTPICST.Image");
     RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\Classes\\Applications\\artpicst.exe");
-    const std::vector<std::wstring> extensions = {
-        L".png", L".jpg", L".jpeg", L".bmp", L".gif", L".tif", L".tiff",
-        L".webp", L".ico", L".heic", L".heif", L".avif", L".jfif"
-    };
-    for (const auto& ext : extensions) {
+    for (const auto& ext : SupportedAssociationExtensions()) {
         RemoveAssociationIfOurs(ext);
     }
 
@@ -389,9 +397,9 @@ void PerformUninstall() {
 
     // Renombrar el ejecutable en ejecución y programar la limpieza final
     wchar_t tempDir[MAX_PATH] = {};
-    GetTempPathW(MAX_PATH, tempDir);
+    if (GetTempPathW(MAX_PATH, tempDir) == 0) return false;
     std::wstring movedSelf = std::wstring(tempDir) + L"artpicst_uninstaller_" + std::to_wstring(GetCurrentProcessId()) + L".exe";
-    if (!selfPath.empty()) MoveFileW(selfPath.c_str(), movedSelf.c_str());
+    if (!MoveFileExW(selfPath.c_str(), movedSelf.c_str(), MOVEFILE_REPLACE_EXISTING)) return false;
 
     // El propio proceso sigue vivo mientras el usuario confirma el desinstalado;
     // se reintenta el borrado del ejecutable movido hasta que el proceso termina.
@@ -404,13 +412,15 @@ void PerformUninstall() {
     STARTUPINFOW si{};
     si.cb = sizeof(si);
     PROCESS_INFORMATION pi{};
-    if (CreateProcessW(nullptr, cmdBuf.data(), nullptr, nullptr, FALSE,
-                       CREATE_NO_WINDOW | DETACHED_PROCESS, nullptr, nullptr, &si, &pi)) {
-        if (pi.hProcess) CloseHandle(pi.hProcess);
-        if (pi.hThread) CloseHandle(pi.hThread);
+    if (!CreateProcessW(nullptr, cmdBuf.data(), nullptr, nullptr, FALSE,
+                        CREATE_NO_WINDOW | DETACHED_PROCESS, nullptr, nullptr, &si, &pi)) {
+        return false;
     }
+    if (pi.hProcess) CloseHandle(pi.hProcess);
+    if (pi.hThread) CloseHandle(pi.hThread);
 
     SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
+    return true;
 }
 
 // ============================================================================
@@ -852,7 +862,6 @@ void PerformInstallation() {
         g_state.installStatus = status;
         InvalidateRect(g_state.hwnd, nullptr, FALSE);
         UpdateWindow(g_state.hwnd);
-        Sleep(60);
     };
 
     bool ok = true;
@@ -878,10 +887,11 @@ void PerformInstallation() {
 
     if (ok) {
         step(48, L"Copiando recursos y documentación...");
-        CopyFileIfExists(srcDir + L"\\artpicst.ico", dst + L"\\artpicst.ico");
-        CopyFileIfExists(srcDir + L"\\README.md", dst + L"\\README.md");
-        CopyFileIfExists(srcDir + L"\\version.json", dst + L"\\version.json");
-        ok = !selfPath.empty() && CopyFileW(selfPath.c_str(), (dst + L"\\artpicst_installer.exe").c_str(), FALSE) != FALSE;
+        ok = CopyFileIfExists(srcDir + L"\\artpicst.ico", dst + L"\\artpicst.ico") &&
+             CopyFileIfExists(srcDir + L"\\README.md", dst + L"\\README.md") &&
+             CopyFileIfExists(srcDir + L"\\version.json", dst + L"\\version.json") &&
+             !selfPath.empty() &&
+             CopyFileIfExists(selfPath, dst + L"\\artpicst_installer.exe");
     }
 
     if (ok) {
@@ -937,8 +947,13 @@ void InvokePrimaryAction() {
             break;
         case InstallStep::Complete:
             if (g_state.installSucceeded) {
-                ShellExecuteW(nullptr, L"open", (g_state.installPath + L"\\artpicst.exe").c_str(),
-                              nullptr, g_state.installPath.c_str(), SW_SHOWNORMAL);
+                const HINSTANCE result = ShellExecuteW(
+                    nullptr, L"open", (g_state.installPath + L"\\artpicst.exe").c_str(),
+                    nullptr, g_state.installPath.c_str(), SW_SHOWNORMAL);
+                if (reinterpret_cast<INT_PTR>(result) <= 32) {
+                    MessageBoxW(g_state.hwnd, L"No se pudo iniciar ARTPICST.",
+                                APP_NAME, MB_OK | MB_ICONWARNING);
+                }
             }
             PostMessageW(g_state.hwnd, WM_CLOSE, 0, 0);
             break;
@@ -1200,9 +1215,12 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
             L"¿Desea desinstalar ARTPICST?\n\nSe eliminarán los archivos, accesos directos y asociaciones de archivo.",
             L"Desinstalar ARTPICST", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2);
         if (answer == IDYES) {
-            PerformUninstall();
-            MessageBoxW(nullptr, L"ARTPICST ha sido desinstalado correctamente.",
-                        L"Desinstalación completada", MB_OK | MB_ICONINFORMATION);
+            const bool removed = PerformUninstall();
+            MessageBoxW(nullptr,
+                        removed ? L"ARTPICST ha sido desinstalado correctamente."
+                                : L"No se pudo completar la desinstalación. Cierra cualquier instancia de ARTPICST e inténtalo de nuevo.",
+                        removed ? L"Desinstalación completada" : L"Desinstalación incompleta",
+                        MB_OK | (removed ? MB_ICONINFORMATION : MB_ICONWARNING));
         }
         return 0;
     }

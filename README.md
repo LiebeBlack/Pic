@@ -29,6 +29,7 @@ Visor de imágenes premium nativo para Windows (C++ / Win32) con interfaz acríl
 | Imagen anterior | ←, Retroceso, botón ◀ |
 | Zoom in | ↑, Rueda arriba, `+` |
 | Zoom out | ↓, Rueda abajo, `-` |
+| Pausar / reproducir GIF | `P` |
 | Primera / última | Inicio / Fin |
 | **Visualización** | |
 | Ajustar a ventana | `F` o botón *Ajustar* |

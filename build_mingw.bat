@@ -46,8 +46,14 @@ if %ERRORLEVEL% NEQ 0 (
 
 :: Build installer with MinGW
 echo [2/3] Building installer with MinGW...
+set "INSTALLER_RES_OBJ="
+where windres >nul 2>nul
+if %ERRORLEVEL% EQU 0 (
+    windres installer\artpicst_installer.rc -O coff -o build\artpicst_installer_res.o
+    if %ERRORLEVEL% EQU 0 set "INSTALLER_RES_OBJ=..\build\artpicst_installer_res.o"
+)
 cd installer
-g++ -std=c++17 -O2 -static -static-libgcc -static-libstdc++ -municode -DUNICODE -D_UNICODE -DNOMINMAX -DWIN32_LEAN_AND_MEAN -D_WIN32_WINNT=0x0601 -I. -I..\include -o build\artpicst_installer.exe artpicst_installer.cpp -lgdiplus -lshlwapi -lshell32 -lcomctl32 -ldwmapi -luser32 -ladvapi32 -lgdi32 -lole32 -luuid -mwindows
+g++ -std=c++17 -O2 -static -static-libgcc -static-libstdc++ -municode -DUNICODE -D_UNICODE -DNOMINMAX -DWIN32_LEAN_AND_MEAN -D_WIN32_WINNT=0x0601 -I. -I..\include -o build\artpicst_installer.exe artpicst_installer.cpp %INSTALLER_RES_OBJ% -lgdiplus -lshlwapi -lshell32 -lcomctl32 -ldwmapi -luser32 -ladvapi32 -lgdi32 -lole32 -luuid -mwindows
 cd ..
 
 if %ERRORLEVEL% NEQ 0 (
