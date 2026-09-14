@@ -48,7 +48,20 @@ foreach ($line in $envVars) {
 }
 
 Write-Host "[1/3] Building main program..." -ForegroundColor Yellow
-$mainResult = & cl /nologo /EHsc /std:c++17 /O2 /utf-8 /W4 /I. /Iinclude /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /DSTBI_WINDOWS_UTF8 /D_WIN32_WINNT=0x0601 /Fe:"build\artpicst.exe" src\main.cpp artpicst.manifest artpicst.rc /link gdiplus.lib user32.lib kernel32.lib shell32.lib shlwapi.lib gdi32.lib msimg32.lib ole32.lib oleaut32.lib uuid.lib dwmapi.lib windowscodecs.lib comdlg32.lib d2d1.lib dwrite.lib /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF 2>&1
+$resourceResult = & rc /nologo /fo build\artpicst.res artpicst.rc 2>&1
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "Error compiling main program resources" -ForegroundColor Red
+    exit 1
+}
+Push-Location installer
+$installerResourceResult = & rc /nologo /fo ..\build\artpicst_installer.res artpicst_installer.rc 2>&1
+$installerResourceExitCode = $LASTEXITCODE
+Pop-Location
+if ($installerResourceExitCode -ne 0) {
+    Write-Host "Error compiling installer resources" -ForegroundColor Red
+    exit 1
+}
+$mainResult = & cl /nologo /EHsc /std:c++17 /O2 /utf-8 /W4 /I. /Iinclude /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /DSTBI_WINDOWS_UTF8 /D_WIN32_WINNT=0x0601 /Fe:"build\artpicst.exe" src\main.cpp build\artpicst.res /link gdiplus.lib user32.lib kernel32.lib shell32.lib shlwapi.lib gdi32.lib msimg32.lib ole32.lib oleaut32.lib uuid.lib dwmapi.lib windowscodecs.lib comdlg32.lib d2d1.lib dwrite.lib /MANIFESTINPUT:artpicst.manifest /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF 2>&1
 
 if ($LASTEXITCODE -ne 0) {
     Write-Host "Error building main program" -ForegroundColor Red
@@ -57,7 +70,7 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Host "[2/3] Building installer..." -ForegroundColor Yellow
 Push-Location installer
-$installerResult = & cl /nologo /EHsc /std:c++17 /O2 /utf-8 /W4 /I. /I..\include /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0601 /Fe:"build\artpicst_installer.exe" artpicst_installer.cpp artpicst_installer.rc /link gdiplus.lib shlwapi.lib shell32.lib comctl32.lib dwmapi.lib user32.lib advapi32.lib gdi32.lib ole32.lib uuid.lib /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF 2>&1
+$installerResult = & cl /nologo /EHsc /std:c++17 /O2 /utf-8 /W4 /I. /I..\include /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0601 /Fe:"build\artpicst_installer.exe" artpicst_installer.cpp ..\build\artpicst_installer.res /link gdiplus.lib shlwapi.lib shell32.lib comctl32.lib dwmapi.lib user32.lib advapi32.lib gdi32.lib ole32.lib uuid.lib /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF 2>&1
 Pop-Location
 
 if ($LASTEXITCODE -ne 0) {
