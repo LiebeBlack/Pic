@@ -61,6 +61,10 @@
 #include <memory>
 #include <cwctype>
 
+#ifdef small
+#undef small
+#endif
+
 #include "../installer/version.hpp"
 
 #ifdef _MSC_VER
@@ -306,7 +310,7 @@ HttpResult HttpGet(const std::wstring& host, const std::wstring& path,
         if (request) {
             std::wstring headers = L"User-Agent: ARTPICST-Updater/1.0\r\n";
             if (!accept.empty()) headers += L"Accept: " + accept + L"\r\n";
-            if (WinHttpSendRequest(request, headers.c_str(), -1L,
+            if (WinHttpSendRequest(request, headers.c_str(), static_cast<DWORD>(-1L),
                                    WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
                 WinHttpReceiveResponse(request, nullptr)) {
                 DWORD status = 0, size = sizeof(status);
@@ -378,7 +382,7 @@ bool HttpDownloadOpen(const std::wstring& url, HINTERNET& outSession,
                                     WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
                                     WINHTTP_FLAG_SECURE);
     if (!outRequest) return false;
-    if (!WinHttpSendRequest(outRequest, L"User-Agent: ARTPICST-Updater/1.0\r\n", -1L,
+    if (!WinHttpSendRequest(outRequest, L"User-Agent: ARTPICST-Updater/1.0\r\n", static_cast<DWORD>(-1L),
                             WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
         !WinHttpReceiveResponse(outRequest, nullptr)) {
         return false;
@@ -1050,12 +1054,12 @@ struct Fonts {
     FontFamily family;
     Font title;    // 14 px
     Font body;     // 12 px
-    Font small;    // 10.5 px
+    Font smallFont;// 10.5 px
     Font label;    // 10 px bold
     Fonts() : family(L"Segoe UI"),
               title(&family, 14.0f, FontStyleBold, UnitPixel),
               body(&family, 12.0f, FontStyleRegular, UnitPixel),
-              small(&family, 10.5f, FontStyleRegular, UnitPixel),
+              smallFont(&family, 10.5f, FontStyleRegular, UnitPixel),
               label(&family, 10.0f, FontStyleBold, UnitPixel) {}
 };
 
@@ -1133,17 +1137,17 @@ void RenderUpdater(Graphics& g, float W, float H) {
             swprintf(line, 160, L"%.1f MB descargados  ·  %ls", done / (1024.0 * 1024.0), speedText);
         }
         RectF status(14.0f, 88.0f, W - 28.0f, 18.0f);
-        DrawTextIn(g, line, status, fonts.small, COL_TEXT_SOFT, false, true, StringTrimmingNone, true);
+        DrawTextIn(g, line, status, fonts.smallFont, COL_TEXT_SOFT, false, true, StringTrimmingNone, true);
 
         RectF hint(14.0f, 116.0f, W - 28.0f, 18.0f);
-        DrawTextIn(g, L"La instalación continuará automáticamente.", hint, fonts.small, COL_TEXT_DIM,
+        DrawTextIn(g, L"La instalación continuará automáticamente.", hint, fonts.smallFont, COL_TEXT_DIM,
                    false, true, StringTrimmingNone, true);
 
         // Botón cerrar (X)
         const RectF& c = r.close;
         FillRound(g, c, 6.0f, g_hover == UZ_CLOSE ? COL_BTN_HOT : COL_BTN);
         StrokeRound(g, c, 6.0f, g_hover == UZ_CLOSE ? COL_BTN_BORDER_HOT : COL_BTN_BORDER, 1.0f);
-        DrawTextIn(g, L"✕", c, fonts.small, COL_TEXT_SOFT, true, true);
+        DrawTextIn(g, L"✕", c, fonts.smallFont, COL_TEXT_SOFT, true, true);
         return;
     }
 
@@ -1172,18 +1176,18 @@ void RenderUpdater(Graphics& g, float W, float H) {
     }
     RectF cbText(cb.X + 24.0f, cb.Y, cb.Width - 24.0f, cb.Height);
     DrawTextIn(g, L"Instalar actualizaciones automáticas en segundo plano en el futuro",
-               cbText, fonts.small, COL_TEXT_DIM, false, true, StringTrimmingEllipsisCharacter, true);
+               cbText, fonts.smallFont, COL_TEXT_DIM, false, true, StringTrimmingEllipsisCharacter, true);
 
     // Botones
     const RectF& inst = r.install;
     FillRoundGradient(g, inst, 7.0f, COL_ACCENT_A, COL_ACCENT_B);
     if (g_hover == UZ_INSTALL) FillRound(g, inst, 7.0f, Color(26, 255, 255, 255));
-    DrawTextIn(g, L"Instalar actualización ahora", inst, fonts.small, Color(255, 255, 255, 255), true, true);
+    DrawTextIn(g, L"Instalar actualización ahora", inst, fonts.smallFont, Color(255, 255, 255, 255), true, true);
 
     const RectF& later = r.later;
     FillRound(g, later, 7.0f, g_hover == UZ_LATER ? COL_BTN_HOT : COL_BTN);
     StrokeRound(g, later, 7.0f, g_hover == UZ_LATER ? COL_BTN_BORDER_HOT : COL_BTN_BORDER, 1.0f);
-    DrawTextIn(g, L"Recordar más tarde", later, fonts.small, COL_TEXT_SOFT, true, true);
+    DrawTextIn(g, L"Recordar más tarde", later, fonts.smallFont, COL_TEXT_SOFT, true, true);
 }
 
 int HitZoneAt(float W, float H, float x, float y) {
