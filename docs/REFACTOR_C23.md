@@ -21,6 +21,9 @@ en Windows y la auditoría de conformidad de atributos C23.
 | Diálogos | geometría duplicada pintado/hit-test, sin teclado, sólo ratón | **disposición única compartida**, Intro/Escape, cursor de mano, márgenes y contraste |
 | Instalador | por usuario en `%LOCALAPPDATA%`, HKLM sin tocar, borraba claves de asociación | **tradicional**: `%ProgramFiles%`, HKLM + HKCU, menú Inicio, desinstalación completa, VC++ Redistributable |
 | Icono | `.ico` de 268 B (una sóla resolución de 16 px escalada) | `.ico` de 10 resoluciones reales (16→256 px), 90 KB, generado por un script **sin dependencias** |
+| Paleta | azules Windows genéricos + panel gris | **Pitch-Black + cian neón/violeta** unificada en el visor y el instalador |
+| Instalador (tamaño) | 640×540 con contenido disperso | **560×480 compacto**: menos área, todo el contenido por encima del pliegue |
+| Hover (instalador) | `InvalidateRect(nullptr)` en cada `WM_MOUSEMOVE` → ventana entera | **solo** los rectángulos de la zona que se apaga y la que se enciende |
 
 ---
 
@@ -214,6 +217,44 @@ depende del tamaño de la imagen ni de su transparencia.
 ---
 
 ## 6. Interfaz, diálogos e iconografía
+
+### 6.0 Estándar visual: "Pitch-Black Neon"
+
+El visor y el instalador comparten una sola paleta:
+
+* **Fondo** `#000000` puro (degradado `#08090C → #000000` en el instalador),
+  tablero de transparencias `#12121 6/#1A1A20` apenas visible.
+* **Acentos** cian neón `#00E0FF` → violeta `#9E4AFF` (botón primario, casillas,
+  barra de progreso, borde de hover `#00D2FF`, esquina superior de marca).
+* **Paneles** `#0D0F14` con borde `#222834`; texto `#ECF0F6 / #9EA8B8 / #687284`.
+* El dock del visor sigue la misma familia: hover con borde cian, estado activo
+  con relleno degradado cian→violeta (rutas GDI+ y Direct2D equivalentes).
+
+### 6.0.1 Fix High-DPI (texto solapado con escalado > 100 %)
+
+* Las fuentes del instalador se declaran en `UnitPixel` (escalan solas con el
+  `ScaleTransform(g_scale)`); la escala de la ventana **nunca supera** la del
+  sistema (`if (fit < g_scale) g_scale = fit;` sólo hacia abajo), eliminando el
+  doble escalado que solapaba título/cuerpo/botones al 125-150 %.
+* El layout es **relativo**: botones anclados al pie (`H - 58`), filas a partir
+  de una base fija que termina en y = 396, y textos de destino en `H - 72`; los
+  tres bandas no pueden solaparse en ningún ancho ≥ `MIN_DESIGN_W`.
+* La ventana compacta 560×480 + el ajuste por área de trabajo garantizan que
+  incluso a 200 % de DPI el asistente cabe en un portátil 1366×768.
+
+### 6.0.2 Fix flicker fatal en hover (`WM_MOUSEMOVE`)
+
+* Causa raíz: `InvalidateRect(hwnd, nullptr, FALSE)` invalidaba **toda** la
+  ventana en cada movimiento del ratón sobre un botón; con el clip a `rcPaint`,
+  GDI+ repintaba todo el frame (incluida la caja de licencia) y el parpadeo era
+  visible y constante.
+* Ahora sólo se invalidan los rectángulos **físicos** de la zona que pierde el
+  hover y de la que lo gana (+1 px de margen para el antialias del borde). Los
+  estados son planos, sin sombras que se derramen fuera del rectángulo, así que
+  el resto del frame no se toca: cero parpadeo medible.
+* `ToggleOptionAt` también invalida sólo la fila pulsada.
+* Las ventanas ya no usan `CS_HREDRAW | CS_VREDRAW` (invalidación completa en
+  cada resize) y el fondo de clase es `nullptr` + `WM_ERASEBKGND → TRUE`:
 
 * **Antialiasing y texto.** El trazador GDI+ ya usaba `SmoothingModeAntiAlias` +
   `TextRenderingHintClearTypeGridFit` con doble búfer (`WM_ERASEBKGND` devuelve `TRUE`,
