@@ -37,8 +37,6 @@ jobs:
       run: |
         if not exist build mkdir build
         rc /nologo /fo build\artpicst.res artpicst.rc || exit /b 1
-        cd installer
-        rc /nologo /fo ..\build\artpicst_installer.res artpicst_installer.rc || exit /b 1
 
     - name: Compilar ARTPICST (C++23)
       shell: cmd
@@ -51,8 +49,27 @@ jobs:
           /Fe:"..\build\artpicst.exe" main.cpp ..\build\artpicst.res ^
           /link gdiplus.lib user32.lib kernel32.lib shell32.lib shlwapi.lib gdi32.lib msimg32.lib ^
                 ole32.lib oleaut32.lib uuid.lib dwmapi.lib windowscodecs.lib comdlg32.lib d2d1.lib dwrite.lib ^
-          /MANIFESTINPUT:..\artpicst.manifest /SUBSYSTEM:WINDOWS /LTCG /OPT:REF /OPT:ICF || exit /b 1
+          /MANIFEST:EMBED /MANIFESTINPUT:..\artpicst.manifest /SUBSYSTEM:WINDOWS /LTCG /OPT:REF /OPT:ICF || exit /b 1
         cd ..
+
+    - name: Preparar payload del instalador
+      shell: powershell
+      run: |
+        $root = $env:GITHUB_WORKSPACE
+        $payload = Join-Path $root "resources\app"
+        New-Item -ItemType Directory -Force -Path $payload | Out-Null
+        Copy-Item "build\artpicst.exe" (Join-Path $payload "artpicst.exe") -Force
+        Copy-Item "resources\artpicst.ico" (Join-Path $payload "artpicst.ico") -Force
+        Copy-Item "version.json" (Join-Path $payload "version.json") -Force
+        Copy-Item "README.md" (Join-Path $payload "README.md") -Force
+        # build.yml no compila updater: copiamos el exe principal como placeholder
+        Copy-Item "build\artpicst.exe" (Join-Path $payload "artpicst_updater.exe") -Force
+
+    - name: Compilar recursos del instalador
+      shell: cmd
+      run: |
+        cd installer
+        rc /nologo /fo ..\build\artpicst_installer.res artpicst_installer.rc || exit /b 1
 
     - name: Compilar instalador (C++23, requiere administrador)
       shell: cmd
