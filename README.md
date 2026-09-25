@@ -2,6 +2,8 @@
 
 Visor de imágenes premium nativo para Windows (C++ / Win32) con interfaz acrílica moderna, renderizado de máxima fidelidad (GDI+, WIC, stb_image), orientación EXIF automática, soporte para transparencias y consumo ultra-ligero de recursos (RAM ≤ 80MB).
 
+**[⬇ Descargar el instalador autocontenido](https://github.com/LiebeBlack/Pic/releases/latest/download/artpicst-installer.exe)** · [ZIP portable](https://github.com/LiebeBlack/Pic/releases/latest/download/artpicst-portable.zip) · [Web y documentación](docs/index.html) · [Arquitectura del auto-actualizador](docs/UPDATER.md)
+
 ## 🎨 Características Premium
 
 - **Interfaz Glassmorphism/Acrílica**: Diseño moderno con efectos de transparencia, blur premium y colores vibrantes inspirados en Windows 11
@@ -11,7 +13,8 @@ Visor de imágenes premium nativo para Windows (C++ / Win32) con interfaz acríl
 - **Fondo Ajedrezado Inteligente**: Visualización clara de transparencias en PNG, WebP, ICO y GIF
 - **Orientación EXIF Automática**: Detecta y corrige la orientación de fotos de móviles y cámaras
 - **Navegación Avanzada**: Flechas ↑↓ para zoom, ←→ para imágenes, arrastrar para pan
-- **Instalador Premium**: Interfaz gráfica moderna con asistente paso a paso
+- **Instalador Autocontenido**: Wizard GDI+ pitch-black con consola de log en vivo y payload incrustado (un solo `.exe` distribuible)
+- **Auto-Actualizador Integrado**: Comprueba GitHub Releases una vez al día en segundo plano, notifica con una ventana flotante y actualiza con un clic (descarga verificada por SHA-256)
 - **Consumo Ultra-Ligero**: Huella de memoria optimizada (RAM < 80 MB, CPU ~0%)
 
 ## 🚀 Formatos Soportados
@@ -76,10 +79,16 @@ build_mingw.bat
 ## 📦 Archivos Generados
 
 Después de la compilación exitosa en `dist\`:
-- `artpicst.exe` - Programa principal premium
-- `artpicst_installer.exe` - Instalador con interfaz moderna
+- `artpicst.exe` - Programa principal premium (visor)
+- `artpicst_updater.exe` - Módulo de auto-actualización
+- `artpicst_installer.exe` - Instalador autocontenido (incrusta visor + updater + icono + README como recursos RCDATA)
 - `artpicst.ico` - Icono de la aplicación
 - `version.json` - Información de versión
+
+> El **asset oficial de release** es `artpicst-installer.exe` (el instalador
+> autocontenido renombrado): es el archivo exacto que el auto-actualizador
+> descarga e instala. El workflow de CI (`.github/workflows/release.yml`) lo
+> publica junto a `artpicst-portable.zip`.
 
 ## 💻 Uso por Línea de Comandos
 
@@ -93,10 +102,31 @@ artpicst.exe --register
 artpicst.exe --unregister
 ```
 
+El módulo de actualización también se puede usar directamente:
+
+```bat
+artpicst_updater.exe --check          # buscar actualizaciones (interactivo)
+artpicst_updater.exe --forced         # forzar comprobación ignorando el límite diario
+artpicst_updater.exe --background     # chequeo silencioso (1 vez al día)
+artpicst_updater.exe --selftest       # autotest (parser JSON, SHA-256, comparador de versiones)
+```
+
+## 🔄 Auto-Actualización
+
+1. El visor lanza `artpicst_updater.exe --background` como máximo una vez al día (hilo en segundo plano, la UI nunca se bloquea).
+2. El updater consulta `https://api.github.com/repos/LiebeBlack/Pic/releases/latest` y compara la versión local con la publicada (soporta prefijos `v`, sufijos y números de más de un dígito).
+3. Si hay versión nueva, muestra una notificación flotante minimalista con **Instalar actualización ahora** / **Recordar más tarde** y opción de instalar automáticamente futuras versiones.
+4. Al aceptar: descarga `artpicst-installer.exe` con progreso real, verifica su hash SHA-256 y lo ejecuta con `--update <payload> --dir <dir>`.
+5. El instalador sustituye los archivos, cierra el visor si sigue abierto y lo reinicia.
+
+Sin conexión, con rate-limit de la API o si el servidor falla, el updater permanece en silencio: nunca interrumpe el uso del visor.
+
 ## 🏗️ Arquitectura
 
-- **Main Program**: C++ nativo con Win32 API, GDI+, WIC, stb_image (ultra-optimizado)
-- **Installer**: C++ con GDI+ para interfaz gráfica premium
+- **Main Program**: C++23 nativo con Win32 API, GDI+, WIC, stb_image (ultra-optimizado)
+- **Installer** (`installer/`): wizard GDI+ autocontenido; extrae su payload RCDATA, instala con elevación UAC, rollback y modo silencioso `--update`; la instalación muestra 10 fases técnicas con consola de log en vivo
+- **Updater** (`updater/`): módulo independiente con WinHTTP que consulta `releases/latest` en GitHub, compara versiones, verifica SHA-256 y encadena la instalación
+- **Viewer ↔ Updater** (`src/updater_client.hpp`): chequeo diario en segundo plano y menú "Buscar actualizaciones..."
 
 ## 📋 Requisitos
 

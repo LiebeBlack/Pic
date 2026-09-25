@@ -50,6 +50,7 @@
 #include <d2d1.h>
 #include <dwrite.h>
 #include "../resource.h"
+#include "updater_client.hpp"
 
 // Bibliotecas estándar de C++
 #include <algorithm>
@@ -94,7 +95,7 @@
 using namespace Gdiplus;
 
 // Configuración de aplicación y constantes visuales
-const wchar_t CLASS_NAME[] = L"ARTPICSTWindow";
+const wchar_t CLASS_NAME[] = L"ARTPICSTViewerWindow";   // distinto del updater/installer (single-instance)
 const wchar_t APP_NAME_TEXT[] = L"ARTPICST";
 const wchar_t APP_VERSION_TEXT[] = L"1.2.0";
 
@@ -2389,6 +2390,10 @@ void PrefetchThreadFunc() {
 }
 
 void StartPrefetchThread() {
+    // Contrato de hilos: este hilo vive hasta WM_DESTROY (StopPrefetchThread),
+    // de modo que la aplicación nunca muere antes de los 20-30 s del hilo
+    // detached del chequeo diario (updater_client.hpp): ese hilo solo toca el
+    // registro y ShellExecute, nunca g_state, así que no hay estado colgante.
     if (g_state.prefetchThread.joinable()) return;
     g_state.prefetchRunning = true;
     g_state.prefetchThread = std::thread(PrefetchThreadFunc);
@@ -2540,7 +2545,7 @@ std::wstring GetFileSizeString(const std::wstring& filepath) {
     double value = static_cast<double>(size.QuadPart);
     while (value >= 1024.0 && unit < 3) { value /= 1024.0; ++unit; }
     wchar_t buffer[32];
-    swprintf_s(buffer, L"%.1f %s", value, units[unit]);
+    swprintf_s(buffer, L"%.1f %ls", value, units[unit]);
     return buffer;
 }
 
@@ -4288,6 +4293,7 @@ void ShowContextMenu(HWND hwnd, int x, int y) {
     AppendMenuW(menu, MF_STRING, 22, L"Ver metadatos / EXIF...\tE");
     AppendMenuW(menu, MF_STRING, 16, L"Eliminar a papelera\tSupr");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, 25, L"Buscar actualizaciones...");
     AppendMenuW(menu, MF_STRING, 11, L"Acerca de ARTPICST");
 
     const int cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, x, y, 0, hwnd, nullptr);
@@ -4326,7 +4332,7 @@ void ShowContextMenu(HWND hwnd, int x, int y) {
         case 22: ShowExifDialog(hwnd); break;
         case 23: ShowProgramInfoDialog(hwnd); break;
         case 24: ToggleUltraClarity(); break;
-        default: break;
+        case 25: updater::CheckForUpdatesInteractive(hwnd); break;
     }
 }
 
@@ -4365,6 +4371,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             CreateDoubleBuffer(client.right, client.bottom);
             StartPrefetchThread();
             ShowOSD();
+            // Módulo Inteligente de Actualización: comprobación diaria en
+            // segundo plano (hilo aparte, 20-30 s después del arranque).
+            updater::StartBackgroundDailyCheck();
             return 0;
         }
         case WM_NCCALCSIZE:
@@ -4810,6 +4819,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             StopPrefetchThread();
             FreeCurrentImage();
             FreeDoubleBuffer();
+            // Higiene de memoria: vaciar la caché LRU de píxeles ANTES de
+            // salir (libera todos los buffers del prefetech/explore explícitamente).
+            {
+                std::lock_guard<std::mutex> lock(g_state.cacheMutex);
+                while (!g_state.imageCache.empty()) {
+                    EraseCacheEntry(g_state.imageCache.begin());
+                }
+            }
             g_state.hwnd = nullptr;
             g_state.statusMessage.clear();
             g_state.hudHot = HUD_NONE;

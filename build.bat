@@ -5,6 +5,7 @@ cd /d "%~dp0"
 
 echo ========================================
 echo ARTPICST - Sistema de Compilacion Integrado
+echo Orden: recursos -^> visor -^> updater -^> payload -^> instalador
 echo ========================================
 echo.
 
@@ -25,29 +26,65 @@ if %ERRORLEVEL% NEQ 0 (
 if not exist build mkdir build
 if not exist dist mkdir dist
 if not exist installer\build mkdir installer\build
+if not exist updater\build mkdir updater\build
 
-echo [1/3] Compilando programa principal...
+echo [1/5] Compilando recursos (visor y updater)...
 rc /nologo /fo build\artpicst.res artpicst.rc
 if %ERRORLEVEL% NEQ 0 (
-    echo Error al compilar los recursos del programa principal
+    echo Error al compilar los recursos del visor
     exit /b 1
 )
-cd installer
-rc /nologo /fo ..\build\artpicst_installer.res artpicst_installer.rc
+cd updater
+rc /nologo /fo ..\build\artpicst_updater.res artpicst_updater.rc
 if %ERRORLEVEL% NEQ 0 (
-    echo Error al compilar los recursos del instalador
+    echo Error al compilar los recursos del updater
+    cd ..
     exit /b 1
 )
 cd ..
+
+echo [2/5] Compilando visor (artpicst.exe)...
 cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /GL /Gy /utf-8 /W4 /I. /Iinclude /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /DSTBI_WINDOWS_UTF8 /D_WIN32_WINNT=0x0601 /Fe:"build\artpicst.exe" src\main.cpp build\artpicst.res /link gdiplus.lib user32.lib kernel32.lib shell32.lib shlwapi.lib gdi32.lib msimg32.lib ole32.lib oleaut32.lib uuid.lib dwmapi.lib windowscodecs.lib comdlg32.lib d2d1.lib dwrite.lib /MANIFESTINPUT:artpicst.manifest /SUBSYSTEM:WINDOWS /LTCG /OPT:REF /OPT:ICF
 
 if %ERRORLEVEL% NEQ 0 (
-    echo Error al compilar el programa principal
+    echo Error al compilar el visor
     exit /b 1
 )
 
-echo [2/3] Compilando instalador premium...
+echo [3/5] Compilando updater (artpicst_updater.exe)...
+cd updater
+cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /utf-8 /W4 /I. /I..\installer /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0601 /Fe:"..\build\artpicst_updater.exe" artpicst_updater.cpp ..\build\artpicst_updater.res /link winhttp.lib gdiplus.lib shell32.lib shlwapi.lib user32.lib advapi32.lib gdi32.lib ole32.lib uuid.lib dwmapi.lib /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF
+if %ERRORLEVEL% NEQ 0 (
+    echo Error al compilar el updater
+    cd ..
+    exit /b 1
+)
+cd ..
+
+:: Gate de calidad: selftest del updater (JSON, SHA-256, versiones)
+build\artpicst_updater.exe --selftest
+if %ERRORLEVEL% NEQ 0 (
+    echo El selftest del updater ha fallado
+    exit /b 1
+)
+echo Selftest del updater OK
+
+echo [4/5] Preparando payload autocontenido (resources\app\)...
+python scripts\collect_app_payload.py --root .
+if %ERRORLEVEL% NEQ 0 (
+    echo Error al preparar el payload autocontenido
+    exit /b 1
+)
+
+echo [5/5] Compilando instalador autocontenido (artpicst_installer.exe)...
 cd installer
+:: Recursos DESPUES del payload: el .rc incrusta resources\app\ (payload)
+rc /nologo /fo ..\build\artpicst_installer.res artpicst_installer.rc
+if %ERRORLEVEL% NEQ 0 (
+    echo Error al compilar los recursos del instalador
+    cd ..
+    exit /b 1
+)
 :: INCLUDE con la raiz del repo: el .rc localiza el icono (resources\artpicst.ico)
 set "INCLUDE=%~dp0;%INCLUDE%"
 cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /utf-8 /W4 /I. /I..\include /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0601 /Fe:"build\artpicst_installer.exe" artpicst_installer.cpp ..\build\artpicst_installer.res /link gdiplus.lib shlwapi.lib shell32.lib comctl32.lib dwmapi.lib user32.lib advapi32.lib gdi32.lib ole32.lib uuid.lib /SUBSYSTEM:WINDOWS "/MANIFESTUAC:level='requireAdministrator' uiAccess='false'" /OPT:REF /OPT:ICF
@@ -60,8 +97,9 @@ if %ERRORLEVEL% NEQ 0 (
 
 cd ..
 
-echo [3/3] Copiando archivos a directorio de distribucion...
+echo Copiando archivos a directorio de distribucion...
 copy /y "build\artpicst.exe" "dist\artpicst.exe" >nul
+copy /y "build\artpicst_updater.exe" "dist\artpicst_updater.exe" >nul
 copy /y "installer\build\artpicst_installer.exe" "dist\artpicst_installer.exe" >nul
 copy /y "resources\artpicst.ico" "dist\artpicst.ico" >nul
 copy /y "version.json" "dist\version.json" >nul
@@ -74,16 +112,21 @@ echo ========================================
 echo.
 echo Archivos generados en directorio dist\:
 echo   - artpicst.exe (Programa principal)
-echo   - artpicst_installer.exe (Instalador premium)
+echo   - artpicst_updater.exe (Modulo de actualizacion)
+echo   - artpicst_installer.exe (Instalador autocontenido)
 echo   - artpicst.ico (Icono)
 echo   - version.json (Version info)
 echo   - README.md (Documentacion)
 echo.
 
-:: Mostrar tamaños de archivos
+:: Mostrar tamano de archivos
 for %%I in (dist\artpicst.exe) do echo Programa principal: %%~zI bytes
+for %%I in (dist\artpicst_updater.exe) do echo Updater: %%~zI bytes
 for %%I in (dist\artpicst_installer.exe) do echo Instalador: %%~zI bytes
 
+echo.
+echo Nota: el asset oficial de release es 'artpicst-installer.exe'
+echo (copia/renombra dist\artpicst_installer.exe al publicar).
 echo.
 echo Sistema listo para distribucion en GitHub sin errores.
 exit /b 0

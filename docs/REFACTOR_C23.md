@@ -366,12 +366,13 @@ El visor y el instalador comparten una sola paleta:
 ## 9. Pendientes recomendados
 
 1. **Despacho SIMD en tiempo de ejecución** (SSE2 → SSE4.1/AVX2 con `cpuid`) para cargas de
-   trabajo de 32 B por iteración; hoy el binario se queda en SSE2 por portabilidad.1b. **CI reescrito.** `.github/workflows/build.yml` y `release.yml` compilan ahora los
-dos ejecutables con MSVC (`/std:c++latest`, LTCG, UAC del instalador), generan el icono
-sin dependencias, crean los directorios antes de `rc` (antes fallaba: `rc` no puede
-crear `build/`), verifican que los `.exe` existen y validan el YAML. El de release
-además construye el instalador que NSIS empaqueta (antes empataba un binario que jamás
-se compilaba en ese flujo).
+   trabajo de 32 B por iteración; hoy el binario se queda en SSE2 por portabilidad.
+
+1b. **CI y empaquetado reescritos.** `.github/workflows/release.yml` compila ahora los
+tres ejecutables con MSVC (`/std:c++latest`, LTCG, UAC del instalador), genera el icono
+sin dependencias, valida el updater con `--selftest` como gate de calidad, prepara el
+payload autocontenido y publica **`artpicst-installer.exe`** (wizard GDI+ autocontenido,
+que ya no necesita NSIS) junto a `artpicst-portable.zip`.
 
 2. **Hornear los fotogramas GIF en el hilo de precarga** (ya se decodifican ahí) para que el hilo de interfaz sólo suba el bitmap.
 3. **`RtlGetVersion`/`IsWindowsVersionOrGreater` antes de usar atributos DWM** recientes

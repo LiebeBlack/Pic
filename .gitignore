@@ -2,6 +2,10 @@
 build/
 dist/
 installer/build/
+updater/build/
+
+# Payload autocontenido del instalador (generado por scripts/collect_app_payload.py)
+resources/app/
 
 # Compiled files
 *.exe
