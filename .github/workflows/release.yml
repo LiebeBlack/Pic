@@ -104,7 +104,8 @@ jobs:
             Write-Host "$exe : $((Get-Item $exe).Length) bytes"
           }
           $installerBytes = (Get-Item "build\artpicst_installer.exe").Length
-          if ($installerBytes -lt 2MB) { throw "El instalador autocontenido parece incompleto ($installerBytes bytes): falta el payload." }
+          $minExpected = (Get-Item "build\artpicst.exe").Length + (Get-Item "build\artpicst_updater.exe").Length
+          if ($installerBytes -le $minExpected) { throw "El instalador autocontenido parece incompleto ($installerBytes bytes <= $minExpected bytes esperados): falta el payload." }
           echo "ARTPICST_EXE=$(Resolve-Path build\artpicst.exe)" >> $env:GITHUB_ENV
           echo "ARTPICST_INSTALLER=$(Resolve-Path build\artpicst_installer.exe)" >> $env:GITHUB_ENV
 
