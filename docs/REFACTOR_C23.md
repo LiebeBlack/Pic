@@ -223,7 +223,7 @@ depende del tamaño de la imagen ni de su transparencia.
 El visor y el instalador comparten una sola paleta:
 
 * **Fondo** `#000000` puro (degradado `#08090C → #000000` en el instalador),
-  tablero de transparencias `#12121 6/#1A1A20` apenas visible.
+  tablero de transparencias `#121216/#1A1A20` apenas visible.
 * **Acentos** cian neón `#00E0FF` → violeta `#9E4AFF` (botón primario, casillas,
   barra de progreso, borde de hover `#00D2FF`, esquina superior de marca).
 * **Paneles** `#0D0F14` con borde `#222834`; texto `#ECF0F6 / #9EA8B8 / #687284`.
