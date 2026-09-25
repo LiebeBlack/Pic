@@ -35,6 +35,7 @@ jobs:
     - name: Compilar recursos
       shell: cmd
       run: |
+        if not exist build mkdir build
         rc /nologo /fo build\artpicst.res artpicst.rc || exit /b 1
         cd installer
         rc /nologo /fo ..\build\artpicst_installer.res artpicst_installer.rc || exit /b 1

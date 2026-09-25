@@ -44,7 +44,7 @@ jobs:
           rc /nologo /fo build\artpicst.res artpicst.rc || exit /b 1
           cd updater
           rc /nologo /fo ..\build\artpicst_updater.res artpicst_updater.rc || exit /b 1
-          # El .rc del instalador se compila en su paso, DESPUES del payload.
+          REM El .rc del instalador se compila en su paso, DESPUES del payload.
 
       - name: Compilar ARTPICST (C++23)
         shell: cmd
