@@ -1,11 +1,15 @@
 // Icono y versión del instalador de ARTPICST.
-// La ruta del icono es relativa a este archivo .rc (..\resources desde
-// installer\), así rc.exe lo encuentra desde cualquier directorio de
-// compilación (build.bat, build_installer.bat o CI de GitHub Actions).
+// La ruta del icono usa BARRAS NORMALES a propósito: rc.exe (MSVC) y GNU windres
+// la resuelven relativa al directorio del .rc y la aceptan igual, mientras que
+// las barras invertidas hacen fallar a windres ("cannot open icon file") en
+// algunos entornos. Así el .rc compila desde build.bat, build_installer.bat,
+// build_mingw.bat o el CI de GitHub Actions sin cambios.
+
+#pragma code_page(1252)
 
 #define IDI_APP_ICON 101
 
-IDI_APP_ICON ICON "..\resources\artpicst.ico"
+IDI_APP_ICON ICON "../resources/artpicst.ico"
 
 VS_VERSION_INFO VERSIONINFO
 FILEVERSION 1,2,0,0

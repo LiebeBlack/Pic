@@ -1,7 +1,10 @@
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.20)
 project(ARTPICST VERSION 1.2.0 LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 17)
+# C++23 en todo el proyecto: el núcleo de imagen (src/image_core.hpp) usa
+# constexpr de evaluación obligatoria, [[likely]]/[[unlikely]], [[assume]],
+# std::unreachable, alignas/alignof y static_assert, además de SSE2 explícito.
+set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
@@ -13,6 +16,7 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL "${CMAKE_BINARY_DIR}/bin")
 
 add_executable(artpicst WIN32
     src/main.cpp
+    src/image_core.hpp
     artpicst.manifest
     artpicst.rc
 )
@@ -71,8 +75,9 @@ if(MSVC)
         /utf-8
         /MP
         $<$<CONFIG:Release>:/O2>
-        $<$<CONFIG:Release>:/GL>
+        $<$<CONFIG:Release>:/Ob3>
         $<$<CONFIG:Release>:/Oi>
+        $<$<CONFIG:Release>:/GL>
         $<$<CONFIG:Release>:/Gy>
         $<$<CONFIG:Debug>:/Od>
     )
@@ -91,14 +96,20 @@ if(MSVC)
         $<$<CONFIG:Release>:/OPT:ICF>
         "/MANIFESTUAC:level='asInvoker' uiAccess='false'"
     )
+    # El instalador es TRADICIONAL (Program Files + HKLM): requiere elevación.
     target_link_options(artpicst_installer PRIVATE
         $<$<CONFIG:Release>:/OPT:REF>
         $<$<CONFIG:Release>:/OPT:ICF>
-        "/MANIFESTUAC:level='asInvoker' uiAccess='false'"
+        "/MANIFESTUAC:level='requireAdministrator' uiAccess='false'"
     )
+else()
+    # MinGW / GCC / Clang: vectorización agresiva del núcleo de imagen.
+    target_compile_options(artpicst PRIVATE -O3 -funroll-loops -fno-math-errno)
+    target_compile_options(artpicst_installer PRIVATE -O2)
 endif()
 
 install(TARGETS artpicst RUNTIME DESTINATION .)
 install(TARGETS artpicst_installer RUNTIME DESTINATION .)
 install(FILES README.md DESTINATION .)
+install(FILES "docs/REFACTOR_C23.md" DESTINATION . OPTIONAL)
 install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/resources/artpicst.ico" DESTINATION .)

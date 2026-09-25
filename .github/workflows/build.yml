@@ -7,65 +7,104 @@ on:
     branches: [ main, master ]
   release:
     types: [ created ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   build:
+    name: Build (MSVC x64)
     runs-on: windows-latest
-    
+
     steps:
-    - uses: actions/checkout@v5
-    
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
     - name: Setup MSVC
       uses: ilammy/msvc-dev-cmd@v1
-    
-    - name: Build ARTPICST
+      with:
+        arch: x64
+
+    # El .ico versionado ya es multirresolucion (16 a 256 px) y el generador no
+    # necesita dependencias externas: esto comprueba que el script sigue
+    # reproduciendo el icono en el CI y refresca el recurso antes de empaquetar.
+    - name: Generar icono multirresolucion
+      run: python scripts/generate_icon.py
+
+    - name: Compilar recursos
+      shell: cmd
       run: |
-        mkdir build
-        mkdir dist
-        
-        # Compile Windows resources
-        rc.exe /nologo /fo build\artpicst.res artpicst.rc
+        rc /nologo /fo build\artpicst.res artpicst.rc || exit /b 1
         cd installer
-        rc.exe /nologo /fo ..\build\artpicst_installer.res artpicst_installer.rc
+        rc /nologo /fo ..\build\artpicst_installer.res artpicst_installer.rc || exit /b 1
+
+    - name: Compilar ARTPICST (C++23)
+      shell: cmd
+      run: |
+        if not exist build mkdir build
+        if not exist dist mkdir dist
+        cd src
+        cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /GL /Gy /utf-8 /W4 /WX- /I. /I..\include ^
+          /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /DSTBI_WINDOWS_UTF8 /D_WIN32_WINNT=0x0601 ^
+          /Fe:"..\build\artpicst.exe" main.cpp ..\build\artpicst.res ^
+          /link gdiplus.lib user32.lib kernel32.lib shell32.lib shlwapi.lib gdi32.lib msimg32.lib ^
+                ole32.lib oleaut32.lib uuid.lib dwmapi.lib windowscodecs.lib comdlg32.lib d2d1.lib dwrite.lib ^
+          /MANIFESTINPUT:..\artpicst.manifest /SUBSYSTEM:WINDOWS /LTCG /OPT:REF /OPT:ICF || exit /b 1
         cd ..
 
-        # Build main program
-        cd src
-        cl /nologo /EHsc /std:c++17 /O2 /utf-8 /W4 /I. /I..\include /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /DSTBI_WINDOWS_UTF8 /D_WIN32_WINNT=0x0601 /Fe:"..\build\artpicst.exe" main.cpp ..\build\artpicst.res /link gdiplus.lib user32.lib kernel32.lib shell32.lib shlwapi.lib gdi32.lib msimg32.lib ole32.lib oleaut32.lib uuid.lib dwmapi.lib windowscodecs.lib comdlg32.lib /MANIFESTINPUT:..\artpicst.manifest /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF
-        cd ..
-        
-        # Build installer
-        cd installer
-        cl /nologo /EHsc /std:c++17 /O2 /utf-8 /W4 /I. /I..\include /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0601 /Fe:"..\build\artpicst_installer.exe" artpicst_installer.cpp ..\build\artpicst_installer.res /link gdiplus.lib shlwapi.lib shell32.lib comctl32.lib user32.lib advapi32.lib gdi32.lib ole32.lib uuid.lib /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF
-        cd ..
-    
-    - name: Copy files to dist
+    - name: Compilar instalador (C++23, requiere administrador)
+      shell: cmd
       run: |
-        copy build\artpicst.exe dist\artpicst.exe
-        copy build\artpicst_installer.exe dist\artpicst_installer.exe
-        copy build\artpicst_installer.exe dist\artpicst-installer.exe
-        copy resources\artpicst.ico dist\artpicst.ico
-        copy version.json dist\version.json
-    
-    - name: Upload artifacts
+        cd installer
+        cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /utf-8 /W4 /WX- /I. /I..\include ^
+          /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0601 ^
+          /Fe:"..\build\artpicst_installer.exe" artpicst_installer.cpp ..\build\artpicst_installer.res ^
+          /link gdiplus.lib shlwapi.lib shell32.lib comctl32.lib dwmapi.lib user32.lib advapi32.lib ^
+                gdi32.lib ole32.lib uuid.lib ^
+          /SUBSYSTEM:WINDOWS "/MANIFESTUAC:level='requireAdministrator' uiAccess='false'" ^
+          /OPT:REF /OPT:ICF || exit /b 1
+        cd ..
+
+    - name: Verificar artefactos
+      shell: powershell
+      run: |
+        foreach ($exe in @("build\artpicst.exe", "build\artpicst_installer.exe")) {
+          if (-not (Test-Path $exe)) { throw "Falta el ejecutable: $exe" }
+          Write-Host "$exe : $((Get-Item $exe).Length) bytes"
+        }
+
+    - name: Copiar a dist
+      shell: cmd
+      run: |
+        copy /y build\artpicst.exe dist\artpicst.exe >nul
+        copy /y build\artpicst_installer.exe dist\artpicst_installer.exe >nul
+        copy /y resources\artpicst.ico dist\artpicst.ico >nul
+        copy /y version.json dist\version.json >nul
+        copy /y README.md dist\README.md >nul
+        if exist docs\REFACTOR_C23.md copy /y docs\REFACTOR_C23.md dist\REFACTOR_C23.md >nul
+
+    - name: Subir artefactos
       uses: actions/upload-artifact@v4
       with:
         name: ARTPICST-Windows
         path: dist/*
-    
-    - name: Create release zip
+        if-no-files-found: error
+
+    - name: Crear zip de release
       if: github.event_name == 'release'
+      shell: cmd
       run: |
         cd dist
-        7z a ../artpicst-portable.zip *
+        7z a ../ARTPICST-windows-x64.zip *
         cd ..
-    
-    - name: Release
+
+    - name: Publicar release
       if: github.event_name == 'release'
       uses: softprops/action-gh-release@v2
       with:
         files: |
-          dist/artpicst-installer.exe
-          artpicst-portable.zip
+          dist/artpicst_installer.exe
+          ARTPICST-windows-x64.zip
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

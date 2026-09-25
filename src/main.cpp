@@ -18,9 +18,21 @@
 #define STBI_WINDOWS_UTF8
 #endif
 
-// Implementación de stb_image para carga de imágenes
+// Núcleo de imagen: kernels SIMD, LUT constexpr, asignador alineado a 64 B y
+// aritmética de tamaños a prueba de desbordamiento.
+#include "image_core.hpp"
+
+// stb_image y stb_image_resize2 pasan por el asignador alineado del núcleo:
+// TODOS los búferes de píxeles del programa quedan alineados a línea de caché
+// (64 B) y se liberan con la MISMA pareja asignar/liberar, así que es imposible
+// mezclar heaps (CRT distintos) ni dejar memoria huérfana.
+#define STBI_MALLOC(sz) artpicst::AlignedPixelAlloc(sz)
+#define STBI_REALLOC_SIZED(p, oldsz, newsz) artpicst::AlignedPixelRealloc((p), (oldsz), (newsz))
+#define STBI_FREE(p) artpicst::AlignedPixelFree(p)
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
+#define STBIR_MALLOC(size, user_data) ((void)(user_data), artpicst::AlignedPixelAlloc(size))
+#define STBIR_FREE(ptr, user_data) ((void)(user_data), artpicst::AlignedPixelFree(ptr))
 #define STB_IMAGE_RESIZE_IMPLEMENTATION
 #include "stb_image_resize2.h"
 
@@ -60,6 +72,9 @@
 #include <unordered_map>
 #include <vector>
 
+// Directivas de enlace de MSVC. Se aíslan bajo _MSC_VER porque GCC/Clang no las
+// implementan y con -Wall emiten un aviso por cada línea (build limpio).
+#ifdef _MSC_VER
 #pragma comment(lib, "gdiplus.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "shlwapi.lib")
@@ -74,6 +89,7 @@
 #pragma comment(lib, "comdlg32.lib")
 #pragma comment(lib, "d2d1.lib")
 #pragma comment(lib, "dwrite.lib")
+#endif
 
 using namespace Gdiplus;
 
@@ -96,10 +112,11 @@ enum class UISize {
     Large           // Para pantallas grandes
 };
 
-// Tema oscuro suave y descansado (estilo Win10/7 con toques Win11, sin fatiga visual)
-const COLORREF BG_COLOR_DARK = RGB(26, 26, 30);
-const COLORREF CHECKER_A_DARK = RGB(32, 32, 38);
-const COLORREF CHECKER_B_DARK = RGB(40, 40, 48);
+// Tema oscuro "pitch-black": fondo negro puro con tablero apenas visible.
+// Misma familia de acentos que el instalador (cian neón + violeta).
+const COLORREF BG_COLOR_DARK = RGB(0, 0, 0);
+const COLORREF CHECKER_A_DARK = RGB(18, 18, 22);
+const COLORREF CHECKER_B_DARK = RGB(26, 26, 32);
 
 // Tema claro limpio estilo Windows
 const COLORREF BG_COLOR_LIGHT = RGB(242, 244, 247);
@@ -112,14 +129,14 @@ COLORREF CHECKER_A = CHECKER_A_DARK;
 COLORREF CHECKER_B = CHECKER_B_DARK;
 
 // Dock y botones ultraligeros estilo Windows 10/7 con bordes suaves de Windows 11
-const Color GLASS_DOCK_BG_DARK(255, 34, 35, 42);
-const Color GLASS_DOCK_BORDER_DARK(255, 58, 60, 72);
-const Color GLASS_DOCK_SHADOW_DARK(30, 0, 0, 0);
-const Color GLASS_BTN_NORMAL_DARK(255, 45, 46, 56);
-const Color GLASS_BTN_BORDER_NORMAL_DARK(255, 68, 70, 84);
-const Color GLASS_BTN_HOT_DARK(255, 0, 120, 215);
-const Color GLASS_BTN_BORDER_HOT_DARK(255, 96, 180, 242);
-const Color GLASS_BTN_ACTIVE_DARK(255, 0, 99, 177);
+const Color GLASS_DOCK_BG_DARK(255, 10, 11, 14);
+const Color GLASS_DOCK_BORDER_DARK(255, 40, 44, 54);
+const Color GLASS_DOCK_SHADOW_DARK(40, 0, 0, 0);
+const Color GLASS_BTN_NORMAL_DARK(255, 20, 22, 27);
+const Color GLASS_BTN_BORDER_NORMAL_DARK(255, 46, 50, 62);
+const Color GLASS_BTN_HOT_DARK(255, 0, 150, 190);
+const Color GLASS_BTN_BORDER_HOT_DARK(255, 0, 210, 255);   // cian neón en hover
+const Color GLASS_BTN_ACTIVE_DARK(255, 0, 170, 215);
 
 const Color GLASS_DOCK_BG_LIGHT(255, 245, 247, 250);
 const Color GLASS_DOCK_BORDER_LIGHT(255, 208, 213, 220);
@@ -150,14 +167,6 @@ const int MAX_DIMENSION = 3840;
 const LONGLONG MAX_FILE_BYTES = 300LL * 1024LL * 1024LL;
 const int MAX_GIF_FRAMES = 120;
 const size_t MAX_GIF_BYTES = 64ull * 1024ull * 1024ull;
-
-// Configuración de renderizado ultraligero - efectos desactivados
-const bool ENABLE_ULTRA_QUALITY_RENDERING = false;
-const bool ENABLE_ADAPTIVE_SHARPNESS = false;
-const bool ENABLE_AUTO_CONTRAST = false;
-const bool ENABLE_GAMMA_CORRECTION = false;
-const bool ENABLE_BLUR_EFFECTS = false;                 // Desactivar desenfoques pesados
-const bool ENABLE_TRANSPARENCY_EFFECTS = false;         // Desactivar transparencias pesadas
 
 // Sistema de tamaño UI adaptativo
 const int UI_SCALE_SMALL = 80;      // 80% del tamaño normal
@@ -204,9 +213,10 @@ struct ComPtr {
     explicit operator bool() const { return p != nullptr; }
 };
 
+// Libera un búfer de píxeles con el liberador del núcleo (alineado).
 static void FreePixels(unsigned char*& p) {
     if (p) {
-        free(p);
+        artpicst::AlignedPixelFree(p);
         p = nullptr;
     }
 }
@@ -218,7 +228,7 @@ struct GifAnimation {
 
     void reset() {
         for (unsigned char* f : frames) {
-            if (f) free(f);
+            if (f) artpicst::AlignedPixelFree(f);
         }
         frames.clear();
         delaysMs.clear();
@@ -413,7 +423,6 @@ struct AppState {
     GdiplusStartupInput gdiplusStartupInput;
     bool comInitialized = false;
     HRESULT comHr = E_FAIL;
-    HBRUSH classBrush = nullptr;
 
     AppState() {
         gdiplusStartupInput.GdiplusVersion = 1;
@@ -547,18 +556,22 @@ void CancelZoomAnimation();
 void DeleteCurrentImage();
 void OpenInExplorer();
 
-// Renderizador GPU (Direct2D): declaraciones usadas antes de su definición
-bool GpuRenderFrame();
+// Renderizador GPU (Direct2D): declaraciones usadas antes de su definición.
+// Se le pasa la región sucia (WM_PAINT) para no volver a rasterizar la foto
+// completa cuando solo cambia el OSD o el dock: es la base de cero parpadeo.
+bool GpuRenderFrame(const RECT* clipRect = nullptr);
 void GpuReleaseAll();
 void GpuShutdown();
 
+// Tamaño en bytes de un frame BGRA (4 B/píxel) con tres garantías:
+//   1) dimensiones positivas y dentro del límite admitido por el visor,
+//   2) ninguna multiplicación puede desbordar size_t (ancho * alto * 4 se
+//      comprueba con __builtin_mul_overflow, no con aritmética optimista).
 static bool SafePixelBytes(int width, int height, size_t& outBytes) {
     if (width <= 0 || height <= 0) return false;
     if (width > MAX_DIMENSION || height > MAX_DIMENSION) return false;
-    const uint64_t bytes = static_cast<uint64_t>(width) * static_cast<uint64_t>(height) * 4ull;
-    if (bytes > static_cast<uint64_t>(SIZE_MAX)) return false;
-    outBytes = static_cast<size_t>(bytes);
-    return true;
+    return artpicst::CheckedBgraBytes(static_cast<uint32_t>(width),
+                                      static_cast<uint32_t>(height), outBytes);
 }
 
 // Libera páginas de memoria física no utilizadas devolviéndolas al sistema operativo
@@ -604,7 +617,10 @@ static std::wstring LogPath() {
 
 void LogMessage(const std::wstring& message) {
     try {
-        std::wofstream logFile(LogPath(), std::ios::app);
+        // .c_str() explícito: en C++23 el constructor de basic_ofstream con
+        // std::wstring ya no es viable (la sobrecarga de std::filesystem::path
+        // la oculta) y GCC/Clang lo rechazan. MSVC lo aceptaba por extensión.
+        std::wofstream logFile(LogPath().c_str(), std::ios::app);
         if (!logFile.is_open()) return;
         SYSTEMTIME st{};
         GetLocalTime(&st);
@@ -624,16 +640,6 @@ std::string WideToUtf8(const std::wstring& value) {
     std::string out(static_cast<size_t>(needed), '\0');
     WideCharToMultiByte(CP_UTF8, 0, value.c_str(), -1, out.data(), needed, nullptr, nullptr);
     if (!out.empty() && out.back() == '\0') out.pop_back();
-    return out;
-}
-
-std::wstring Utf8ToWide(const char* value) {
-    if (!value || !*value) return {};
-    int needed = MultiByteToWideChar(CP_UTF8, 0, value, -1, nullptr, 0);
-    if (needed <= 0) return {};
-    std::wstring out(static_cast<size_t>(needed), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, value, -1, out.data(), needed);
-    if (!out.empty() && out.back() == L'\0') out.pop_back();
     return out;
 }
 
@@ -720,6 +726,96 @@ void ToggleGifPlayback() {
     InvalidateRect(g_state.hwnd, nullptr, FALSE);
 }
 
+// ============================================================================
+// Disposición ÚNICA de los botones del diálogo
+// ============================================================================
+// La usan por igual el pintado y el "hit test": así es imposible que el
+// rectángulo visible y el sensible al clic se desincronicen (antes eran dos
+// copias de las mismas constantes, una en WM_PAINT y otra en WM_LBUTTONDOWN) y
+// todo el conjunto escala con el tamaño de interfaz activo.
+struct DialogButton {
+    RectF rect{};
+    const wchar_t* label = L"";
+    int result = IDOK;
+    bool primary = true;   // acción afirmativa (color de acento)
+};
+
+struct DialogLayout {
+    DialogButton buttons[3]{};
+    int count = 0;
+    int defaultResult = IDOK;   // acción de la tecla Intro (MB_DEFBUTTON2 -> secundaria)
+};
+
+DialogLayout ComputeDialogLayout(const ThemedDialogState& st, const RECT& client) {
+    DialogLayout layout{};
+    // Tipo de botones SIN los modificadores (MB_DEFBUTTON2/3 son banderas OR):
+    // comparar st.buttons directamente fallaba con MB_YESNO | MB_DEFBUTTON2.
+    const UINT type = st.buttons & MB_TYPEMASK;
+    const float ui = static_cast<float>(g_uiScale) / 100.0f;
+    const float buttonW = 118.0f * ui;
+    const float buttonH = 34.0f * ui;
+    const float gap = 12.0f * ui;
+    const float y = static_cast<float>(client.bottom) - 24.0f * ui - buttonH;
+
+    auto add = [&](const wchar_t* label, int result, bool primary) {
+        DialogButton& b = layout.buttons[layout.count++];
+        b.rect = RectF(0.0f, y, buttonW, buttonH);
+        b.label = label;
+        b.result = result;
+        b.primary = primary;
+    };
+
+    switch (type) {
+        case MB_YESNO:
+            add(L"Sí", IDYES, true);
+            add(L"No", IDNO, false);
+            break;
+        case MB_YESNOCANCEL:
+            add(L"Sí", IDYES, true);
+            add(L"No", IDNO, false);
+            add(L"Cancelar", IDCANCEL, false);
+            break;
+        case MB_OKCANCEL:
+            add(L"Aceptar", IDOK, true);
+            add(L"Cancelar", IDCANCEL, false);
+            break;
+        case MB_RETRYCANCEL:
+            add(L"Reintentar", IDRETRY, true);
+            add(L"Cancelar", IDCANCEL, false);
+            break;
+        case MB_ABORTRETRYIGNORE:
+            add(L"Anular", IDABORT, false);
+            add(L"Reintentar", IDRETRY, true);
+            add(L"Ignorar", IDIGNORE, false);
+            break;
+        default:   // MB_OK y cualquier combinación no contemplada
+            add(L"Aceptar", IDOK, true);
+            break;
+    }
+
+    // Grupo centrado con la acción afirmativa a la izquierda (convención Windows).
+    const float totalW = layout.count * buttonW + (layout.count - 1) * gap;
+    float x = (static_cast<float>(client.right) - totalW) * 0.5f;
+    if (x < gap) x = gap;
+    for (int i = 0; i < layout.count; ++i) {
+        layout.buttons[i].rect.X = x;
+        x += buttonW + gap;
+    }
+    const bool defaultSecondary = (st.buttons & MB_DEFBUTTON2) != 0;
+    if (layout.count > 1 && defaultSecondary) {
+        layout.defaultResult = layout.buttons[1].result;
+    } else {
+        layout.defaultResult = layout.buttons[0].result;
+    }
+    return layout;
+}
+
+// Acción de cierre con Escape: la última opción (Cancelar/No) o IDCANCEL.
+int DialogEscapeResult(const DialogLayout& layout) {
+    if (layout.count > 1) return layout.buttons[layout.count - 1].result;
+    return IDOK;
+}
+
 LRESULT CALLBACK ThemedDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_NCCREATE: {
@@ -757,8 +853,14 @@ LRESULT CALLBACK ThemedDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
             Color titleCol = isDark ? Color(255, 245, 248, 252) : Color(255, 26, 28, 32);
             Color textCol = isDark ? Color(255, 215, 220, 228) : Color(255, 48, 52, 60);
 
+            // Fondo pintado ÚNICAMENTE en la región sucia (ps.rcPaint): pintar
+            // todo el cliente con la región no validada debajo produce
+            // "fondo negro/blanco" intermitente al solaparse con un frame viejo.
             SolidBrush bgBrush(bgCol);
-            graphics.FillRectangle(&bgBrush, 0, 0, client.right, client.bottom);
+            graphics.FillRectangle(&bgBrush, RectF(
+                static_cast<REAL>(ps.rcPaint.left), static_cast<REAL>(ps.rcPaint.top),
+                static_cast<REAL>(ps.rcPaint.right - ps.rcPaint.left),
+                static_cast<REAL>(ps.rcPaint.bottom - ps.rcPaint.top)));
             
             Pen borderPen(borderCol, 1.0f);
             graphics.DrawRectangle(&borderPen, 0, 0, client.right - 1, client.bottom - 1);
@@ -800,7 +902,11 @@ LRESULT CALLBACK ThemedDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
 
             // Title
             if (!st->title.empty()) {
+                // Suelo y techo de tamaño: un título largo ya no encoge hasta
+                // quedar ilegible y uno corto no se agiganta.
                 float titleFontSize = GetAdaptiveFontSize(st->title.c_str(), client.right - 120, 50, L"Segoe UI");
+                if (titleFontSize < 13.0f) titleFontSize = 13.0f;
+                if (titleFontSize > 17.0f) titleFontSize = 17.0f;
                 Gdiplus::FontFamily titleFamily(L"Segoe UI");
                 Gdiplus::Font titleFont(&titleFamily, titleFontSize, FontStyleBold, UnitPoint);
                 StringFormat titleFormat;
@@ -819,32 +925,46 @@ LRESULT CALLBACK ThemedDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
             const float sepY = static_cast<float>(iconY + iconSize + 14);
             graphics.DrawLine(&sepPen, 24.0f, sepY, static_cast<float>(client.right - 24), sepY);
 
-            // Message - Presentación legible
+            // Mensaje: márgenes generosos, altura mínima garantizada (un
+            // rectángulo de altura negativa hacía desaparecer el texto) y un
+            // cuerpo de letra con suelo legible.
             if (!st->message.empty()) {
                 const bool hasNewlines = (st->message.find(L'\n') != std::wstring::npos);
-                float messageFontSize = GetAdaptiveFontSize(st->message.c_str(), client.right - 60, client.bottom - 160, L"Segoe UI");
+                const float ui = static_cast<float>(g_uiScale) / 100.0f;
+                const float padX = 32.0f * ui;
+                const float textTop = sepY + 18.0f * ui;
+                const float buttonsTop = static_cast<float>(client.bottom) - 74.0f * ui;
+                const float available = (buttonsTop > textTop) ? (buttonsTop - textTop) : 28.0f;
+                const float textW = (static_cast<float>(client.right) - padX * 2.0f > 80.0f)
+                                    ? static_cast<float>(client.right) - padX * 2.0f
+                                    : 80.0f;
+                float messageFontSize = GetAdaptiveFontSize(st->message.c_str(),
+                                                            static_cast<int>(textW), static_cast<int>(available),
+                                                            L"Segoe UI");
+                if (messageFontSize < 10.5f) messageFontSize = 10.5f;
+                if (messageFontSize > 14.0f) messageFontSize = 14.0f;
                 Gdiplus::FontFamily messageFamily(L"Segoe UI");
                 Gdiplus::Font messageFont(&messageFamily, messageFontSize, FontStyleRegular, UnitPoint);
                 StringFormat messageFormat;
                 messageFormat.SetAlignment(hasNewlines ? StringAlignmentNear : StringAlignmentCenter);
                 messageFormat.SetLineAlignment(hasNewlines ? StringAlignmentNear : StringAlignmentCenter);
                 messageFormat.SetTrimming(StringTrimmingEllipsisWord);
-                
+
                 SolidBrush messageBrush(textCol);
-                RectF messageRect(28.0f, sepY + 14.0f, static_cast<float>(client.right - 56), static_cast<float>(client.bottom - sepY - 74.0f));
+                RectF messageRect(padX, textTop, textW, available);
                 graphics.DrawString(st->message.c_str(), -1, &messageFont, messageRect, &messageFormat, &messageBrush);
             }
             
-            // Buttons - Diseño refinado
-            const int buttonWidth = 110;
-            const int buttonHeight = 32;
-            const int buttonY = client.bottom - 46;
-            
+            // Botones: geometría y etiquetas de la disposición ÚNICA compartida
+            // con el "hit test" y con el teclado (Intro / Escape).
+            const DialogLayout layout = ComputeDialogLayout(*st, client);
+            const float ui = static_cast<float>(g_uiScale) / 100.0f;
+
             Color btnPrimaryBg(255, 0, 120, 215);
             Color btnPrimaryBorder(255, 96, 180, 242);
-            Color btnSecondaryBg = isDark ? Color(255, 48, 50, 60) : Color(255, 230, 234, 240);
-            Color btnSecondaryBorder = isDark ? Color(255, 72, 76, 88) : Color(255, 190, 196, 206);
-            Color btnSecondaryText = isDark ? Color(255, 240, 244, 250) : Color(255, 30, 32, 38);
+            Color btnSecondaryBg = isDark ? Color(255, 48, 50, 60) : Color(255, 232, 236, 242);
+            Color btnSecondaryBorder = isDark ? Color(255, 84, 88, 100) : Color(255, 178, 184, 194);
+            Color btnSecondaryText = isDark ? Color(255, 245, 248, 252) : Color(255, 26, 28, 34);
 
             Gdiplus::FontFamily btnFamily(L"Segoe UI");
             Gdiplus::Font buttonFont(&btnFamily, 10.5f, FontStyleBold, UnitPoint);
@@ -852,46 +972,16 @@ LRESULT CALLBACK ThemedDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
             buttonFormat.SetAlignment(StringAlignmentCenter);
             buttonFormat.SetLineAlignment(StringAlignmentCenter);
 
-            if (st->buttons == MB_YESNO) {
-                const int yesX = client.right / 2 - buttonWidth - 10;
-                const int noX = client.right / 2 + 10;
-                
-                // Yes button (Primary)
-                GraphicsPath yesPath;
-                RectF yesRect(static_cast<float>(yesX), static_cast<float>(buttonY), static_cast<float>(buttonWidth), static_cast<float>(buttonHeight));
-                AddRoundedRect(yesPath, yesRect, 6.0f);
-                SolidBrush yesBrush(btnPrimaryBg);
-                Pen yesBorder(btnPrimaryBorder, 1.0f);
-                graphics.FillPath(&yesBrush, &yesPath);
-                graphics.DrawPath(&yesBorder, &yesPath);
-                
-                // No button (Secondary)
-                GraphicsPath noPath;
-                RectF noRect(static_cast<float>(noX), static_cast<float>(buttonY), static_cast<float>(buttonWidth), static_cast<float>(buttonHeight));
-                AddRoundedRect(noPath, noRect, 6.0f);
-                SolidBrush noBrush(btnSecondaryBg);
-                Pen noBorder(btnSecondaryBorder, 1.0f);
-                graphics.FillPath(&noBrush, &noPath);
-                graphics.DrawPath(&noBorder, &noPath);
-                
-                SolidBrush yesTextBrush(Color(255, 255, 255, 255));
-                graphics.DrawString(L"Sí", -1, &buttonFont, yesRect, &buttonFormat, &yesTextBrush);
-                
-                SolidBrush noTextBrush(btnSecondaryText);
-                graphics.DrawString(L"No", -1, &buttonFont, noRect, &buttonFormat, &noTextBrush);
-            } else {
-                const int okX = (client.right - buttonWidth) / 2;
-                
-                GraphicsPath okPath;
-                RectF okRect(static_cast<float>(okX), static_cast<float>(buttonY), static_cast<float>(buttonWidth), static_cast<float>(buttonHeight));
-                AddRoundedRect(okPath, okRect, 6.0f);
-                SolidBrush okBrush(btnPrimaryBg);
-                Pen okBorder(btnPrimaryBorder, 1.0f);
-                graphics.FillPath(&okBrush, &okPath);
-                graphics.DrawPath(&okBorder, &okPath);
-                
-                SolidBrush okTextBrush(Color(255, 255, 255, 255));
-                graphics.DrawString(L"Aceptar", -1, &buttonFont, okRect, &buttonFormat, &okTextBrush);
+            for (int i = 0; i < layout.count; ++i) {
+                const DialogButton& button = layout.buttons[i];
+                GraphicsPath buttonPath;
+                AddRoundedRect(buttonPath, button.rect, 7.0f * ui);
+                SolidBrush buttonBrush(button.primary ? btnPrimaryBg : btnSecondaryBg);
+                Pen buttonBorder(button.primary ? btnPrimaryBorder : btnSecondaryBorder, 1.0f);
+                graphics.FillPath(&buttonBrush, &buttonPath);
+                graphics.DrawPath(&buttonBorder, &buttonPath);
+                SolidBrush buttonText(button.primary ? Color(255, 255, 255, 255) : btnSecondaryText);
+                graphics.DrawString(button.label, -1, &buttonFont, button.rect, &buttonFormat, &buttonText);
             }
             
             EndPaint(hwnd, &ps);
@@ -901,36 +991,60 @@ LRESULT CALLBACK ThemedDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
             return TRUE;
         case WM_DESTROY:
             return 0;
+        case WM_SHOWWINDOW:
+            // La ventana necesita el foco para responder a Intro/Escape.
+            if (wParam) SetFocus(hwnd);
+            return 0;
+        case WM_SETCURSOR:
+            if (LOWORD(lParam) == HTCLIENT) {
+                ThemedDialogState* st = DialogStateFrom(hwnd);
+                if (st) {
+                    RECT client{};
+                    GetClientRect(hwnd, &client);
+                    const DialogLayout layout = ComputeDialogLayout(*st, client);
+                    POINT pt{};
+                    GetCursorPos(&pt);
+                    ScreenToClient(hwnd, &pt);
+                    for (int i = 0; i < layout.count; ++i) {
+                        if (layout.buttons[i].rect.Contains(static_cast<REAL>(pt.x), static_cast<REAL>(pt.y))) {
+                            SetCursor(LoadCursorW(nullptr, IDC_HAND));
+                            return TRUE;
+                        }
+                    }
+                }
+            }
+            break;
+        case WM_KEYDOWN: {
+            ThemedDialogState* st = DialogStateFrom(hwnd);
+            if (!st) break;
+            if (wParam == VK_ESCAPE || wParam == VK_RETURN) {
+                RECT client{};
+                GetClientRect(hwnd, &client);
+                const DialogLayout layout = ComputeDialogLayout(*st, client);
+                st->result = (wParam == VK_RETURN) ? layout.defaultResult : DialogEscapeResult(layout);
+                DestroyWindow(hwnd);
+                return 0;
+            }
+            break;
+        }
         case WM_LBUTTONDOWN: {
             ThemedDialogState* st = DialogStateFrom(hwnd);
             if (!st) return DefWindowProcW(hwnd, msg, wParam, lParam);
-            int x = GET_X_LPARAM(lParam);
-            int y = GET_Y_LPARAM(lParam);
-            
-            RECT client;
+            const int x = GET_X_LPARAM(lParam);
+            const int y = GET_Y_LPARAM(lParam);
+
+            RECT client{};
             GetClientRect(hwnd, &client);
-            
-            int buttonWidth = 110;
-            int buttonHeight = 32;
-            int buttonY = client.bottom - 46;
-            
-            // Check button clicks
-            if (st->buttons == MB_YESNO) {
-                int yesX = client.right / 2 - buttonWidth - 10;
-                int noX = client.right / 2 + 10;
-                
-                if (x >= yesX && x <= yesX + buttonWidth && y >= buttonY && y <= buttonY + buttonHeight) {
-                    st->result = IDYES;
+
+            // Mismo cálculo que el pintado: nunca se desincronizan.
+            const DialogLayout layout = ComputeDialogLayout(*st, client);
+            for (int i = 0; i < layout.count; ++i) {
+                const RectF& rc = layout.buttons[i].rect;
+                if (static_cast<float>(x) >= rc.X && static_cast<float>(x) <= rc.X + rc.Width &&
+                    static_cast<float>(y) >= rc.Y && static_cast<float>(y) <= rc.Y + rc.Height) {
+                    st->result = layout.buttons[i].result;
                     DestroyWindow(hwnd);
-                } else if (x >= noX && x <= noX + buttonWidth && y >= buttonY && y <= buttonY + buttonHeight) {
-                    st->result = IDNO;
-                    DestroyWindow(hwnd);
-                }
-            } else {
-                int okX = (client.right - buttonWidth) / 2;
-                if (x >= okX && x <= okX + buttonWidth && y >= buttonY && y <= buttonY + buttonHeight) {
-                    st->result = IDOK;
-                    DestroyWindow(hwnd);
+                    return 0;
                 }
             }
             return 0;
@@ -938,6 +1052,9 @@ LRESULT CALLBACK ThemedDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
         default:
             return DefWindowProc(hwnd, msg, wParam, lParam);
     }
+    // Los casos que sólo observan el mensaje (cursor, teclado) llegan aquí:
+    // siempre debe devolverse un LRESULT válido (antes se salía sin retorno).
+    return DefWindowProc(hwnd, msg, wParam, lParam);
 }
 
 int ShowThemedMessageBox(HWND parent, const wchar_t* title, const wchar_t* message, UINT buttons, UINT icon) {
@@ -945,13 +1062,20 @@ int ShowThemedMessageBox(HWND parent, const wchar_t* title, const wchar_t* messa
     static const wchar_t* DIALOG_CLASS = L"ARTPICSTThemedDialog";
     
     if (!classRegistered) {
-        WNDCLASSEXW wc = {0};
+        WNDCLASSEXW wc = {};   // inicialización completa: sin -Wmissing-field-initializers
         wc.cbSize = sizeof(wc);
-        wc.style = CS_HREDRAW | CS_VREDRAW;
+        // CS_HREDRAW/CS_VREDRAW FUERA a propósito: invalidan la ventana entera
+        // en cada redimensionado (parpadeo). El WM_PAINT del diálogo ya pinta
+        // exactamente la región sucia; CS_SAVEBITS conserva el contenido bajo
+        // el diálogo modal mientras se mueve.
+        wc.style = CS_SAVEBITS;
         wc.lpfnWndProc = ThemedDialogProc;
         wc.hInstance = GetModuleHandle(nullptr);
         wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-        wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
+        // Fondo NULO: el WM_ERASEBKGND del diálogo devuelve TRUE y pinta el
+        // fondo él mismo, así que Windows no puede solapar un color plano bajo
+        // el contenido (fuente de "fondo negro/blanco" intermitente).
+        wc.hbrBackground = nullptr;
         wc.lpszClassName = DIALOG_CLASS;
         RegisterClassExW(&wc);
         classRegistered = true;
@@ -1112,11 +1236,8 @@ void ApplyTheme(ThemeMode theme) {
         if (g_state.hwnd) EnableDarkTitleBar(g_state.hwnd, false);
     }
     
-    // Actualizar brush de clase si existe
-    if (g_state.classBrush) {
-        DeleteObject(g_state.classBrush);
-        g_state.classBrush = CreateSolidBrush(BG_COLOR);
-    }
+    // El fondo de la clase es nullptr (el pintado cubre la región sucia con el
+    // color de tema), así que no hay pincel de clase que refrescar.
 }
 
 void InitializeIntelligentTheme() {
@@ -1185,7 +1306,7 @@ void InitializeIntelligentUI() {
 
 // Sistema de texto inteligente
 TextSizeInfo CalculateOptimalTextSize(const wchar_t* text, int maxWidth, int maxHeight, const wchar_t* fontName) {
-    TextSizeInfo info = { 0 };
+    TextSizeInfo info = {};   // inicialización completa: sin -Wmissing-field-initializers
     info.needsScrolling = false;
     
     if (!text || !text[0]) {
@@ -1360,7 +1481,7 @@ void CleanupGDIPlus() {
 bool CopyCachedPixels(const CachedImage& src, unsigned char*& dest) {
     size_t bytes = 0;
     if (!src.data || !SafePixelBytes(src.width, src.height, bytes)) return false;
-    dest = static_cast<unsigned char*>(malloc(bytes));
+    dest = static_cast<unsigned char*>(artpicst::AlignedPixelAlloc(bytes));
     if (!dest) return false;
     memcpy(dest, src.data, bytes);
     return true;
@@ -1774,17 +1895,14 @@ int GetExifOrientationFromJpeg(const std::wstring& filepath) {
     return orientation;
 }
 
+// Intercambio R<->B y detección de transparencia en UNA sola pasada SIMD
+// (antes eran dos recorridos completos sobre la imagen de 8 B/px de tráfico).
 void ConvertRGBAtoBGRA(unsigned char* pixels, int width, int height, bool& outHasAlpha) {
     outHasAlpha = false;
     if (!pixels || width <= 0 || height <= 0) return;
-    const size_t count = static_cast<size_t>(width) * static_cast<size_t>(height);
-    for (size_t i = 0; i < count; ++i) {
-        unsigned char* p = pixels + (i * 4);
-        std::swap(p[0], p[2]);
-        if (p[3] < 255) {
-            outHasAlpha = true;
-        }
-    }
+    size_t count = 0;
+    if (!SafePixelBytes(width, height, count)) return;
+    outHasAlpha = artpicst::SwapRbDetectAlpha(pixels, count / 4u);
 }
 
 unsigned char* DecodeWithStb(const std::wstring& filepath, int& width, int& height, int& channels, bool& outHasAlpha, int& autoRotateDeg, bool& outFlipH, bool& outFlipV, GifAnimation* outGif, bool decodeAnimation) {
@@ -1829,7 +1947,7 @@ unsigned char* DecodeWithStb(const std::wstring& filepath, int& width, int& heig
             size_t frameBytes = 0;
             if (!SafePixelBytes(tempWidth, tempHeight, frameBytes)) {
                 stbi_image_free(gifData);
-                if (delays) free(delays);
+                if (delays) artpicst::AlignedPixelFree(delays);   // lo asigna stbi__malloc
                 return nullptr;
             }
 
@@ -1844,7 +1962,7 @@ unsigned char* DecodeWithStb(const std::wstring& filepath, int& width, int& heig
             loaded.delaysMs.reserve(static_cast<size_t>(keepFrames));
             bool ok = true;
             for (int i = 0; i < keepFrames; ++i) {
-                unsigned char* frameCopy = static_cast<unsigned char*>(malloc(frameBytes));
+                unsigned char* frameCopy = static_cast<unsigned char*>(artpicst::AlignedPixelAlloc(frameBytes));
                 if (!frameCopy) {
                     ok = false;
                     break;
@@ -1857,11 +1975,11 @@ unsigned char* DecodeWithStb(const std::wstring& filepath, int& width, int& heig
             }
 
             stbi_image_free(gifData);
-            if (delays) free(delays);
+            if (delays) artpicst::AlignedPixelFree(delays);
 
             if (!ok || loaded.frames.empty()) return nullptr;
 
-            unsigned char* first = static_cast<unsigned char*>(malloc(frameBytes));
+            unsigned char* first = static_cast<unsigned char*>(artpicst::AlignedPixelAlloc(frameBytes));
             if (!first) return nullptr;
             memcpy(first, loaded.frames[0], frameBytes);
             *outGif = std::move(loaded);
@@ -1872,7 +1990,7 @@ unsigned char* DecodeWithStb(const std::wstring& filepath, int& width, int& heig
         }
 
         if (gifData) stbi_image_free(gifData);
-        if (delays) free(delays);
+        if (delays) artpicst::AlignedPixelFree(delays);
     }
 
     unsigned char* pixels = stbi_load(utf8.c_str(), &width, &height, &channels, 4);
@@ -1964,7 +2082,7 @@ unsigned char* DecodeWithWic(const std::wstring& filepath, int& width, int& heig
     size_t bytes = 0;
     if (!SafePixelBytes(static_cast<int>(w), static_cast<int>(h), bytes)) return nullptr;
 
-    unsigned char* pixels = static_cast<unsigned char*>(malloc(bytes));
+    unsigned char* pixels = static_cast<unsigned char*>(artpicst::AlignedPixelAlloc(bytes));
     if (!pixels) return nullptr;
     const UINT stride = w * 4;
     hr = converter->CopyPixels(nullptr, stride, static_cast<UINT>(bytes), pixels);
@@ -1976,13 +2094,8 @@ unsigned char* DecodeWithWic(const std::wstring& filepath, int& width, int& heig
     height = static_cast<int>(h);
     channels = 4;
 
-    const size_t totalPixels = static_cast<size_t>(width) * static_cast<size_t>(height);
-    for (size_t i = 0; i < totalPixels; ++i) {
-        if (pixels[i * 4 + 3] < 255) {
-            outHasAlpha = true;
-            break;
-        }
-    }
+    // Barrido vectorial de opacidad: sale en cuanto ve un alfa < 255.
+    outHasAlpha = artpicst::DetectAnyNonOpaque(pixels, static_cast<size_t>(width) * static_cast<size_t>(height));
 
     return pixels;
 }
@@ -2021,7 +2134,7 @@ unsigned char* DecodeWithGdiplus(const std::wstring& filepath, int& width, int& 
     BitmapData data{};
     if (bmp.LockBits(&rect, ImageLockModeRead, PixelFormat32bppARGB, &data) != Ok) return nullptr;
 
-    unsigned char* pixels = static_cast<unsigned char*>(malloc(bytes));
+    unsigned char* pixels = static_cast<unsigned char*>(artpicst::AlignedPixelAlloc(bytes));
     if (!pixels) {
         bmp.UnlockBits(&data);
         return nullptr;
@@ -2039,13 +2152,7 @@ unsigned char* DecodeWithGdiplus(const std::wstring& filepath, int& width, int& 
     height = h;
     channels = 4;
 
-    const size_t totalPixels = static_cast<size_t>(w) * static_cast<size_t>(h);
-    for (size_t i = 0; i < totalPixels; ++i) {
-        if (pixels[i * 4 + 3] < 255) {
-            outHasAlpha = true;
-            break;
-        }
-    }
+    outHasAlpha = artpicst::DetectAnyNonOpaque(pixels, static_cast<size_t>(w) * static_cast<size_t>(h));
 
     return pixels;
 }
@@ -2108,7 +2215,7 @@ void StoreCurrentInCache() {
         }
     }
 
-    unsigned char* copy = static_cast<unsigned char*>(malloc(bytes));
+    unsigned char* copy = static_cast<unsigned char*>(artpicst::AlignedPixelAlloc(bytes));
     if (!copy) return;
     memcpy(copy, g_state.imageData, bytes);
     AddToCache(g_state.currentFilePath, copy, g_state.imageWidth, g_state.imageHeight,
@@ -2600,13 +2707,15 @@ void RenderHud(Graphics& graphics, const RECT& client) {
             AddRoundedRect(itemPath, itemRect, 6.0f);
 
             if (active) {
-                SolidBrush activeBrush(GLASS_BTN_ACTIVE);
-                Pen activeBorder(Color(255, 96, 205, 255), 1.2f);
+                // Estado activo: relleno cian->violeta (acento neón)
+                RectF gradRect = itemRect;
+                LinearGradientBrush activeBrush(gradRect, Color(255, 0, 190, 235), Color(255, 150, 70, 255), 0.0f);
+                Pen activeBorder(Color(255, 140, 235, 255), 1.2f);
                 graphics.FillPath(&activeBrush, &itemPath);
                 graphics.DrawPath(&activeBorder, &itemPath);
             } else if (hot) {
                 SolidBrush hotBrush(GLASS_BTN_HOT);
-                Pen hotBorder(GLASS_BTN_BORDER_HOT, 1.2f);
+                Pen hotBorder(Color(255, 0, 210, 255), 1.2f);   // borde cian en hover
                 graphics.FillPath(&hotBrush, &itemPath);
                 graphics.DrawPath(&hotBorder, &itemPath);
             } else {
@@ -2695,11 +2804,23 @@ void EnsureCheckerTile() {
         FreeCheckerTile();
         return;
     }
-    for (int y = 0; y < TILE; ++y) {
-        for (int x = 0; x < TILE; ++x) {
-            const COLORREF col = (((x / 16) + (y / 16)) & 1) ? ca : cb;
-            s_checkerTile->SetPixel(x, y, Color(255, GetRValue(col), GetGValue(col), GetBValue(col)));
+    // Patrón generado de golpe en memoria con el MISMO kernel que usa el
+    // trazador Direct2D: antes se llamaba a Bitmap::SetPixel 1024 veces (una
+    // transición COM a GDI+ por píxel) y ambos trazadores dibujaban el patrón
+    // con fases distintas.
+    alignas(64) std::array<uint32_t, 32 * 32> pattern{};
+    artpicst::FillCheckerTileBgra(pattern.data(), static_cast<uint32_t>(TILE), 16u,
+                                  artpicst::BgraWordFromBgr(GetRValue(ca), GetGValue(ca), GetBValue(ca)),
+                                  artpicst::BgraWordFromBgr(GetRValue(cb), GetGValue(cb), GetBValue(cb)));
+    Rect whole(0, 0, TILE, TILE);
+    BitmapData bits{};
+    if (s_checkerTile->LockBits(&whole, ImageLockModeWrite, PixelFormat32bppARGB, &bits) == Ok) {
+        for (int y = 0; y < TILE; ++y) {
+            memcpy(static_cast<unsigned char*>(bits.Scan0) + static_cast<ptrdiff_t>(y) * bits.Stride,
+                   pattern.data() + static_cast<size_t>(y) * TILE,
+                   static_cast<size_t>(TILE) * 4u);
         }
+        s_checkerTile->UnlockBits(&bits);
     }
     s_checkerBrush = new TextureBrush(s_checkerTile, WrapModeTile);
     if (!s_checkerBrush || s_checkerBrush->GetLastStatus() != Ok) {
@@ -3069,7 +3190,7 @@ void GpuReleaseAll() {
 void GpuShutdown() {
     GpuReleaseAll();
     if (g_gpu.staging) {
-        free(g_gpu.staging);
+        artpicst::AlignedPixelFree(g_gpu.staging);
         g_gpu.staging = nullptr;
         g_gpu.stagingBytes = 0;
     }
@@ -3168,22 +3289,16 @@ static bool GpuEnsureThemeAssets() {
     ok = solid(GpuColorOf(osdBg), &g_gpu.brushOsdBg) && ok;
     ok = solid(GpuColorOf(osdBorder), &g_gpu.brushOsdBorder) && ok;
 
-    // Baldosa de ajedrez 32x32 (cuadros de 16) con los colores del tema
+    // Baldosa de ajedrez 32x32 (cuadros de 16) con los colores del tema.
+    // Mismo kernel y misma fase que el trazador GDI+, de modo que el fondo de
+    // transparencias se ve idéntico con GPU y sin ella.
     const int TILE = 32;
-    std::vector<unsigned char> tile(static_cast<size_t>(TILE) * TILE * 4);
-    const COLORREF ca = CHECKER_A;
-    const COLORREF cb = CHECKER_B;
-    for (int y = 0; y < TILE; ++y) {
-        for (int x = 0; x < TILE; ++x) {
-            const COLORREF col = (((x / 16) + (y / 16)) & 1) ? cb : ca;
-            unsigned char* px = tile.data() + (static_cast<size_t>(y) * TILE + static_cast<size_t>(x)) * 4;
-            px[0] = GetBValue(col);
-            px[1] = GetGValue(col);
-            px[2] = GetRValue(col);
-            px[3] = 255;
-        }
-    }
-    if (SUCCEEDED(rt->CreateBitmap(D2D1::SizeU(TILE, TILE), tile.data(), TILE * 4,
+    alignas(64) std::array<uint32_t, 32 * 32> tileWords{};
+    artpicst::FillCheckerTileBgra(tileWords.data(), static_cast<uint32_t>(TILE), 16u,
+                                  artpicst::BgraWordFromBgr(GetRValue(CHECKER_A), GetGValue(CHECKER_A), GetBValue(CHECKER_A)),
+                                  artpicst::BgraWordFromBgr(GetRValue(CHECKER_B), GetGValue(CHECKER_B), GetBValue(CHECKER_B)));
+    const unsigned char* tile = reinterpret_cast<const unsigned char*>(tileWords.data());
+    if (SUCCEEDED(rt->CreateBitmap(D2D1::SizeU(TILE, TILE), tile, TILE * 4,
                                    D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
                                                                            D2D1_ALPHA_MODE_PREMULTIPLIED)),
                                    &g_gpu.checkerTile))) {
@@ -3199,58 +3314,44 @@ static bool GpuEnsureThemeAssets() {
     return true;
 }
 
-// Hornea efectos + premultiplicación alfa en el buffer reutilizable (g_gpu.staging)
+// Traduce los bits de efecto de la GPU a los del núcleo de imagen.
+static uint32_t GpuEffectBits(int effects) {
+    return ((effects & GPUEFF_GRAY) ? artpicst::kEffectGray : 0u) |
+           ((effects & GPUEFF_INVERT) ? artpicst::kEffectInvert : 0u) |
+           ((effects & GPUEFF_CLARITY) ? artpicst::kEffectClarity : 0u);
+}
+
+// Hornea el fotograma para Direct2D en un búfer reutilizable ALINEADO (64 B).
+// El trabajo pesado lo hacen los kernels SIMD del núcleo:
+//   · sin efecto y con transparencia -> una ÚNICA pasada de copia+premultiplicado,
+//   · con efecto -> pasada de color (LUT constexpr) + pasada SIMD de alfa,
+//   · sin nada que transformar -> copia directa (ni se toca el búfer).
 static unsigned char* GpuBakePixels(unsigned char* src, int w, int h, bool hasAlpha, int effects) {
-    const size_t bytes = static_cast<size_t>(w) * static_cast<size_t>(h) * 4u;
+    size_t bytes = 0;
+    if (!SafePixelBytes(w, h, bytes)) return nullptr;
+    const size_t pixels = bytes / 4u;
+
     if (bytes > g_gpu.stagingBytes) {
-        unsigned char* bigger = static_cast<unsigned char*>(realloc(g_gpu.staging, bytes));
+        unsigned char* bigger = static_cast<unsigned char*>(
+            artpicst::AlignedPixelRealloc(g_gpu.staging, g_gpu.stagingBytes, bytes));
         if (!bigger) return nullptr;
         g_gpu.staging = bigger;
         g_gpu.stagingBytes = bytes;
     }
     unsigned char* dst = g_gpu.staging;
+    if (!dst) return nullptr;
 
-    for (int y = 0; y < h; ++y) {
-        const unsigned char* in = src + static_cast<size_t>(y) * static_cast<size_t>(w) * 4u;
-        unsigned char* out = dst + static_cast<size_t>(y) * static_cast<size_t>(w) * 4u;
-        for (int x = 0; x < w; ++x) {
-            const size_t idx = (static_cast<size_t>(x)) * 4u;
-            const unsigned char* p = in + idx;
-            unsigned char* q = out + idx;
-            int b = p[0], g = p[1], r = p[2];
-            const int a = p[3];
-
-            // Efectos en espacio de color (sin alfa): mismo resultado que las
-            // matrices GDI+ anteriores, horneado solo cuando cambia el estado.
-            if (effects & GPUEFF_GRAY) {
-                const int lum = (299 * r + 587 * g + 114 * b) / 1000;
-                b = g = r = lum;
-            } else if (effects & GPUEFF_INVERT) {
-                b = 255 - b; g = 255 - g; r = 255 - r;
-            } else if (effects & GPUEFF_CLARITY) {
-                const auto conv = [](int v) -> int {
-                    float f = 128.0f + (static_cast<float>(v) - 128.0f) * 1.12f;
-                    if (f < 0.0f) f = 0.0f;
-                    if (f > 255.0f) f = 255.0f;
-                    return static_cast<int>(f + 0.5f);
-                };
-                b = conv(b); g = conv(g); r = conv(r);
-            }
-
-            if (hasAlpha && a != 255) {
-                // Direct2D requiere alfa premultiplicado
-                q[0] = static_cast<unsigned char>((b * a + 127) / 255);
-                q[1] = static_cast<unsigned char>((g * a + 127) / 255);
-                q[2] = static_cast<unsigned char>((r * a + 127) / 255);
-                q[3] = static_cast<unsigned char>(a);
-            } else {
-                q[0] = static_cast<unsigned char>(b);
-                q[1] = static_cast<unsigned char>(g);
-                q[2] = static_cast<unsigned char>(r);
-                q[3] = static_cast<unsigned char>(a);
-            }
+    const uint32_t bits = GpuEffectBits(effects);
+    if (bits == artpicst::kEffectNone) {
+        if (hasAlpha) {
+            artpicst::CopyPremultipliedBgra(dst, src, pixels);
+        } else {
+            memcpy(dst, src, bytes);
         }
+        return dst;
     }
+    (void)artpicst::BakeBgra(src, dst, pixels, bits);
+    if (hasAlpha) artpicst::PremultiplyBgra(dst, pixels);
     return dst;
 }
 
@@ -3329,7 +3430,7 @@ static bool GpuUpdateImage() {
     // El buffer de horneado solo hace falta mientras haya GIF animado (se sube
     // un fotograma cada vez); en el resto, liberarlo para no retener RAM.
     if (!g_state.gif.animated() && g_gpu.staging) {
-        free(g_gpu.staging);
+        artpicst::AlignedPixelFree(g_gpu.staging);
         g_gpu.staging = nullptr;
         g_gpu.stagingBytes = 0;
     }
@@ -3349,6 +3450,42 @@ static void GpuDrawText(ID2D1RenderTarget* rt, const wchar_t* text, IDWriteTextF
     // Forma de puntero explícito (válida en SDK MSVC y MinGW por igual)
     rt->DrawText(text, static_cast<UINT32>(wcslen(text)), fmt, &rc, brush,
                  D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+}
+
+// Caja envolvente (en píxeles de cliente) de la imagen ya transformada con zoom,
+// rotación y volteos. Permite saltar todo el dibujado cuando la región sucia no
+// toca la foto (p. ej. mover el ratón sobre el dock).
+static bool GpuImageBounds(D2D1_RECT_F& out) {
+    if (!g_gpu.image) return false;
+    int boxW = 0, boxH = 0;
+    DisplaySize(boxW, boxH);
+    const float zoom = g_state.zoom;
+    const float halfW = static_cast<float>(g_state.imageWidth) * zoom * 0.5f;
+    const float halfH = static_cast<float>(g_state.imageHeight) * zoom * 0.5f;
+    const float cx = g_state.offsetX + static_cast<float>(boxW) * zoom * 0.5f;
+    const float cy = g_state.offsetY + static_cast<float>(boxH) * zoom * 0.5f;
+    const float rad = g_state.currentRotation * 3.14159265358979f / 180.0f;
+    const float c = std::cos(rad), s = std::sin(rad);
+    float minX = 3.4e38f, minY = 3.4e38f, maxX = -3.4e38f, maxY = -3.4e38f;
+    const float xs[2] = { -halfW, halfW };
+    const float ys[2] = { -halfH, halfH };
+    for (float x : xs) {
+        for (float y : ys) {
+            const float rx = cx + (x * c - y * s);
+            const float ry = cy + (x * s + y * c);
+            minX = (rx < minX) ? rx : minX;
+            minY = (ry < minY) ? ry : minY;
+            maxX = (rx > maxX) ? rx : maxX;
+            maxY = (ry > maxY) ? ry : maxY;
+        }
+    }
+    out = D2D1::RectF(minX, minY, maxX, maxY);
+    return true;
+}
+
+static bool GpuRectsIntersect(const D2D1_RECT_F& a, const RECT& b) {
+    return !(a.right < static_cast<float>(b.left) || a.left > static_cast<float>(b.right) ||
+             a.bottom < static_cast<float>(b.top) || a.top > static_cast<float>(b.bottom));
 }
 
 // Dibuja el fotograma actual con su transformación (zoom, rotación, volteos)
@@ -3465,8 +3602,9 @@ static void GpuDrawDock(ID2D1RenderTarget* rt, const RECT& client) {
     }
 }
 
-// Dibuja la escena completa por GPU. Devuelve false si hay que usar GDI+.
-bool GpuRenderFrame() {
+// Dibuja la escena por GPU, recortada a la región sucia recibida de WM_PAINT.
+// Devuelve false si hay que usar el trazador GDI+ de reserva.
+bool GpuRenderFrame(const RECT* clipRect) {
     if (g_gpu.attemptFailed && !g_gpu.retryRequested) return false;
     if (!GpuTryInitFactory()) return false;
     if (!g_gpu.factory) return false;
@@ -3484,20 +3622,43 @@ bool GpuRenderFrame() {
     const float ch = static_cast<float>(client.bottom - client.top);
     if (cw <= 0.0f || ch <= 0.0f) return false;
 
-    rt->BeginDraw();
+    // Región sucia: el OSD y el dock viven en bandas pequeñas, así que un simple
+    // cambio de estado ya no reescala la fotografía 4K (fuente principal de
+    // tirones y de parpadeo en WARP/equipos sin GPU).
+    RECT dirty = client;
+    if (clipRect && clipRect->right > clipRect->left && clipRect->bottom > clipRect->top) {
+        dirty.left = (clipRect->left > client.left) ? clipRect->left : client.left;
+        dirty.top = (clipRect->top > client.top) ? clipRect->top : client.top;
+        dirty.right = (clipRect->right < client.right) ? clipRect->right : client.right;
+        dirty.bottom = (clipRect->bottom < client.bottom) ? clipRect->bottom : client.bottom;
+    }
+    if (dirty.right <= dirty.left || dirty.bottom <= dirty.top) return false;
 
-    // Fondo
-    const D2D1_RECT_F bg = D2D1::RectF(0.0f, 0.0f, cw, ch);
+    rt->BeginDraw();
+    rt->SetTransform(D2D1::Matrix3x2F::Identity());
+    rt->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);   // texto nítido
+    rt->PushAxisAlignedClip(
+        D2D1::RectF(static_cast<float>(dirty.left), static_cast<float>(dirty.top),
+                    static_cast<float>(dirty.right), static_cast<float>(dirty.bottom)),
+        D2D1_ANTIALIAS_MODE_ALIASED);
+
+    // Fondo (recortado a la región sucia: el resto conserva el fotograma previo)
+    const D2D1_RECT_F bg = D2D1::RectF(static_cast<float>(dirty.left), static_cast<float>(dirty.top),
+                                       static_cast<float>(dirty.right), static_cast<float>(dirty.bottom));
     rt->FillRectangle(bg, g_gpu.brushBg);
 
+    D2D1_RECT_F imageBounds{};
+    const bool imageVisible = (g_state.imageData != nullptr) && GpuImageBounds(imageBounds) &&
+                              GpuRectsIntersect(imageBounds, dirty);
     if (g_state.imageData && g_gpu.image) {
-        GpuDrawImage(rt);
+        if (imageVisible) GpuDrawImage(rt);
     } else {
         GpuDrawEmptyState(rt, client);
     }
 
     GpuDrawOsd(rt, client);
     GpuDrawDock(rt, client);
+    rt->PopAxisAlignedClip();
 
     HRESULT hr = rt->EndDraw();
     if (hr == D2DERR_RECREATE_TARGET) {
@@ -3703,37 +3864,57 @@ bool CopyPathToClipboard() {
     return true;
 }
 
+// Copia al portapapeles reutilizando los píxeles YA decodificados (sin volver a
+// decodificar ni pasar por el redibujado de GDI+). La rotación y los espejos se
+// resuelven con los kernels del núcleo: antes se creaba un Graphics, un Bitmap
+// temporal del tamaño de la imagen y se redibujaba píxel a píxel (con
+// remuestreo bilineal, que además degradaba la nitidez al 100%).
 bool CopyImageToClipboard() {
     if (!g_state.imageData) return false;
-    Bitmap source(g_state.imageWidth, g_state.imageHeight,
-                  g_state.imageWidth * 4, PixelFormat32bppARGB, g_state.imageData);
-    int boxW = 0, boxH = 0;
-    DisplaySize(boxW, boxH);
-    Bitmap* output = &source;
-    Bitmap rotated(boxW, boxH, PixelFormat32bppARGB);
-    if (g_state.currentRotation != 0 || g_state.currentFlipH || g_state.currentFlipV) {
-        if (rotated.GetLastStatus() != Ok) return false;
-        Graphics g(&rotated);
-        
-        // Configuración de calidad MÁXIMA para portapapeles
-        g.SetCompositingQuality(CompositingQualityAssumeLinear);
-        g.SetInterpolationMode(InterpolationModeHighQualityBicubic);
-        g.SetSmoothingMode(SmoothingModeAntiAlias);
-        g.SetPixelOffsetMode(PixelOffsetModeHighQuality);
-        
-        g.TranslateTransform(static_cast<REAL>(boxW) * 0.5f, static_cast<REAL>(boxH) * 0.5f);
-        g.RotateTransform(static_cast<REAL>(g_state.currentRotation));
-        if (g_state.currentFlipH || g_state.currentFlipV) {
-            g.ScaleTransform(g_state.currentFlipH ? -1.0f : 1.0f,
-                             g_state.currentFlipV ? -1.0f : 1.0f);
+    size_t srcBytes = 0;
+    if (!SafePixelBytes(g_state.imageWidth, g_state.imageHeight, srcBytes)) return false;
+
+    const bool transformed = (g_state.currentRotation != 0) ||
+                             g_state.currentFlipH || g_state.currentFlipV;
+    unsigned char* transformedPixels = nullptr;
+    unsigned char* scratch = nullptr;
+    const unsigned char* pixels = g_state.imageData;
+    uint32_t outW = static_cast<uint32_t>(g_state.imageWidth);
+    uint32_t outH = static_cast<uint32_t>(g_state.imageHeight);
+
+    if (transformed) {
+        transformedPixels = static_cast<unsigned char*>(artpicst::AlignedPixelAlloc(srcBytes));
+        scratch = static_cast<unsigned char*>(artpicst::AlignedPixelAlloc(srcBytes));
+        if (!transformedPixels || !scratch) {
+            artpicst::AlignedPixelFree(transformedPixels);
+            artpicst::AlignedPixelFree(scratch);
+            return false;
         }
-        g.TranslateTransform(-static_cast<REAL>(g_state.imageWidth) * 0.5f,
-                             -static_cast<REAL>(g_state.imageHeight) * 0.5f);
-        g.DrawImage(&source, 0, 0, g_state.imageWidth, g_state.imageHeight);
-        output = &rotated;
+        const uint8_t* result = artpicst::TransformBgra(
+            g_state.imageData, static_cast<uint32_t>(g_state.imageWidth),
+            static_cast<uint32_t>(g_state.imageHeight), g_state.currentRotation,
+            g_state.currentFlipH, g_state.currentFlipV, transformedPixels, scratch, outW, outH);
+        artpicst::AlignedPixelFree(scratch);   // el resultado vive en transformedPixels
+        scratch = nullptr;
+        if (!result) {
+            artpicst::AlignedPixelFree(transformedPixels);
+            return false;
+        }
+        pixels = result;
     }
+
     HBITMAP hBitmap = nullptr;
-    if (output->GetHBITMAP(Color(0, 0, 0, 0), &hBitmap) != Ok || !hBitmap) return false;
+    {
+        Bitmap output(static_cast<INT>(outW), static_cast<INT>(outH),
+                      static_cast<INT>(outW * 4u), PixelFormat32bppARGB,
+                      const_cast<BYTE*>(pixels));
+        if (output.GetLastStatus() == Ok && output.GetHBITMAP(Color(0, 0, 0, 0), &hBitmap) != Ok) {
+            hBitmap = nullptr;
+        }
+    }
+    // El búfer debe seguir vivo mientras exista el Bitmap: se libera aquí.
+    artpicst::AlignedPixelFree(transformedPixels);
+    if (!hBitmap) return false;
     if (!OpenClipboard(g_state.hwnd)) {
         DeleteObject(hBitmap);
         return false;
@@ -3753,7 +3934,8 @@ bool CopyImageToClipboard() {
 void ApplyWindowMode(HWND hwnd, WindowMode mode) {
     if (!hwnd) return;
     HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
-    MONITORINFO mi{ sizeof(mi) };
+    MONITORINFO mi{};
+    mi.cbSize = sizeof(mi);
     GetMonitorInfoW(monitor, &mi);
 
     if (mode == WindowMode::Fullscreen) {
@@ -4255,7 +4437,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             
             // Trazado GPU (Direct2D): si funciona, toda la escena se dibuja por
             // hardware (60 FPS, CPU ~0%) y no se usa el buffer GDI+.
-            if (GpuRenderFrame()) {
+            if (GpuRenderFrame(&ps.rcPaint)) {
                 EndPaint(hwnd, &ps);
                 return 0;
             }
@@ -4769,16 +4951,22 @@ void ParseStartupOptions(std::wstring& outFolder, WindowMode& outMode) {
 }
 
 static void EnableDpiAwareness() {
+    // Direcciones copiadas con memcpy en lugar de reinterpret_cast: evita el
+    // cambio de tipo de puntero a función (UB técnico y -Wcast-function-type).
     HMODULE user32 = GetModuleHandleW(L"user32.dll");
     if (user32) {
         using SetCtxFn = BOOL (WINAPI*)(HANDLE);
-        auto setCtx = reinterpret_cast<SetCtxFn>(GetProcAddress(user32, "SetProcessDpiAwarenessContext"));
+        FARPROC raw = GetProcAddress(user32, "SetProcessDpiAwarenessContext");
+        SetCtxFn setCtx = nullptr;
+        if (raw) std::memcpy(&setCtx, &raw, sizeof(setCtx));
         if (setCtx && setCtx(reinterpret_cast<HANDLE>(-4))) return;
     }
     HMODULE shcore = LoadLibraryW(L"shcore.dll");
     if (shcore) {
         using SetAwarenessFn = HRESULT (WINAPI*)(int);
-        auto setAwareness = reinterpret_cast<SetAwarenessFn>(GetProcAddress(shcore, "SetProcessDpiAwareness"));
+        FARPROC raw = GetProcAddress(shcore, "SetProcessDpiAwareness");
+        SetAwarenessFn setAwareness = nullptr;
+        if (raw) std::memcpy(&setAwareness, &raw, sizeof(setAwareness));
         if (setAwareness && SUCCEEDED(setAwareness(2))) {
             FreeLibrary(shcore);
             return;
@@ -4812,8 +5000,11 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInstance;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    g_state.classBrush = CreateSolidBrush(BG_COLOR);
-    wc.hbrBackground = g_state.classBrush;
+    // Fondo NULO: WM_ERASEBKGND devuelve TRUE y el pintado (GPU o GDI+ sobre
+    // el doble buffer) cubre siempre la región sucia con el color de tema.
+    // Un pincel de clase hace que el SO pinte primero ese color plano y luego
+    // la escena: "flash" visible en cada repintado con GPU.
+    wc.hbrBackground = nullptr;
     wc.lpszClassName = CLASS_NAME;
     wc.hIcon = LoadIconW(hInstance, MAKEINTRESOURCEW(IDI_APP_ICON));
     if (!wc.hIcon) {
@@ -4823,10 +5014,6 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
 
     if (!RegisterClassExW(&wc)) {
         ShowThemedMessageBox(nullptr, L"ARTPICST", L"Error al registrar la ventana.", MB_OK, MB_ICONERROR);
-        if (g_state.classBrush) {
-            DeleteObject(g_state.classBrush);
-            g_state.classBrush = nullptr;
-        }
         CleanupGDIPlus();
         if (SUCCEEDED(g_state.comHr)) CoUninitialize();
         return 1;
@@ -4860,10 +5047,6 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
     if (!hwnd) {
         ShowThemedMessageBox(nullptr, L"ARTPICST", L"Error al crear la ventana.", MB_OK, MB_ICONERROR);
         UnregisterClassW(CLASS_NAME, hInstance);
-        if (g_state.classBrush) {
-            DeleteObject(g_state.classBrush);
-            g_state.classBrush = nullptr;
-        }
         CleanupGDIPlus();
         if (SUCCEEDED(g_state.comHr)) CoUninitialize();
         return 1;
@@ -4884,10 +5067,6 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
 
     CleanupGDIPlus();
     UnregisterClassW(CLASS_NAME, hInstance);
-    if (g_state.classBrush) {
-        DeleteObject(g_state.classBrush);
-        g_state.classBrush = nullptr;
-    }
     if (SUCCEEDED(g_state.comHr)) CoUninitialize();
     return static_cast<int>(msg.wParam);
 }
