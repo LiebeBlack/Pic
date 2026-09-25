@@ -75,12 +75,13 @@ if ($updaterResExit -ne 0) { Fail "Error compilando los recursos del updater (ar
 # ---------------------------------------------------------------------------
 Write-Host "[2/5] Compilando visor (artpicst.exe)..." -ForegroundColor Yellow
 
-& cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /GL /Gy /utf-8 /W4 /I. /Iinclude `
-    /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /DSTBI_WINDOWS_UTF8 /D_WIN32_WINNT=0x0601 `
+& cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /GL /Gy /utf-8 /W4 /wd4324 /I. /Iinclude `
+    /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /DSTBI_WINDOWS_UTF8 /D_WIN32_WINNT=0x0601 /D_CRT_SECURE_NO_WARNINGS `
     /Fe:"build\artpicst.exe" src\main.cpp build\artpicst.res `
     /link gdiplus.lib user32.lib kernel32.lib shell32.lib shlwapi.lib gdi32.lib msimg32.lib `
           ole32.lib oleaut32.lib uuid.lib dwmapi.lib windowscodecs.lib comdlg32.lib d2d1.lib dwrite.lib `
-    /MANIFESTINPUT:artpicst.manifest /SUBSYSTEM:WINDOWS /LTCG /OPT:REF /OPT:ICF
+          advapi32.lib `
+    /MANIFEST:EMBED /MANIFESTINPUT:artpicst.manifest /SUBSYSTEM:WINDOWS /LTCG /OPT:REF /OPT:ICF
 if ($LASTEXITCODE -ne 0) { Fail "Error compilando el visor (artpicst.exe)" }
 
 # ---------------------------------------------------------------------------
@@ -89,8 +90,8 @@ if ($LASTEXITCODE -ne 0) { Fail "Error compilando el visor (artpicst.exe)" }
 Write-Host "[3/5] Compilando updater (artpicst_updater.exe)..." -ForegroundColor Yellow
 
 Push-Location updater
-& cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /utf-8 /W4 /I. /I..\installer `
-    /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0601 `
+& cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /utf-8 /W4 /wd4324 /I. /I..\installer `
+    /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0601 /D_CRT_SECURE_NO_WARNINGS `
     /Fe:"..\build\artpicst_updater.exe" artpicst_updater.cpp ..\build\artpicst_updater.res `
     /link winhttp.lib gdiplus.lib shell32.lib shlwapi.lib user32.lib advapi32.lib `
           gdi32.lib ole32.lib uuid.lib dwmapi.lib `
@@ -122,8 +123,8 @@ Push-Location installer
 # Recursos DESPUÉS del payload: el .rc incrusta resources/app/ (payload)
 & rc /nologo /fo ..\build\artpicst_installer.res artpicst_installer.rc
 if ($LASTEXITCODE -ne 0) { Fail "Error compilando los recursos del instalador (artpicst_installer.rc)" }
-& cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /utf-8 /W4 /I. /I..\include `
-    /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0601 `
+& cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /utf-8 /W4 /wd4324 /I. /I..\include `
+    /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0601 /D_CRT_SECURE_NO_WARNINGS `
     /Fe:"build\artpicst_installer.exe" artpicst_installer.cpp ..\build\artpicst_installer.res `
     /link gdiplus.lib shlwapi.lib shell32.lib comctl32.lib dwmapi.lib user32.lib advapi32.lib `
           gdi32.lib ole32.lib uuid.lib `

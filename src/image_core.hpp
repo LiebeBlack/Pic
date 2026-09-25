@@ -170,10 +170,17 @@ static_assert(kPixelAlignment >= kSimdAlignment,
 
 // Alineación de la estructura de imagen: exigida en tiempo de compilación con
 // alignas/alignof/static_assert, sin ningún sobrecoste en tiempo de ejecución.
+#if defined(_MSC_VER)
+#  pragma warning(push)
+#  pragma warning(disable: 4324) // PixelBlock está intencionalmente alineado a línea de caché (64B)
+#endif
 struct alignas(kPixelAlignment) PixelBlock {
     uint8_t* data;
     size_t   bytes;
 };
+#if defined(_MSC_VER)
+#  pragma warning(pop)
+#endif
 static_assert(alignof(PixelBlock) == kPixelAlignment,
               "PixelBlock debe respetar la alineación de línea de caché.");
 

@@ -18,7 +18,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup MSVC
         uses: ilammy/msvc-dev-cmd@v1
@@ -50,8 +50,8 @@ jobs:
         shell: cmd
         run: |
           cd src
-          cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /GL /Gy /utf-8 /W4 /WX- /I. /I..\include ^
-            /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /DSTBI_WINDOWS_UTF8 /D_WIN32_WINNT=0x0601 ^
+          cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /GL /Gy /utf-8 /W4 /WX- /wd4324 /I. /I..\include ^
+            /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /DSTBI_WINDOWS_UTF8 /D_WIN32_WINNT=0x0601 /D_CRT_SECURE_NO_WARNINGS ^
             /Fe:"..\build\artpicst.exe" main.cpp ..\build\artpicst.res ^
             /link gdiplus.lib user32.lib kernel32.lib shell32.lib shlwapi.lib gdi32.lib msimg32.lib ^
                   ole32.lib oleaut32.lib uuid.lib dwmapi.lib windowscodecs.lib comdlg32.lib d2d1.lib dwrite.lib ^
@@ -63,8 +63,8 @@ jobs:
         shell: cmd
         run: |
           cd updater
-          cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /utf-8 /W4 /WX- /I. /I..\installer ^
-            /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0601 ^
+          cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /utf-8 /W4 /WX- /wd4324 /I. /I..\installer ^
+            /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0601 /D_CRT_SECURE_NO_WARNINGS ^
             /Fe:"..\build\artpicst_updater.exe" artpicst_updater.cpp ..\build\artpicst_updater.res ^
             /link winhttp.lib gdiplus.lib shell32.lib shlwapi.lib user32.lib advapi32.lib ^
                   gdi32.lib ole32.lib uuid.lib dwmapi.lib ^
@@ -87,8 +87,8 @@ jobs:
         run: |
           cd installer
           rc /nologo /fo ..\build\artpicst_installer.res artpicst_installer.rc || exit /b 1
-          cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /utf-8 /W4 /WX- /I. /I..\include ^
-            /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0601 ^
+          cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /utf-8 /W4 /WX- /wd4324 /I. /I..\include ^
+            /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0601 /D_CRT_SECURE_NO_WARNINGS ^
             /Fe:"..\build\artpicst_installer.exe" artpicst_installer.cpp ..\build\artpicst_installer.res ^
             /link gdiplus.lib shlwapi.lib shell32.lib comctl32.lib dwmapi.lib user32.lib advapi32.lib ^
                   gdi32.lib ole32.lib uuid.lib ^
@@ -153,7 +153,7 @@ jobs:
           Write-Host "Asset oficial: artpicst-installer.exe (wizard GDI+ autocontenido)"
 
       - name: Subir artefactos
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: artpicst-release
           path: |

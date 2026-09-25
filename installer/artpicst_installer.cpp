@@ -248,8 +248,9 @@ std::wstring GetDefaultInstallPath() {
     if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_PROGRAM_FILES, nullptr, 0, programFiles)) && programFiles[0]) {
         return std::wstring(programFiles) + L"\\" + APP_NAME;
     }
-    if (const wchar_t* env = _wgetenv(L"ProgramFiles")) {
-        if (*env) return std::wstring(env) + L"\\" + APP_NAME;
+    wchar_t env[MAX_PATH] = {};
+    if (GetEnvironmentVariableW(L"ProgramFiles", env, MAX_PATH) > 0 && env[0]) {
+        return std::wstring(env) + L"\\" + APP_NAME;
     }
     const std::wstring localAppData = GetShellFolder(CSIDL_LOCAL_APPDATA);
     if (!localAppData.empty()) {
