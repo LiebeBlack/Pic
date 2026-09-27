@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(ARTPICST VERSION 1.2.0 LANGUAGES CXX)
+project(ARTPICST VERSION 1.2.1 LANGUAGES CXX)
 
 # C++23 en todo el proyecto: el núcleo de imagen (src/image_core.hpp) usa
 # constexpr de evaluación obligatoria, [[likely]]/[[unlikely]], [[assume]],
