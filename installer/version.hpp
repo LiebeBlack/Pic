@@ -39,6 +39,17 @@ inline constexpr const wchar_t* kRegValAutoMode  = L"AutoInstallUpdates";
 // ----------------------------------------------------------------------------
 // Comparación de versiones inteligente
 // ----------------------------------------------------------------------------
+// Comparación de LITERALES de versión en TIEMPO DE COMPILACIÓN (usada por los
+// static_assert de visor e instalador). No se usa std::wstring_view aquí: MSVC
+// no pliega traits::length sobre arrays const no-constexpr (error C2131).
+constexpr bool VersionStringsMatch(const wchar_t* a, const wchar_t* b) {
+    while (*a != L'\0' && *a == *b) { ++a; ++b; }
+    return *a == *b;   // ambos '\0' => idénticas
+}
+
+// ----------------------------------------------------------------------------
+// Conversión de tags en tupla comparable
+// ----------------------------------------------------------------------------
 // Convierte "auto-59", "v1.2.3", "1.2.3-rc2" en una tupla comparable:
 //   · prefijo alfabético ("v", "auto")     -> se ignora, es decorativo
 //   · secuencia de números (59 / 1.2.3)    -> componente principal (numérica:

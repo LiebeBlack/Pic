@@ -42,10 +42,14 @@ inline long ParseEnvNumber(const wchar_t* s) {
 
 int g_failures = 0;
 
+// Mensajes de fallo: printf ESTRECHO. Los argumentos (__FILE__, #cond) son
+// literales ASCII y %hs no existe en C99: MinGW con __USE_MINGW_ANSI_STDIO no
+// lo interpreta de forma fiable en wprintf, mientras que printf con %s es
+// idéntico en MSVC y MinGW.
 #define CHECK(cond)                                                        \
     do {                                                                   \
         if (!(cond)) {                                                     \
-            std::wprintf(L"[FAIL] %hs:%d: %hs\n", __FILE__, __LINE__, #cond); \
+            std::printf("[FAIL] %s:%d: %s\n", __FILE__, __LINE__, #cond);  \
             ++g_failures;                                                  \
         }                                                                  \
     } while (0)
@@ -55,10 +59,10 @@ int g_failures = 0;
         const auto va_ = (a);                                              \
         const auto vb_ = (b);                                              \
         if (!(va_ == vb_)) {                                               \
-            std::wprintf(L"[FAIL] %hs:%d: %hs == %hs (%llu vs %llu)\n",    \
-                         __FILE__, __LINE__, #a, #b,                       \
-                         static_cast<unsigned long long>(va_),             \
-                         static_cast<unsigned long long>(vb_));            \
+            std::printf("[FAIL] %s:%d: %s == %s (%llu vs %llu)\n",         \
+                        __FILE__, __LINE__, #a, #b,                        \
+                        static_cast<unsigned long long>(va_),              \
+                        static_cast<unsigned long long>(vb_));             \
             ++g_failures;                                                  \
         }                                                                  \
     } while (0)

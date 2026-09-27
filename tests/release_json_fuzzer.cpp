@@ -79,8 +79,10 @@ struct Rng {
 
 void ValidateInvariants(const artpicst::releasejson::GithubRelease& r,
                         unsigned long iter, const char* family) {
+    // Mensajes: printf ESTRECHO (%hs no es C99; MinGW con
+    // __USE_MINGW_ANSI_STDIO no lo interpreta de forma fiable en wprintf).
     if (r.valid && r.tag.empty()) {
-        std::wprintf(L"[FAIL] %hs iter %lu: valid=true con tag vacío\n", family, iter);
+        std::printf("[FAIL] %s iter %lu: valid=true con tag vacío\n", family, iter);
         ++g_failures;
     }
     // FindInstallerAsset con nombre del instalador: el resultado, si existe,
@@ -88,7 +90,7 @@ void ValidateInvariants(const artpicst::releasejson::GithubRelease& r,
     const artpicst::releasejson::GithubAsset* a =
         artpicst::releasejson::FindInstallerAsset(r, L"artpicst-installer.exe");
     if (a && (a->name.empty())) {
-        std::wprintf(L"[FAIL] %hs iter %lu: asset sin nombre\n", family, iter);
+        std::printf("[FAIL] %s iter %lu: asset sin nombre\n", family, iter);
         ++g_failures;
     }
 }

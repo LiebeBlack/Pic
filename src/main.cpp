@@ -104,10 +104,12 @@ const wchar_t APP_NAME_TEXT[] = L"ARTPICST";
 // Fuente única de verdad de la versión para TODA la UI del visor (Acerca de,
 // guía F1, OSD): coincide con version.json y con APP_VERSION del instalador
 // (artpicst::kAppVersion en installer/version.hpp). Un array wchar_t[] no puede
-// inicializarse desde un puntero, así que se replica el literal y un
-// static_assert garantiza que NUNCA se desincronicen en tiempo de compilación.
-const wchar_t APP_VERSION_TEXT[] = L"1.2.1";
-static_assert(std::wstring_view(APP_VERSION_TEXT) == std::wstring_view(artpicst::kAppVersion),
+// inicializarse desde un puntero, así que se replica el literal; con constexpr
+// el static_assert (comparación carácter a carácter de version.hpp) falla al
+// COMPILAR si algún día se desincronizan. (No usar std::wstring_view aquí:
+// MSVC no lo pliega sobre arrays const — error C2131.)
+constexpr wchar_t APP_VERSION_TEXT[] = L"1.2.1";
+static_assert(artpicst::VersionStringsMatch(APP_VERSION_TEXT, artpicst::kAppVersion),
               "APP_VERSION_TEXT debe coincidir con artpicst::kAppVersion (installer/version.hpp)");
 // Puntero (NO array): un wchar_t[] no puede inicializarse desde un puntero,
 // aunque apunte a un literal constexpr. kRepoUrl vive en installer/version.hpp.
@@ -1343,8 +1345,10 @@ void CalculateDialogSize(const wchar_t* title, const wchar_t* message, UINT butt
     // pantalla en equipos al 125 % y quedaba texto invisible sin scroll).
     RECT work{};
     SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
-    const int maxW = std::min(880, (work.right - work.left) - 48);
-    const int maxH = std::min(860, (work.bottom - work.top) - 48);
+    // static_cast<int>: los campos de RECT son LONG y mezclar LONG/int en
+    // std::min impide a MSVC deducir la plantilla (error C2672).
+    const int maxW = std::min(880, static_cast<int>(work.right - work.left) - 48);
+    const int maxH = std::min(860, static_cast<int>(work.bottom - work.top) - 48);
     const float ui = static_cast<float>(g_uiScale) / 100.0f;
 
     // Medición REAL (GDI+) en lugar de heurísticas por longitud de texto.

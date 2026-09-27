@@ -82,9 +82,11 @@ constexpr UINT RES_APP_UPDATER = 205;   // RCDATA artpicst_updater.exe
 const wchar_t APP_NAME[]       = L"ARTPICST";
 // Fuente única de verdad (version.hpp). Un array wchar_t[] no puede
 // inicializarse desde un puntero: se replica el literal y el static_assert
-// garantiza en tiempo de compilación que nunca se desincronicen.
-const wchar_t APP_VERSION[]    = L"1.2.1";
-static_assert(std::wstring_view(APP_VERSION) == std::wstring_view(artpicst::kAppVersion),
+// (comparación carácter a carácter, plegable por MSVC a diferencia de
+// std::wstring_view — error C2131) garantiza en tiempo de compilación que
+// nunca se desincronicen.
+constexpr wchar_t APP_VERSION[]    = L"1.2.1";
+static_assert(artpicst::VersionStringsMatch(APP_VERSION, artpicst::kAppVersion),
               "APP_VERSION debe coincidir con artpicst::kAppVersion (installer/version.hpp)");
 const wchar_t CLASS_NAME[]     = L"ARTPICSTInstallerWindow";
 const wchar_t UNINSTALL_REG_KEY[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\ARTPICST";

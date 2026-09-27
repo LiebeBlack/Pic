@@ -42,10 +42,12 @@ namespace {
 
 int g_failures = 0;
 
+// Mensajes de fallo: printf ESTRECHO (%hs no es C99; MinGW con
+// __USE_MINGW_ANSI_STDIO no lo interpreta de forma fiable en wprintf).
 #define CHECK_MSG(cond, msg)                                               \
     do {                                                                   \
         if (!(cond)) {                                                     \
-            std::wprintf(L"[FAIL] %hs: %hs\n", msg, #cond);                \
+            std::printf("[FAIL] %s: %s\n", msg, #cond);                    \
             ++g_failures;                                                  \
         }                                                                  \
     } while (0)
