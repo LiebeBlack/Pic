@@ -1488,10 +1488,11 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
     // redirección de los tres streams, el log aparece en el job de Actions.
     if (g_cfg.selfTest || g_cfg.checkOnly) {
         if (AttachConsole(ATTACH_PARENT_PROCESS)) {
+            // El modo de freopen_s es char* (no wide): "w"/"r".
             FILE* dummy = nullptr;
-            freopen_s(&dummy, "CONOUT$", L"w", stdout);
-            freopen_s(&dummy, "CONOUT$", L"w", stderr);
-            freopen_s(&dummy, "CONIN$", L"r", stdin);
+            freopen_s(&dummy, "CONOUT$", "w", stdout);
+            freopen_s(&dummy, "CONOUT$", "w", stderr);
+            freopen_s(&dummy, "CONIN$", "r", stdin);
         }
     }
     if (g_cfg.selfTest) {

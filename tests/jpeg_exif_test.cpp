@@ -70,21 +70,23 @@ std::vector<unsigned char> MakeJpegWithExif(uint32_t ifdOffsetRaw,
     } else {
         tiff = {'M', 'M', 0x00, 0x2A};
     }
-    auto push16 = [&tiff](uint16_t v, bool le) {
-        if (le) { tiff.push_back(static_cast<unsigned char>(v & 0xFF)); tiff.push_back(static_cast<unsigned char>(v >> 8)); }
-        else    { tiff.push_back(static_cast<unsigned char>(v >> 8));   tiff.push_back(static_cast<unsigned char>(v & 0xFF)); }
+    // Push helpers SIN captura: reciben el buffer destino como primer
+    // parámetro (se usan tanto para la cabecera TIFF como para el IFD).
+    auto push16 = [](std::vector<unsigned char>& out, uint16_t v, bool le) {
+        if (le) { out.push_back(static_cast<unsigned char>(v & 0xFF)); out.push_back(static_cast<unsigned char>(v >> 8)); }
+        else    { out.push_back(static_cast<unsigned char>(v >> 8));   out.push_back(static_cast<unsigned char>(v & 0xFF)); }
     };
-    auto push32 = [&tiff](uint32_t v, bool le) {
+    auto push32 = [](std::vector<unsigned char>& out, uint32_t v, bool le) {
         if (le) {
-            tiff.push_back(static_cast<unsigned char>(v & 0xFF));
-            tiff.push_back(static_cast<unsigned char>((v >> 8) & 0xFF));
-            tiff.push_back(static_cast<unsigned char>((v >> 16) & 0xFF));
-            tiff.push_back(static_cast<unsigned char>((v >> 24) & 0xFF));
+            out.push_back(static_cast<unsigned char>(v & 0xFF));
+            out.push_back(static_cast<unsigned char>((v >> 8) & 0xFF));
+            out.push_back(static_cast<unsigned char>((v >> 16) & 0xFF));
+            out.push_back(static_cast<unsigned char>((v >> 24) & 0xFF));
         } else {
-            tiff.push_back(static_cast<unsigned char>((v >> 24) & 0xFF));
-            tiff.push_back(static_cast<unsigned char>((v >> 16) & 0xFF));
-            tiff.push_back(static_cast<unsigned char>((v >> 8) & 0xFF));
-            tiff.push_back(static_cast<unsigned char>(v & 0xFF));
+            out.push_back(static_cast<unsigned char>((v >> 24) & 0xFF));
+            out.push_back(static_cast<unsigned char>((v >> 16) & 0xFF));
+            out.push_back(static_cast<unsigned char>((v >> 8) & 0xFF));
+            out.push_back(static_cast<unsigned char>(v & 0xFF));
         }
     };
     push32(tiff, ifdOffsetRaw, littleEndian);
