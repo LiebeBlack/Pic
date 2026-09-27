@@ -151,9 +151,12 @@ void FuzzGarbage(unsigned long iters) {
         for (size_t i = 0; i < len; ++i) {
             const unsigned int pick = rng.Range(10);
             if (pick < 7) {
-                // Caracteres estructurales y de escape.
-                static const wchar_t hot[] = L"{[}]\"\\:,\u0000\uFFFD\uD800";
-                garbage += hot[rng.Range(10)];
+                // Caracteres estructurales y de escape. Con valores \xNNN y no
+                // \uNNNN: los UCN con valor < 0x00A0 y los surrogados están
+                // PROHIBIDOS en literales C++ (error del compilador).
+                static const wchar_t hot[] = {L'{', L'[', L'}', L']', L'"', L'\\',
+                                              L':', L',', 0x0000, 0xFFFD, 0xD800};
+                garbage += hot[rng.Range(11)];
             } else {
                 // Cualquier wchar (excluyendo 0x0000: terminaría el c_str).
                 wchar_t c = static_cast<wchar_t>(1 + rng.Next() % 0xFFFEu);
