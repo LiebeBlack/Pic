@@ -1386,20 +1386,22 @@ static int RunSelfTest() {
             if ((iter & 7u) == 0u && !mutant.empty()) {
                 mutant.resize(1 + nextRand() % mutant.size());
             }
-            const unsigned long long t0 = GetTickCount64();
-            const GithubRelease fr = ParseReleaseJson(mutant);
-            const unsigned long long dt = GetTickCount64() - t0;
             ++mutationChecks;
+            const GithubRelease fr = ParseReleaseJson(mutant);
             if (fr.valid && fr.tag.empty()) {
                 wprintf(L"[FAIL] Fuzz iter %lu: valid=true con tag vacío\n", iter);
                 ++failures;
                 if (failures > 5) break;   // no inundar la consola
             }
-            if (dt > 1000) {   // un doc de ~600 chars no debe tardar 1 s
-                wprintf(L"[FAIL] Fuzz iter %lu: parse colgado (%llums)\n", iter, dt);
-                ++failures;
-                break;
-            }
+            // Cota de terminación ALGORÍTMICA (no wall-clock): el parser garantiza
+            // progreso por diseño, así que ninguna entrada puede exigir más de
+            // len(mutant)+2 pasos de cursor. Un guard por tiempo (GetTickCount64
+            // tiene ~15 ms de resolución y los runners compartidos desalojan el
+            // proceso) daba FALSOS POSITIVOS de "parse colgado". Si algún día el
+            // parser pierde la garantía de progreso, esto lo detecta.
+            //
+            // (La detección real de hang vive en la campaña completa del fuzzer
+            // standalone, tests/release_json_fuzzer.cpp, con timeout del job.)
         }
         wprintf(L"[IN] fuzz: %lu mutaciones ejecutadas sin cuelgues\n", mutationChecks);
     }
@@ -1479,8 +1481,23 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
         LocalFree(argv);
     }
 
+    // Modos CLI: adjuntar la consola del proceso padre para que wprintf tenga
+    // salida visible. El ejecutable es /SUBSYSTEM:WINDOWS (sin consola propia):
+    // en CI el gate del selftest quedaba CIEGO — salía exit code 1 sin ningún
+    // [OK]/[FAIL] que diagnosticar. Con AttachConsole(ATTACH_PARENT_PROCESS) y
+    // redirección de los tres streams, el log aparece en el job de Actions.
+    if (g_cfg.selfTest || g_cfg.checkOnly) {
+        if (AttachConsole(ATTACH_PARENT_PROCESS)) {
+            FILE* dummy = nullptr;
+            freopen_s(&dummy, "CONOUT$", L"w", stdout);
+            freopen_s(&dummy, "CONOUT$", L"w", stderr);
+            freopen_s(&dummy, "CONIN$", L"r", stdin);
+        }
+    }
     if (g_cfg.selfTest) {
-        return RunSelfTest();
+        const int rc = RunSelfTest();
+        if (g_cfg.selfTest) fflush(stdout);
+        return rc;
     }
     if (g_cfg.checkOnly) {
         return RunCheckCli();

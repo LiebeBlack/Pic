@@ -51,8 +51,6 @@ inline long ParseEnvNumber(const wchar_t* s) {
     return wcstol(s, nullptr, 10);
 }
 
-namespace {
-
 int g_failures = 0;
 
 // Documento válido de referencia (mismo que el selftest del updater).
