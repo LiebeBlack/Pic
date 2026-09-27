@@ -1355,7 +1355,6 @@ static int RunSelfTest() {
         if (fuzzIters == 0) fuzzIters = 4000u;
 
         const std::wstring seedDoc(json);
-        const size_t seedLen = seedDoc.size();
         unsigned int rng = 0x12345678u;   // semilla fija: fallos reproducibles
         auto nextRand = [&rng]() {
             rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
@@ -1368,14 +1367,20 @@ static int RunSelfTest() {
             const int mutations = 1 + static_cast<int>(nextRand() % 4u);
             for (int m = 0; m < mutations; ++m) {
                 const unsigned int op = nextRand() % 3u;
-                const size_t pos = static_cast<size_t>(nextRand()) % (seedLen + 1);
+                // FIX crash en CI (run #77): la cota del índice debe ser el
+                // tamaño VIVO del mutante, no el del documento semilla. Los
+                // borrados y los truncamientos encogen el mutante, y un
+                // insert en begin()+pos con pos > size() es UB — crash
+                // 0xC0000005 antes de imprimir ningún [OK]/[FAIL].
+                const size_t pos = static_cast<size_t>(nextRand()) % (mutant.size() + 1);
                 switch (op) {
                     case 0:   // sustitución
                         if (pos < mutant.size()) mutant[pos] = alphabet[nextRand() % (sizeof(alphabet)/sizeof(alphabet[0]) - 1)];
                         break;
                     case 1:   // inserción
-                        mutant.insert(mutant.begin() + static_cast<long>(pos),
-                                      alphabet[nextRand() % (sizeof(alphabet)/sizeof(alphabet[0]) - 1)]);
+                        if (pos <= mutant.size())   // cinturón y tirantes
+                            mutant.insert(mutant.begin() + static_cast<long>(pos),
+                                          alphabet[nextRand() % (sizeof(alphabet)/sizeof(alphabet[0]) - 1)]);
                         break;
                     default:  // borrado
                         if (pos < mutant.size()) mutant.erase(mutant.begin() + static_cast<long>(pos));
@@ -1481,23 +1486,32 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
         LocalFree(argv);
     }
 
-    // Modos CLI: adjuntar la consola del proceso padre para que wprintf tenga
-    // salida visible. El ejecutable es /SUBSYSTEM:WINDOWS (sin consola propia):
-    // en CI el gate del selftest quedaba CIEGO — salía exit code 1 sin ningún
-    // [OK]/[FAIL] que diagnosticar. Con AttachConsole(ATTACH_PARENT_PROCESS) y
-    // redirección de los tres streams, el log aparece en el job de Actions.
+    // Modos CLI y consola: el binario es /SUBSYSTEM:WINDOWS (sin consola
+    // propia). Dos casos:
+    //  · Salida redirigida a tubería/fichero (CI: `exe --selftest > pipe`):
+    //    la UCRT ya enlaza stdout con el handle heredado y hay que DEJARLA
+    //    como está — el fix anterior (freopen a CONOUT$ tras AttachConsole)
+    //    se comía la tubería y el job de Actions se quedaba sin ningún
+    //    [OK]/[FAIL] que diagnosticar.
+    //  · Terminal interactivo (cmd local, double-click): no hay std handle,
+    //    se adjunta la consola del padre y se redirigen los tres streams.
     if (g_cfg.selfTest || g_cfg.checkOnly) {
-        if (AttachConsole(ATTACH_PARENT_PROCESS)) {
-            // El modo de freopen_s es char* (no wide): "w"/"r".
+        // Sin buffer: si el selftest crashes a mitad, cada [FAIL] ya está en
+        // la tubería/fichero en vez de perderse en el buffer de la UCRT.
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        const HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+        const bool redirected = hOut && hOut != INVALID_HANDLE_VALUE &&
+                                GetFileType(hOut) != FILE_TYPE_CHAR;
+        if (!redirected && AttachConsole(ATTACH_PARENT_PROCESS)) {
             FILE* dummy = nullptr;
-            freopen_s(&dummy, "CONOUT$", "w", stdout);
+            freopen_s(&dummy, "CONOUT$", "w", stdout);   // modo char* (no wide)
             freopen_s(&dummy, "CONOUT$", "w", stderr);
             freopen_s(&dummy, "CONIN$", "r", stdin);
         }
     }
     if (g_cfg.selfTest) {
         const int rc = RunSelfTest();
-        if (g_cfg.selfTest) fflush(stdout);
+        fflush(stdout);
         return rc;
     }
     if (g_cfg.checkOnly) {

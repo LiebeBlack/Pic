@@ -98,9 +98,23 @@ jobs:
             /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF || exit /b 1
           cd ..
 
+      # Gate de calidad. Se captura la salida a un fichero y se muestra
+      # SIEMPRE (éxito o fallo): el binario es /SUBSYSTEM:WINDOWS y un crash
+      # temprano (p. ej. el OOB del fuzzer interno corregido en el run #77)
+      # moría sin dejar rastro en el log, dejando el gate ciego. `|| exit /b 1`
+      # además enmascaraba el código real a 1; aquí se preserva el código en
+      # el mensaje ::error:: y se normaliza a 1 para el fallo del step.
       - name: Validar updater (selftest como gate de calidad)
         shell: cmd
-        run: build\artpicst_updater.exe --selftest || exit /b 1
+        run: |
+          build\artpicst_updater.exe --selftest > selftest.log 2>&1
+          set GATE_RC=%errorlevel%
+          type selftest.log
+          if %GATE_RC% neq 0 (
+            echo ::error::Updater selftest FAILED con exit code %GATE_RC% (salida arriba; vacío = crash antes de escribir).
+            exit /b 1
+          )
+          echo Updater selftest OK.
 
       - name: Preparar payload autocontenido del instalador
         shell: powershell
