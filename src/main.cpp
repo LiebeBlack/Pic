@@ -3829,8 +3829,6 @@ void SetAsWallpaper() {
 
 void ShowExifDialog(HWND hwnd) {
     if (!g_state.imageData || g_state.currentFilePath.empty()) return;
-    int dw = 0, dh = 0;
-    DisplaySize(dw, dh);
     double megapixels = (static_cast<double>(g_state.imageWidth) * g_state.imageHeight) / 1000000.0;
     std::wstring info = L"Propiedades y Metadatos de la Imagen:\n\n";
     info += L"• Archivo: " + GetFileName(g_state.currentFilePath) + L"\n";
