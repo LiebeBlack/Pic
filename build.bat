@@ -44,7 +44,7 @@ if %ERRORLEVEL% NEQ 0 (
 cd ..
 
 echo [2/5] Compilando visor (artpicst.exe)...
-cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /GL /Gy /utf-8 /W4 /wd4324 /I. /Iinclude /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /DSTBI_WINDOWS_UTF8 /D_WIN32_WINNT=0x0601 /D_CRT_SECURE_NO_WARNINGS /Fe:"build\artpicst.exe" src\main.cpp build\artpicst.res /link gdiplus.lib user32.lib kernel32.lib shell32.lib shlwapi.lib gdi32.lib msimg32.lib ole32.lib oleaut32.lib uuid.lib dwmapi.lib windowscodecs.lib comdlg32.lib d2d1.lib dwrite.lib advapi32.lib /MANIFEST:EMBED /MANIFESTINPUT:artpicst.manifest /SUBSYSTEM:WINDOWS /LTCG /OPT:REF /OPT:ICF
+cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /GL /Gy /utf-8 /W4 /permissive- /wd4324 /I. /Iinclude /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /DSTBI_WINDOWS_UTF8 /D_WIN32_WINNT=0x0601 /D_CRT_SECURE_NO_WARNINGS /Fe:"build\artpicst.exe" src\main.cpp build\artpicst.res /link gdiplus.lib user32.lib kernel32.lib shell32.lib shlwapi.lib gdi32.lib msimg32.lib ole32.lib oleaut32.lib uuid.lib dwmapi.lib windowscodecs.lib comdlg32.lib d2d1.lib dwrite.lib advapi32.lib /MANIFEST:EMBED /MANIFESTINPUT:artpicst.manifest /SUBSYSTEM:WINDOWS /LTCG /OPT:REF /OPT:ICF
 
 if %ERRORLEVEL% NEQ 0 (
     echo Error al compilar el visor
@@ -53,7 +53,7 @@ if %ERRORLEVEL% NEQ 0 (
 
 echo [3/5] Compilando updater (artpicst_updater.exe)...
 cd updater
-cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /utf-8 /W4 /wd4324 /I. /I..\installer /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0601 /D_CRT_SECURE_NO_WARNINGS /Fe:"..\build\artpicst_updater.exe" artpicst_updater.cpp ..\build\artpicst_updater.res /link winhttp.lib gdiplus.lib shell32.lib shlwapi.lib user32.lib advapi32.lib gdi32.lib ole32.lib uuid.lib dwmapi.lib /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF
+cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /utf-8 /W4 /permissive- /wd4324 /I. /I..\installer /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0601 /D_CRT_SECURE_NO_WARNINGS /Fe:"..\build\artpicst_updater.exe" artpicst_updater.cpp ..\build\artpicst_updater.res /link winhttp.lib gdiplus.lib shell32.lib shlwapi.lib user32.lib advapi32.lib gdi32.lib ole32.lib uuid.lib dwmapi.lib /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF
 if %ERRORLEVEL% NEQ 0 (
     echo Error al compilar el updater
     cd ..
@@ -68,6 +68,39 @@ if %ERRORLEVEL% NEQ 0 (
     exit /b 1
 )
 echo Selftest del updater OK
+
+echo [3b/5] Compilando y ejecutando tests y fuzzing...
+cl /nologo /EHsc /std:c++20 /O2 /utf-8 /W4 /permissive- /I. /Iinclude /Fe:"build\image_core_test.exe" tests\image_core_test.cpp /link kernel32.lib
+if %ERRORLEVEL% NEQ 0 (
+    echo Error compilando tests\image_core_test.cpp
+    exit /b 1
+)
+build\image_core_test.exe
+if %ERRORLEVEL% NEQ 0 (
+    echo Los tests del nucleo de imagen han fallado
+    exit /b 1
+)
+cl /nologo /EHsc /std:c++20 /O2 /utf-8 /W4 /permissive- /I. /Fe:"build\release_json_fuzzer.exe" tests\release_json_fuzzer.cpp /link kernel32.lib
+if %ERRORLEVEL% NEQ 0 (
+    echo Error compilando tests\release_json_fuzzer.cpp
+    exit /b 1
+)
+build\release_json_fuzzer.exe
+if %ERRORLEVEL% NEQ 0 (
+    echo El fuzzer del parser JSON ha fallado
+    exit /b 1
+)
+cl /nologo /EHsc /std:c++20 /O2 /utf-8 /W4 /permissive- /I. /Fe:"build\jpeg_exif_test.exe" tests\jpeg_exif_test.cpp /link kernel32.lib shell32.lib
+if %ERRORLEVEL% NEQ 0 (
+    echo Error compilando tests\jpeg_exif_test.cpp
+    exit /b 1
+)
+build\jpeg_exif_test.exe
+if %ERRORLEVEL% NEQ 0 (
+    echo Los tests EXIF han fallado
+    exit /b 1
+)
+echo Tests y fuzzing OK
 
 echo [4/5] Preparando payload autocontenido (resources\app\)...
 python scripts\collect_app_payload.py --root .
@@ -87,7 +120,7 @@ if %ERRORLEVEL% NEQ 0 (
 )
 :: INCLUDE con la raiz del repo: el .rc localiza el icono (resources\artpicst.ico)
 set "INCLUDE=%~dp0;%INCLUDE%"
-cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /utf-8 /W4 /wd4324 /I. /I..\include /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0601 /D_CRT_SECURE_NO_WARNINGS /Fe:"build\artpicst_installer.exe" artpicst_installer.cpp ..\build\artpicst_installer.res /link gdiplus.lib shlwapi.lib shell32.lib comctl32.lib dwmapi.lib user32.lib advapi32.lib gdi32.lib ole32.lib uuid.lib /SUBSYSTEM:WINDOWS "/MANIFESTUAC:level='requireAdministrator' uiAccess='false'" /OPT:REF /OPT:ICF
+cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /utf-8 /W4 /permissive- /wd4324 /I. /I..\include /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0601 /D_CRT_SECURE_NO_WARNINGS /Fe:"build\artpicst_installer.exe" artpicst_installer.cpp ..\build\artpicst_installer.res /link gdiplus.lib shlwapi.lib shell32.lib comctl32.lib dwmapi.lib user32.lib advapi32.lib gdi32.lib ole32.lib uuid.lib /SUBSYSTEM:WINDOWS "/MANIFESTUAC:level='requireAdministrator' uiAccess='false'" /OPT:REF /OPT:ICF
 
 if %ERRORLEVEL% NEQ 0 (
     echo Error al compilar el instalador

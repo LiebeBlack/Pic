@@ -56,7 +56,7 @@ popd
 
 :: [2/5] Viewer
 echo [2/5] Building main program with MinGW...
-g++ -std=c++23 -O3 -funroll-loops -fno-math-errno -static -static-libgcc -static-libstdc++ -municode -DUNICODE -D_UNICODE -DNOMINMAX -DWIN32_LEAN_AND_MEAN -DSTBI_WINDOWS_UTF8 -D_WIN32_WINNT=0x0601 -I. -Iinclude -o build\artpicst.exe src\main.cpp %RES_OBJ% -lgdiplus -luser32 -lkernel32 -lshell32 -lshlwapi -lgdi32 -lmsimg32 -lole32 -loleaut32 -luuid -ldwmapi -lwindowscodecs -lcomdlg32 -ld2d1 -ldwrite -mwindows
+g++ -std=c++23 -O3 -funroll-loops -fno-math-errno -Wall -Wextra -static -static-libgcc -static-libstdc++ -municode -DUNICODE -D_UNICODE -DNOMINMAX -DWIN32_LEAN_AND_MEAN -DSTBI_WINDOWS_UTF8 -D_WIN32_WINNT=0x0601 -I. -Iinclude -o build\artpicst.exe src\main.cpp %RES_OBJ% -lgdiplus -luser32 -lkernel32 -lshell32 -lshlwapi -lgdi32 -lmsimg32 -lole32 -loleaut32 -luuid -ldwmapi -lwindowscodecs -lcomdlg32 -ld2d1 -ldwrite -mwindows
 
 if %ERRORLEVEL% NEQ 0 (
     echo Error building main program
@@ -66,7 +66,7 @@ if %ERRORLEVEL% NEQ 0 (
 :: [3/5] Updater (needs winhttp + installer/version.hpp)
 echo [3/5] Building updater with MinGW...
 pushd updater
-g++ -std=c++23 -O2 -static -static-libgcc -static-libstdc++ -municode -DUNICODE -D_UNICODE -DNOMINMAX -DWIN32_LEAN_AND_MEAN -D_WIN32_WINNT=0x0601 -I. -I..\installer -o ..\build\artpicst_updater.exe artpicst_updater.cpp %UPDATER_RES_OBJ% -lwinhttp -lgdiplus -lshell32 -lshlwapi -luser32 -ladvapi32 -lgdi32 -lole32 -luuid -ldwmapi -mwindows
+g++ -std=c++23 -O2 -Wall -Wextra -static -static-libgcc -static-libstdc++ -municode -DUNICODE -D_UNICODE -DNOMINMAX -DWIN32_LEAN_AND_MEAN -D_WIN32_WINNT=0x0601 -I. -I..\installer -o ..\build\artpicst_updater.exe artpicst_updater.cpp %UPDATER_RES_OBJ% -lwinhttp -lgdiplus -lshell32 -lshlwapi -luser32 -ladvapi32 -lgdi32 -lole32 -luuid -ldwmapi -mwindows
 if %ERRORLEVEL% NEQ 0 (
     echo Error building updater
     popd
@@ -81,6 +81,40 @@ if %ERRORLEVEL% NEQ 0 (
     exit /b 1
 )
 echo Updater selftest OK
+
+:: [3b/5] Tests and fuzzing (image core + releases JSON parser)
+echo [3b/5] Building and running tests and fuzzing...
+g++ -std=c++20 -O2 -Wall -Wextra -I. -Iinclude -o build\image_core_test.exe tests\image_core_test.cpp
+if %ERRORLEVEL% NEQ 0 (
+    echo Error compiling tests\image_core_test.cpp
+    exit /b 1
+)
+build\image_core_test.exe
+if %ERRORLEVEL% NEQ 0 (
+    echo Image core tests failed
+    exit /b 1
+)
+g++ -std=c++20 -O2 -Wall -Wextra -I. -o build\release_json_fuzzer.exe tests\release_json_fuzzer.cpp
+if %ERRORLEVEL% NEQ 0 (
+    echo Error compiling tests\release_json_fuzzer.cpp
+    exit /b 1
+)
+build\release_json_fuzzer.exe
+if %ERRORLEVEL% NEQ 0 (
+    echo Release JSON fuzzer failed
+    exit /b 1
+)
+g++ -std=c++20 -O2 -Wall -Wextra -I. -o build\jpeg_exif_test.exe tests\jpeg_exif_test.cpp
+if %ERRORLEVEL% NEQ 0 (
+    echo Error compiling tests\jpeg_exif_test.cpp
+    exit /b 1
+)
+build\jpeg_exif_test.exe
+if %ERRORLEVEL% NEQ 0 (
+    echo JPEG EXIF tests failed
+    exit /b 1
+)
+echo Tests and fuzzing OK
 
 :: [4/5] Self-contained payload
 echo [4/5] Preparing self-contained payload (resources\app\)...
@@ -101,7 +135,7 @@ if %ERRORLEVEL% EQU 0 (
 ) else (
     echo Warning: windres failed for installer resources
 )
-g++ -std=c++23 -O2 -static -static-libgcc -static-libstdc++ -municode -DUNICODE -D_UNICODE -DNOMINMAX -DWIN32_LEAN_AND_MEAN -D_WIN32_WINNT=0x0601 -I. -I..\include -o build\artpicst_installer.exe artpicst_installer.cpp %INSTALLER_RES_OBJ% -lgdiplus -lshlwapi -lshell32 -lcomctl32 -ldwmapi -luser32 -ladvapi32 -lgdi32 -lole32 -luuid -mwindows
+g++ -std=c++23 -O2 -Wall -Wextra -static -static-libgcc -static-libstdc++ -municode -DUNICODE -D_UNICODE -DNOMINMAX -DWIN32_LEAN_AND_MEAN -D_WIN32_WINNT=0x0601 -I. -I..\include -o build\artpicst_installer.exe artpicst_installer.cpp %INSTALLER_RES_OBJ% -lgdiplus -lshlwapi -lshell32 -lcomctl32 -ldwmapi -luser32 -ladvapi32 -lgdi32 -lole32 -luuid -mwindows
 if %ERRORLEVEL% NEQ 0 (
     echo Error building installer
     popd

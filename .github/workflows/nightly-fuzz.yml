@@ -1,0 +1,68 @@
+name: Nightly Fuzz (ASan)
+
+# Campaña nocturna de fuzzing con AddressSanitizer (MSVC /fsanitize=address).
+# A diferencia del gate de cada push (build.yml: iteraciones cortas sin
+# sanitizador), aquí se estira la campaña y se compila con detección de
+# memory-safety: cualquier OOB/UAF/leak del parser JSON, del lector EXIF o del
+# allocator alineado falla el job con el stack trace del sanitizer.
+#
+# El fuzzer del parser valida TERMINACIÓN y CONSISTENCIA por diseño; ASan
+# añade la capa que el propio ejecutable no puede dar: prueba de que ninguna
+# lectura sale del buffer.
+
+on:
+  schedule:
+    - cron: '0 3 * * *'   # 03:00 UTC, todos los días
+  workflow_dispatch:      # disparo manual bajo demanda
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz-asan:
+    name: Fuzz + AddressSanitizer (MSVC x64)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Fuzz del parser JSON (ASan, 200k iteraciones)
+        shell: cmd
+        run: |
+          if not exist build mkdir build
+          cl /nologo /EHsc /std:c++20 /O1 /utf-8 /W4 /WX- /permissive- ^
+             /fsanitize=address /I. ^
+             /Fe:"build\release_json_fuzzer_asan.exe" tests\release_json_fuzzer.cpp ^
+             /link kernel32.lib || exit /b 1
+          build\release_json_fuzzer_asan.exe 200000 || exit /b 1
+
+      - name: Tests EXIF con offsets hostiles (ASan)
+        shell: cmd
+        run: |
+          cl /nologo /EHsc /std:c++20 /O1 /utf-8 /W4 /WX- /permissive- ^
+             /fsanitize=address /I. ^
+             /Fe:"build\jpeg_exif_test_asan.exe" tests\jpeg_exif_test.cpp ^
+             /link kernel32.lib shell32.lib || exit /b 1
+          build\jpeg_exif_test_asan.exe || exit /b 1
+
+      - name: Fuzz del allocator alineado (ASan)
+        shell: cmd
+        run: |
+          cl /nologo /EHsc /std:c++20 /O1 /utf-8 /W4 /WX- /permissive- ^
+             /fsanitize=address /I. ^
+             /Fe:"build\image_core_test_asan.exe" tests\image_core_test.cpp ^
+             /link kernel32.lib || exit /b 1
+          set ARTPICST_TEST_FUZZ_ITERS=50000
+          build\image_core_test_asan.exe || exit /b 1
+
+      - name: Resumen
+        if: success()
+        shell: powershell
+        run: |
+          Write-Host "Campaña nocturna completada: parser JSON (200k), EXIF (offsets hostiles) y allocator (50k) sin hallazgos de ASan." -ForegroundColor Green

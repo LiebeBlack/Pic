@@ -75,6 +75,7 @@
 #include <vector>
 
 #include "../installer/version.hpp"   // artpicst::kAppVersion / kRepoUrl (fuente única de verdad)
+#include "jpeg_exif.hpp"              // artpicst::exif::ReadJpegOrientation (módulo testeable)
 
 // Directivas de enlace de MSVC. Se aíslan bajo _MSC_VER porque GCC/Clang no las
 // implementan y con -Wall emiten un aviso por cada línea (build limpio).
@@ -108,7 +109,9 @@ const wchar_t APP_NAME_TEXT[] = L"ARTPICST";
 const wchar_t APP_VERSION_TEXT[] = L"1.2.1";
 static_assert(std::wstring_view(APP_VERSION_TEXT) == std::wstring_view(artpicst::kAppVersion),
               "APP_VERSION_TEXT debe coincidir con artpicst::kAppVersion (installer/version.hpp)");
-const wchar_t APP_REPO_URL[] = artpicst::kRepoUrl;
+// Puntero (NO array): un wchar_t[] no puede inicializarse desde un puntero,
+// aunque apunte a un literal constexpr. kRepoUrl vive en installer/version.hpp.
+const wchar_t* APP_REPO_URL = artpicst::kRepoUrl;
 const wchar_t APP_LICENSE_TEXT[] = L"Software libre y de código abierto (licencia MIT).";
 
 // Sistema de temas inteligente
@@ -510,15 +513,6 @@ void ApplyUISize(UISize size);
 void InitializeIntelligentUI();
 
 // Funciones de texto inteligente
-struct TextSizeInfo {
-    float optimalFontSize;
-    int optimalWidth;
-    int optimalHeight;
-    int lineCount;
-    bool needsScrolling;
-};
-
-TextSizeInfo CalculateOptimalTextSize(const wchar_t* text, int maxWidth, int maxHeight, const wchar_t* fontName = L"Segoe UI");
 void CalculateDialogSize(const wchar_t* title, const wchar_t* message, UINT buttons, int& outWidth, int& outHeight);
 float GetAdaptiveFontSize(const wchar_t* text, int availableWidth, int availableHeight, const wchar_t* fontName = L"Segoe UI");
 void ConvertRGBAtoBGRA(unsigned char* pixels, int width, int height, bool& outHasAlpha);
@@ -1339,91 +1333,10 @@ void InitializeIntelligentUI() {
     ApplyUISize(g_currentUISize);
 }
 
-// Sistema de texto inteligente
-TextSizeInfo CalculateOptimalTextSize(const wchar_t* text, int maxWidth, int maxHeight, const wchar_t* fontName) {
-    TextSizeInfo info = {};   // inicialización completa: sin -Wmissing-field-initializers
-    info.needsScrolling = false;
-    
-    if (!text || !text[0]) {
-        info.optimalFontSize = 11.0f;
-        info.optimalWidth = 400;
-        info.optimalHeight = 200;
-        info.lineCount = 0;
-        return info;
-    }
-    
-    // Crear contexto temporal para medición
-    HDC hdc = GetDC(nullptr);
-    if (!hdc) {
-        info.optimalFontSize = 11.0f;
-        info.optimalWidth = 400;
-        info.optimalHeight = 200;
-        info.lineCount = 1;
-        return info;
-    }
-    
-    Graphics graphics(hdc);
-    
-    // Calcular longitud del texto y estimar líneas
-    size_t textLength = wcslen(text);
-    int estimatedLines = 1;
-    for (size_t i = 0; i < textLength; i++) {
-        if (text[i] == L'\n') estimatedLines++;
-    }
-    
-    // Ajustar tamaño de fuente según longitud del texto
-    float fontSize = 11.0f; // Base
-    if (textLength < 50) {
-        fontSize = 14.0f; // Texto corto - fuente más grande
-    } else if (textLength < 150) {
-        fontSize = 12.0f; // Texto medio
-    } else if (textLength < 300) {
-        fontSize = 11.0f; // Texto largo
-    } else {
-        fontSize = 10.0f; // Texto muy largo - fuente más pequeña
-    }
-    
-    // Ajustar según escala UI
-    fontSize = fontSize * g_uiScale / 100.0f;
-    
-    // Medir texto con diferentes tamaños
-    FontFamily fontFamily(fontName);
-    Font font(&fontFamily, fontSize, FontStyleRegular, UnitPoint);
-    StringFormat format;
-    format.SetAlignment(StringAlignmentCenter);
-    format.SetLineAlignment(StringAlignmentCenter);
-    format.SetTrimming(StringTrimmingEllipsisCharacter);
-    
-    RectF layoutRect(0.0f, 0.0f, static_cast<float>(maxWidth), static_cast<float>(maxHeight));
-    RectF boundsRect;
-    
-    if (graphics.MeasureString(text, -1, &font, layoutRect, &format, &boundsRect) == Ok) {
-        info.optimalWidth = static_cast<int>(boundsRect.Width + 80); // Padding
-        info.optimalHeight = static_cast<int>(boundsRect.Height + 100); // Espacio para título y botones
-        info.lineCount = estimatedLines;
-        
-        // Verificar si necesita scrolling
-        if (boundsRect.Height > maxHeight - 100) {
-            info.needsScrolling = true;
-            info.optimalHeight = maxHeight;
-        }
-        
-        // Ajustar ancho mínimo y máximo
-        info.optimalWidth = std::max(400, std::min(info.optimalWidth, 800));
-        info.optimalHeight = std::max(250, std::min(info.optimalHeight, 600));
-    } else {
-        // Fallback si falla la medición
-        info.optimalWidth = 500;
-        info.optimalHeight = 300 + (estimatedLines * 20);
-        info.lineCount = estimatedLines;
-    }
-    
-    info.optimalFontSize = fontSize;
-    
-    ReleaseDC(nullptr, hdc);
-    return info;
-}
-
+// Sistema de texto inteligente: el tamaño del diálogo se calcula con medición
+// GDI+ real (CalculateDialogSize) y el cuerpo se autoajusta al pintar; la
+// heurística CalculateOptimalTextSize (medición a tamaño fijo + truncated) se
+// eliminó porque su resultado ya no se usaba (código muerto, ~90 líneas).
 void CalculateDialogSize(const wchar_t* title, const wchar_t* message, UINT buttons, int& outWidth, int& outHeight) {
     // Presupuesto de pantalla: el diálogo NUNCA excede el área de trabajo
     // (antes un texto largo generaba ventanas de 700 px que se salían de
@@ -1923,63 +1836,9 @@ void EnsureFileInList(const std::wstring& path) {
 }
 
 int GetExifOrientationFromJpeg(const std::wstring& filepath) {
-    FILE* f = nullptr;
-    if (_wfopen_s(&f, filepath.c_str(), L"rb") != 0 || !f) return 1;
-
-    unsigned char header[2];
-    if (fread(header, 1, 2, f) != 2 || header[0] != 0xFF || header[1] != 0xD8) {
-        fclose(f);
-        return 1;
-    }
-
-    int orientation = 1;
-    while (true) {
-        unsigned char marker[2];
-        if (fread(marker, 1, 2, f) != 2 || marker[0] != 0xFF) break;
-        if (marker[1] == 0xDA || marker[1] == 0xD9) break;
-
-        unsigned char lenBytes[2];
-        if (fread(lenBytes, 1, 2, f) != 2) break;
-        int len = (lenBytes[0] << 8) | lenBytes[1];
-        if (len < 2) break;
-
-        if (marker[1] == 0xE1 && len >= 14) {
-            std::vector<unsigned char> data(len - 2);
-            if (fread(data.data(), 1, len - 2, f) == static_cast<size_t>(len - 2)) {
-                if (memcmp(data.data(), "Exif\0\0", 6) == 0) {
-                    const unsigned char* tiff = data.data() + 6;
-                    const size_t tiffLen = data.size() - 6;
-                    if (tiffLen >= 8) {
-                        bool littleEndian = (tiff[0] == 'I' && tiff[1] == 'I');
-                        auto read16 = [littleEndian](const unsigned char* p) -> uint16_t {
-                            return littleEndian ? (p[0] | (p[1] << 8)) : ((p[0] << 8) | p[1]);
-                        };
-                        auto read32 = [littleEndian](const unsigned char* p) -> uint32_t {
-                            return littleEndian ? (p[0] | (p[1] << 8) | (p[2] << 16) | (p[3] << 24))
-                                                : ((p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3]);
-                        };
-                        uint32_t ifdOffset = read32(tiff + 4);
-                        if (ifdOffset + 2 <= tiffLen) {
-                            uint16_t tagCount = read16(tiff + ifdOffset);
-                            const unsigned char* tagPtr = tiff + ifdOffset + 2;
-                            for (uint16_t i = 0; i < tagCount && (tagPtr + 12 <= tiff + tiffLen); ++i, tagPtr += 12) {
-                                uint16_t tag = read16(tagPtr);
-                                if (tag == 0x0112) {
-                                    orientation = read16(tagPtr + 8);
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            break;
-        } else {
-            fseek(f, len - 2, SEEK_CUR);
-        }
-    }
-    fclose(f);
-    return orientation;
+    // Módulo testeable (src/jpeg_exif.hpp): los tests de regresión ejecutan
+    // EXACTAMENTE este código (incluye el fix de límites del IFD).
+    return artpicst::exif::ReadJpegOrientation(filepath.c_str());
 }
 
 // Intercambio R<->B y detección de transparencia en UNA sola pasada SIMD
@@ -2174,7 +2033,7 @@ unsigned char* DecodeWithWic(const std::wstring& filepath, int& width, int& heig
     const UINT stride = w * 4;
     hr = converter->CopyPixels(nullptr, stride, static_cast<UINT>(bytes), pixels);
     if (FAILED(hr)) {
-        free(pixels);
+        artpicst::AlignedPixelFree(pixels);   // FIX: se liberaba con free() pero se asignó con AlignedPixelAlloc (corrupción de heap)
         return nullptr;
     }
     width = static_cast<int>(w);
@@ -3874,67 +3733,91 @@ bool SaveImageDialog(HWND hwnd) {
     std::wstring outPath = savePath;
     CoTaskMemFree(savePath);
 
-    int boxW = 0, boxH = 0;
-    DisplaySize(boxW, boxH);
-    Bitmap source(g_state.imageWidth, g_state.imageHeight,
-                  g_state.imageWidth * 4, PixelFormat32bppARGB, g_state.imageData);
-    Bitmap output(boxW, boxH, PixelFormat32bppARGB);
+    // FIX CRÍTICO: la exportación se hacía al TAMAÑO DE PANTALLA (DisplaySize),
+    // destruyendo la resolución original: una foto de 6000x4000 se guardaba
+    // como 1920x1080. Ahora el lienzo de salida tiene las dimensiones de la
+    // imagen ya transformada (una rotación de 90/270 intercambia ancho y alto).
+    const int srcW = g_state.imageWidth;
+    const int srcH = g_state.imageHeight;
+    const bool swapSides = (g_state.currentRotation == 90 || g_state.currentRotation == 270);
+    const int outW = swapSides ? srcH : srcW;
+    const int outH = swapSides ? srcW : srcH;
+    Bitmap source(srcW, srcH, srcW * 4, PixelFormat32bppARGB, g_state.imageData);
+    if (source.GetLastStatus() != Ok) {
+        ShowOSD(L"Error al preparar la exportación");
+        return false;
+    }
+    Bitmap output(outW, outH, PixelFormat32bppARGB);
     Graphics g(&output);
-    
+
     // Configuración de calidad MÁXIMA para exportación
-    g.SetCompositingQuality(CompositingQualityAssumeLinear);
     g.SetInterpolationMode(InterpolationModeHighQualityBicubic);
-    g.SetSmoothingMode(SmoothingModeAntiAlias);
     g.SetPixelOffsetMode(PixelOffsetModeHighQuality);
-    
-    g.TranslateTransform(static_cast<REAL>(boxW) * 0.5f, static_cast<REAL>(boxH) * 0.5f);
+
+    g.TranslateTransform(static_cast<REAL>(outW) * 0.5f, static_cast<REAL>(outH) * 0.5f);
     g.RotateTransform(static_cast<REAL>(g_state.currentRotation));
     if (g_state.currentFlipH || g_state.currentFlipV) {
         g.ScaleTransform(g_state.currentFlipH ? -1.0f : 1.0f,
                          g_state.currentFlipV ? -1.0f : 1.0f);
     }
-    g.TranslateTransform(-static_cast<REAL>(g_state.imageWidth) * 0.5f,
-                         -static_cast<REAL>(g_state.imageHeight) * 0.5f);
-    g.DrawImage(&source, 0, 0, g_state.imageWidth, g_state.imageHeight);
+    g.TranslateTransform(-static_cast<REAL>(srcW) * 0.5f,
+                         -static_cast<REAL>(srcH) * 0.5f);
+    g.DrawImage(&source, 0, 0, srcW, srcH);
+    if (g.GetLastStatus() != Ok) {
+        ShowOSD(L"Error al transformar la imagen");
+        return false;
+    }
 
     std::wstring ext = GetExtensionLower(outPath);
     CLSID encoderClsid{};
+    const wchar_t* mimeType =
+        (ext == L"jpg" || ext == L"jpeg") ? L"image/jpeg" :
+        (ext == L"bmp")                   ? L"image/bmp"  : L"image/png";
+    // FIX: antes, si el códec no existía se llamaba a Save con un CLSID nulo
+    // (fallo silencioso). Ahora se detecta y se informa.
+    if (GetEncoderClsid(mimeType, &encoderClsid) < 0) {
+        ShowOSD(L"Formato de exportación no disponible en el sistema");
+        return false;
+    }
+
     if (ext == L"jpg" || ext == L"jpeg") {
-        GetEncoderClsid(L"image/jpeg", &encoderClsid);
-        
-        // Configurar calidad JPEG máxima (100%)
+        // Calidad JPEG máxima (100%)
         EncoderParameters encoderParams;
         encoderParams.Count = 1;
         encoderParams.Parameter[0].Guid = EncoderQuality;
         encoderParams.Parameter[0].Type = EncoderParameterValueTypeLong;
         encoderParams.Parameter[0].NumberOfValues = 1;
-        ULONG quality = 100; // Calidad máxima
+        ULONG quality = 100;
         encoderParams.Parameter[0].Value = &quality;
-        
+
         if (output.Save(outPath.c_str(), &encoderClsid, &encoderParams) == Ok) {
             ShowOSD(L"Imagen guardada con éxito (Calidad 100%)");
             return true;
-        } else {
-            ShowOSD(L"Error al guardar la imagen");
-            return false;
         }
-    } else if (ext == L"bmp") {
-        GetEncoderClsid(L"image/bmp", &encoderClsid);
-    } else {
-        GetEncoderClsid(L"image/png", &encoderClsid);
-    }
-
-    if (output.Save(outPath.c_str(), &encoderClsid, nullptr) == Ok) {
+    } else if (output.Save(outPath.c_str(), &encoderClsid, nullptr) == Ok) {
         ShowOSD(L"Imagen guardada con éxito");
         return true;
-    } else {
-        ShowOSD(L"Error al guardar la imagen");
-        return false;
     }
+    ShowOSD(L"Error al guardar la imagen");
+    return false;
 }
 
 void SetAsWallpaper() {
     if (g_state.currentFilePath.empty()) return;
+    // FIX: SPI_SETDESKWALLPAPER solo acepta JPG/PNG/BMP (PNG solo en Win10+).
+    // Con WebP/HEIC/RAW/TIFF Windows fallaba en silencio: ahora se avisa.
+    static const wchar_t* const kWallpaperExts[] = {
+        L"jpg", L"jpeg", L"jpe", L"png", L"bmp", L"dib"
+    };
+    const std::wstring ext = GetExtensionLower(g_state.currentFilePath);
+    bool supported = false;
+    for (const wchar_t* candidate : kWallpaperExts) {
+        if (ext == candidate) { supported = true; break; }
+    }
+    if (!supported) {
+        ShowOSD(L"Este formato no sirve como fondo (usa JPG, PNG o BMP)");
+        return;
+    }
     BOOL res = SystemParametersInfoW(SPI_SETDESKWALLPAPER, 0, const_cast<wchar_t*>(g_state.currentFilePath.c_str()),
                                      SPIF_UPDATEINIFILE | SPIF_SENDCHANGE);
     if (res) {

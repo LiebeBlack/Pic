@@ -37,14 +37,20 @@ cd ..
 ```
 
 #### 2. Programa Principal (visor)
+
+> **Warnings estrictos**: los tres objetivos se compilan con `/W4 /permissive-`
+> (MSVC) o `-Wall -Wextra` (MinGW). `/wd4324` solo silencia el aviso de
+> alineación intencionada de `PixelBlock`. No añadas supresiones nuevas sin
+> justificación en un comentario.
+
 ```cmd
-cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /GL /Gy /utf-8 /W4 /I. /Iinclude /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /DSTBI_WINDOWS_UTF8 /D_WIN32_WINNT=0x0601 /Fe:"build\artpicst.exe" src\main.cpp build\artpicst.res /link gdiplus.lib user32.lib kernel32.lib shell32.lib shlwapi.lib gdi32.lib msimg32.lib ole32.lib oleaut32.lib uuid.lib dwmapi.lib windowscodecs.lib comdlg32.lib d2d1.lib dwrite.lib /MANIFESTINPUT:artpicst.manifest /SUBSYSTEM:WINDOWS /LTCG /OPT:REF /OPT:ICF
+cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /GL /Gy /utf-8 /W4 /permissive- /wd4324 /I. /Iinclude /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /DSTBI_WINDOWS_UTF8 /D_WIN32_WINNT=0x0601 /D_CRT_SECURE_NO_WARNINGS /Fe:"build\artpicst.exe" src\main.cpp build\artpicst.res /link gdiplus.lib user32.lib kernel32.lib shell32.lib shlwapi.lib gdi32.lib msimg32.lib ole32.lib oleaut32.lib uuid.lib dwmapi.lib windowscodecs.lib comdlg32.lib d2d1.lib dwrite.lib advapi32.lib /MANIFEST:EMBED /MANIFESTINPUT:artpicst.manifest /SUBSYSTEM:WINDOWS /LTCG /OPT:REF /OPT:ICF
 ```
 
 #### 3. Updater (auto-actualizador)
 ```cmd
 cd updater
-cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /utf-8 /W4 /I. /I..\installer /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0601 /Fe:"..\build\artpicst_updater.exe" artpicst_updater.cpp ..\build\artpicst_updater.res /link winhttp.lib gdiplus.lib shell32.lib shlwapi.lib user32.lib advapi32.lib gdi32.lib ole32.lib uuid.lib dwmapi.lib /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF
+cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /utf-8 /W4 /permissive- /wd4324 /I. /I..\installer /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0601 /D_CRT_SECURE_NO_WARNINGS /Fe:"..\build\artpicst_updater.exe" artpicst_updater.cpp ..\build\artpicst_updater.res /link winhttp.lib gdiplus.lib shell32.lib shlwapi.lib user32.lib advapi32.lib gdi32.lib ole32.lib uuid.lib dwmapi.lib /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF
 cd ..
 ```
 
@@ -55,6 +61,73 @@ ejecuta el selftest como control de calidad:
 ```cmd
 build\artpicst_updater.exe --selftest
 ```
+
+El selftest incluye, además del comparador de versiones y el parser JSON, una
+**matriz de regresión de seguridad** (JSON truncado, escapes `\u` al final de
+cadena, cadenas sin cierre, assets corruptos) y una campaña de **fuzzing
+determinista** (4.000 mutaciones por defecto, ampliable con la variable de
+entorno `ARTPICST_FUZZ_ITERS=N`).
+
+## Tests y fuzzing (tests\)
+
+Dos ejecutables de consola independientes, sin dependencias de Windows-UI:
+
+### 1. Núcleo de imagen (`tests\image_core_test.cpp`)
+
+Valida `src\image_core.hpp` tal cual lo usa el visor: LUT constexpr contra la
+fórmula original en coma flotante, allocator alineado a 64 B (alineación,
+realloc, rutas degeneradas), premultiplicado alfa (ruta SIMD contra referencia
+por bytes), detección de transparencia, horneado de efectos (gris BT.601,
+negativo), transformaciones geométricas (90/180/flip/combinados contra
+referencia directa), baldosa de ajedrez y fuzzing del allocator.
+
+```cmd
+cl /nologo /EHsc /std:c++20 /O2 /utf-8 /W4 /permissive- /I. /Fe:"build\image_core_test.exe" tests\image_core_test.cpp /link kernel32.lib
+build\image_core_test.exe
+:: Fuzzing del allocator ampliado:
+set ARTPICST_TEST_FUZZ_ITERS=100000 && build\image_core_test.exe
+```
+
+### 2. Fuzzer del parser JSON (`tests\release_json_fuzzer.cpp`)
+
+Martillea `installer\release_json.hpp` con tres familias de entradas
+adversariales: mutaciones del documento válido, **todos** los truncamientos
+posibles (exhaustivo) y basura binaria pseudoaleatoria. Verifica terminación
+(sin cuelgues), consistencia (`valid` implica tag no vacío) y límites de
+`size`. 100 % determinista (semilla fija): cualquier fallo es reproducible.
+
+```cmd
+cl /nologo /EHsc /std:c++20 /O2 /utf-8 /W4 /permissive- /I. /Fe:"build\release_json_fuzzer.exe" tests\release_json_fuzzer.cpp /link kernel32.lib
+build\release_json_fuzzer.exe            :: 50.000 iteraciones/familia
+build\release_json_fuzzer.exe 200000     :: campaña ampliada
+```
+
+Los tres scripts de build (`build.ps1`, `build.bat`, `build_mingw.bat`) y el
+gate de CI compilan y ejecutan ambos como paso `[3b/5]`, tras el selftest del
+updater y antes de empaquetar el instalador.
+
+### 3. Orientación EXIF (`tests\jpeg_exif_test.cpp`)
+
+Ejecuta EXACTAMENTE el mismo código que el visor (`src\jpeg_exif.hpp`, extraído
+de `main.cpp`) contra JPEGs sintéticos construidos en memoria: orientaciones
+1-8 válidas (little y big endian), offsets del IFD con desbordamiento `uint32_t`
+(los casos de la auditoría: `0xFFFFFFFE`, `0xFFFFFFFF`), `tagCount` gigante,
+EXIF truncado, TIFF corto, firma ausente y no-JPEG. Contrato fijado: cualquier
+fallo devuelve **1** ("normal"), nunca un valor fuera de 1..8.
+
+```cmd
+cl /nologo /EHsc /std:c++20 /O2 /utf-8 /W4 /permissive- /I. /Fe:"build\jpeg_exif_test.exe" tests\jpeg_exif_test.cpp /link kernel32.lib shell32.lib
+build\jpeg_exif_test.exe
+```
+
+### Fuzzing nocturno con AddressSanitizer (CI)
+
+`.github/workflows/nightly-fuzz.yml` se ejecuta a diario (03:00 UTC) o bajo
+demanda (`workflow_dispatch`) y compila los tres ejecutables con
+`/fsanitize=address` (MSVC), estirando las campañas: parser JSON con 200.000
+iteraciones, EXIF con offsets hostiles y allocator con 50.000 allocs. Cualquier
+lectura fuera de límites, use-after-free o leak falla el job con el stack
+del sanitizer — la capa de proof-of-memory-safety que los tests solos no dan.
 
 #### 4. Payload autocontenido
 ```cmd

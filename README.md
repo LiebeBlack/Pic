@@ -76,6 +76,12 @@ build.bat
 build_mingw.bat
 ```
 
+Los tres scripts compilan y ejecutan además la suite de **tests y fuzzing**
+(`tests\image_core_test.cpp` para el núcleo SIMD/LUT y
+`tests\release_json_fuzzer.cpp` para el parser JSON del actualizador) como
+paso `[3b/5]`, junto con el selftest del updater — cualquier fallo aborta el
+build antes de empaquetar. Ver `BUILD.md` para ejecutarlos por separado.
+
 ## 📦 Archivos Generados
 
 Después de la compilación exitosa en `dist\`:

@@ -75,7 +75,7 @@ if ($updaterResExit -ne 0) { Fail "Error compilando los recursos del updater (ar
 # ---------------------------------------------------------------------------
 Write-Host "[2/5] Compilando visor (artpicst.exe)..." -ForegroundColor Yellow
 
-& cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /GL /Gy /utf-8 /W4 /wd4324 /I. /Iinclude `
+& cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /GL /Gy /utf-8 /W4 /permissive- /wd4324 /I. /Iinclude `
     /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /DSTBI_WINDOWS_UTF8 /D_WIN32_WINNT=0x0601 /D_CRT_SECURE_NO_WARNINGS `
     /Fe:"build\artpicst.exe" src\main.cpp build\artpicst.res `
     /link gdiplus.lib user32.lib kernel32.lib shell32.lib shlwapi.lib gdi32.lib msimg32.lib `
@@ -90,7 +90,7 @@ if ($LASTEXITCODE -ne 0) { Fail "Error compilando el visor (artpicst.exe)" }
 Write-Host "[3/5] Compilando updater (artpicst_updater.exe)..." -ForegroundColor Yellow
 
 Push-Location updater
-& cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /utf-8 /W4 /wd4324 /I. /I..\installer `
+& cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /utf-8 /W4 /permissive- /wd4324 /I. /I..\installer `
     /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0601 /D_CRT_SECURE_NO_WARNINGS `
     /Fe:"..\build\artpicst_updater.exe" artpicst_updater.cpp ..\build\artpicst_updater.res `
     /link winhttp.lib gdiplus.lib shell32.lib shlwapi.lib user32.lib advapi32.lib `
@@ -105,6 +105,30 @@ Write-Host "Ejecutando selftest del updater..." -ForegroundColor Gray
 & build\artpicst_updater.exe --selftest
 if ($LASTEXITCODE -ne 0) { Fail "El selftest del updater ha fallado" }
 Write-Host "Selftest del updater OK" -ForegroundColor Green
+
+# ---------------------------------------------------------------------------
+# [3b/5] Tests y fuzzing (núcleo de imagen + parser JSON de releases)
+# ---------------------------------------------------------------------------
+Write-Host "[3b/5] Compilando y ejecutando tests y fuzzing..." -ForegroundColor Yellow
+
+& cl /nologo /EHsc /std:c++20 /O2 /utf-8 /W4 /permissive- /I. /Iinclude `
+    /Fe:"build\image_core_test.exe" tests\image_core_test.cpp /link kernel32.lib
+if ($LASTEXITCODE -ne 0) { Fail "Error compilando tests\image_core_test.cpp" }
+& build\image_core_test.exe
+if ($LASTEXITCODE -ne 0) { Fail "Los tests del núcleo de imagen han fallado" }
+
+& cl /nologo /EHsc /std:c++20 /O2 /utf-8 /W4 /permissive- /I. `
+    /Fe:"build\release_json_fuzzer.exe" tests\release_json_fuzzer.cpp /link kernel32.lib
+if ($LASTEXITCODE -ne 0) { Fail "Error compilando tests\release_json_fuzzer.cpp" }
+& build\release_json_fuzzer.exe
+if ($LASTEXITCODE -ne 0) { Fail "El fuzzer del parser JSON ha fallado" }
+
+& cl /nologo /EHsc /std:c++20 /O2 /utf-8 /W4 /permissive- /I. `
+    /Fe:"build\jpeg_exif_test.exe" tests\jpeg_exif_test.cpp /link kernel32.lib shell32.lib
+if ($LASTEXITCODE -ne 0) { Fail "Error compilando tests\jpeg_exif_test.cpp" }
+& build\jpeg_exif_test.exe
+if ($LASTEXITCODE -ne 0) { Fail "Los tests EXIF han fallado" }
+Write-Host "Tests y fuzzing OK" -ForegroundColor Green
 
 # ---------------------------------------------------------------------------
 # [4/5] Payload autocontenido (resources/app/ para el instalador)
@@ -123,7 +147,7 @@ Push-Location installer
 # Recursos DESPUÉS del payload: el .rc incrusta resources/app/ (payload)
 & rc /nologo /fo ..\build\artpicst_installer.res artpicst_installer.rc
 if ($LASTEXITCODE -ne 0) { Fail "Error compilando los recursos del instalador (artpicst_installer.rc)" }
-& cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /utf-8 /W4 /wd4324 /I. /I..\include `
+& cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /utf-8 /W4 /permissive- /wd4324 /I. /I..\include `
     /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0601 /D_CRT_SECURE_NO_WARNINGS `
     /Fe:"build\artpicst_installer.exe" artpicst_installer.cpp ..\build\artpicst_installer.res `
     /link gdiplus.lib shlwapi.lib shell32.lib comctl32.lib dwmapi.lib user32.lib advapi32.lib `

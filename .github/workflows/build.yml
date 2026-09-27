@@ -85,6 +85,28 @@ jobs:
           /OPT:REF /OPT:ICF || exit /b 1
         cd ..
 
+    - name: Compilar y ejecutar tests del núcleo de imagen
+      shell: cmd
+      run: |
+        if not exist build mkdir build
+        cl /nologo /EHsc /std:c++20 /O2 /utf-8 /W4 /WX- /permissive- /I. ^
+          /Fe:"build\image_core_test.exe" tests\image_core_test.cpp /link kernel32.lib || exit /b 1
+        build\image_core_test.exe || exit /b 1
+
+    - name: Compilar y ejecutar fuzzer del parser JSON
+      shell: cmd
+      run: |
+        cl /nologo /EHsc /std:c++20 /O2 /utf-8 /W4 /WX- /permissive- /I. ^
+          /Fe:"build\release_json_fuzzer.exe" tests\release_json_fuzzer.cpp /link kernel32.lib || exit /b 1
+        build\release_json_fuzzer.exe 20000 || exit /b 1
+
+    - name: Compilar y ejecutar tests EXIF
+      shell: cmd
+      run: |
+        cl /nologo /EHsc /std:c++20 /O2 /utf-8 /W4 /WX- /permissive- /I. ^
+          /Fe:"build\jpeg_exif_test.exe" tests\jpeg_exif_test.cpp /link kernel32.lib shell32.lib || exit /b 1
+        build\jpeg_exif_test.exe || exit /b 1
+
     - name: Verificar artefactos
       shell: powershell
       run: |

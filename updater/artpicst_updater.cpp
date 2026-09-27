@@ -67,6 +67,25 @@
 
 #include "../installer/version.hpp"
 
+// ----------------------------------------------------------------------------
+// Parser JSON de releases: FUENTE COMPARTIDA con el selftest y el fuzzer.
+// (installer/release_json.hpp — incluye los fixes de seguridad: \u acotado,
+// progreso garantizado con cadenas sin cierre y búsqueda acotada al bloque
+// "assets"). Se reexportan los símbolos para no tocar los puntos de llamada.
+// ----------------------------------------------------------------------------
+#include "../installer/release_json.hpp"
+
+using artpicst::releasejson::GithubAsset;
+using artpicst::releasejson::GithubRelease;
+using artpicst::releasejson::SkipJsonSpaces;
+using artpicst::releasejson::ParseJsonString;
+using artpicst::releasejson::MatchKey;
+using artpicst::releasejson::SkipJsonValue;
+using artpicst::releasejson::SkipJsonContainer;
+using artpicst::releasejson::CleanReleaseNotes;
+using artpicst::releasejson::ParseAssetBlock;
+using artpicst::releasejson::ParseReleaseJson;
+
 #ifdef _MSC_VER
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "gdiplus.lib")
@@ -100,19 +119,8 @@ struct UpdateConfig {
     std::wstring installDir;
 };
 
-struct GithubAsset {
-    std::wstring name;
-    std::wstring url;      // browser_download_url
-    std::wstring digest;   // "sha256:..." si el release lo publica
-    unsigned long long size = 0;
-};
-
-struct GithubRelease {
-    std::wstring tag;      // tag_name (p. ej. auto-59)
-    std::wstring body;     // notas de la versión
-    std::vector<GithubAsset> assets;
-    bool valid = false;
-};
+// GithubAsset / GithubRelease / parser JSON: ahora viven en
+// installer/release_json.hpp (fuente compartida con el selftest y el fuzzer).
 
 enum class UpdatePhase { Idle, Checking, Available, Downloading, Ready, Installing, Done, Failed };
 
@@ -404,244 +412,8 @@ bool HttpDownloadOpen(const std::wstring& url, HINTERNET& outSession,
     return true;
 }
 
-// ----------------------------------------------------------------------------
-// Parser JSON ligero (solo lo que la API de releases necesita)
-// ----------------------------------------------------------------------------
-
-void SkipJsonSpaces(const wchar_t*& p) {
-    while (*p == L' ' || *p == L'\t' || *p == L'\r' || *p == L'\n') ++p;
-}
-
-bool ParseJsonString(const wchar_t*& p, std::wstring& out) {
-    SkipJsonSpaces(p);
-    if (*p != L'"') return false;
-    ++p;
-    out.clear();
-    while (*p && *p != L'"') {
-        if (*p == L'\\' && p[1]) {
-            ++p;
-            switch (*p) {
-                case L'n': out += L'\n'; break;
-                case L't': out += L'\t'; break;
-                case L'r': break;
-                case L'"': out += L'"'; break;
-                case L'\\': out += L'\\'; break;
-                case L'/': out += L'/'; break;
-                case L'b': case L'f': break;
-                case L'u': {
-                    if (iswxdigit(static_cast<wint_t>(p[1])) && iswxdigit(static_cast<wint_t>(p[2])) &&
-                        iswxdigit(static_cast<wint_t>(p[3])) && iswxdigit(static_cast<wint_t>(p[4]))) {
-                        wchar_t hex[5] = { p[1], p[2], p[3], p[4], 0 };
-                        out += static_cast<wchar_t>(wcstoul(hex, nullptr, 16));
-                        p += 4;
-                    }
-                    break;
-                }
-                default: out += *p; break;
-            }
-            ++p;
-        } else {
-            out += *p++;
-        }
-    }
-    if (*p != L'"') return false;
-    ++p;
-    return true;
-}
-
-bool MatchKey(const wchar_t*& p, const wchar_t* key) {
-    SkipJsonSpaces(p);
-    if (*p != L'"') return false;
-    const wchar_t* save = p;
-    std::wstring parsed;
-    if (!ParseJsonString(p, parsed)) { p = save; return false; }
-    SkipJsonSpaces(p);
-    if (*p != L':') { p = save; return false; }
-    ++p;
-    if (parsed != key) { p = save; return false; }
-    return true;
-}
-
-void SkipJsonValue(const wchar_t*& p);
-
-void SkipJsonContainer(const wchar_t*& p, wchar_t open, wchar_t close) {
-    int depth = 0;
-    bool inString = false;
-    while (*p) {
-        if (inString) {
-            if (*p == L'\\') { ++p; if (!*p) return; ++p; continue; }
-            if (*p == L'"') inString = false;
-        } else {
-            if (*p == L'"') inString = true;
-            else if (*p == open) ++depth;
-            else if (*p == close) {
-                --depth;
-                if (depth == 0) { ++p; return; }
-            }
-        }
-        ++p;
-    }
-}
-
-void SkipJsonValue(const wchar_t*& p) {
-    SkipJsonSpaces(p);
-    if (*p == L'"') {
-        std::wstring tmp;
-        ParseJsonString(p, tmp);
-    } else if (*p == L'{' || *p == L'[') {
-        SkipJsonContainer(p, *p, *p == L'{' ? L'}' : L']');
-    } else {
-        while (*p && *p != L',' && *p != L'}' && *p != L']') ++p;
-    }
-}
-
-// Quita markdown simple de las notas para la notificación minimalista.
-std::wstring CleanReleaseNotes(const std::wstring& body, int maxChars) {
-    std::wstring out;
-    out.reserve(body.size());
-    bool lineStart = true;
-    for (const wchar_t c : body) {
-        if (c == L'`' || c == L'*' || c == L'#') continue;
-        if (c == L'\r') continue;
-        if (c == L'\n') {
-            if (lineStart) continue;   // colapsa líneas vacías
-            lineStart = true;
-            out += L' ';
-            continue;
-        }
-        lineStart = false;
-        out += c;
-    }
-    while (!out.empty() && (out.back() == L' ' || out.back() == L'\t')) out.pop_back();
-    if (static_cast<int>(out.size()) > maxChars) {
-        out = out.substr(0, maxChars - 1) + L"…";
-    }
-    return out;
-}
-
-// Localiza el bloque del asset con nombre exacto (case-insensitive).
-bool ParseAssetBlock(const wchar_t* begin, const wchar_t* end, GithubAsset& asset) {
-    const wchar_t* p = begin;
-    while (p < end) {
-        if (MatchKey(p, L"name")) {
-            std::wstring name;
-            if (!ParseJsonString(p, name)) return false;
-            SkipJsonSpaces(p);
-            const wchar_t* q = p;
-            bool expectingValue = (*q == L',');
-            (void)expectingValue;
-            while (q < end) {
-                if (MatchKey(q, L"browser_download_url")) {
-                    std::wstring url;
-                    if (ParseJsonString(q, url)) asset.url = url;
-                } else if (MatchKey(q, L"size")) {
-                    SkipJsonSpaces(q);
-                    if (*q >= L'0' && *q <= L'9') {
-                        asset.size = _wcstoui64(q, nullptr, 10);
-                    }
-                    SkipJsonValue(q);
-                } else if (MatchKey(q, L"digest")) {
-                    std::wstring digest;
-                    if (ParseJsonString(q, digest)) asset.digest = digest;
-                } else {
-                    SkipJsonSpaces(q);
-                    if (*q == L',' || *q == L'}' || *q == L']') { ++q; if (*q == L',' || *q == L'}' || *q == L']') break; continue; }
-                    if (*q == L'"') { std::wstring v; ParseJsonString(q, v); continue; }
-                    if (*q == L'{') { SkipJsonContainer(q, L'{', L'}'); continue; }
-                    if (*q == L'[') { SkipJsonContainer(q, L'[', L']'); continue; }
-                    SkipJsonValue(q);
-                }
-                SkipJsonSpaces(q);
-                if (*q == L'}') break;
-            }
-            asset.name = name;
-            return true;
-        }
-        ++p;
-    }
-    return false;
-}
-
-GithubRelease ParseReleaseJson(const std::wstring& json) {
-    GithubRelease release;
-    const wchar_t* p = json.c_str();
-    SkipJsonSpaces(p);
-    if (*p != L'{') return release;
-
-    // 1) tag_name y body en el objeto raíz.
-    const wchar_t* q = p + 1;
-    while (*q) {
-        if (MatchKey(q, L"tag_name")) {
-            if (!ParseJsonString(q, release.tag)) return release;
-            continue;
-        }
-        if (MatchKey(q, L"body")) {
-            std::wstring body;
-            if (ParseJsonString(q, body)) release.body = body;
-            continue;
-        }
-        if (*q == L'"') {
-            std::wstring key;
-            const wchar_t* save = q;
-            if (ParseJsonString(q, key) && key == L"assets") {
-                SkipJsonSpaces(q);
-                if (*q == L':') { ++q; SkipJsonSpaces(q); }   // salta los ':' de "assets"
-                if (*q == L'[') {
-                    const wchar_t* assetsBegin = q + 1;
-                    const wchar_t* scan = assetsBegin;
-                    int depth = 0; bool inString = false;
-                    while (*scan) {
-                        if (inString) {
-                            if (*scan == L'\\') { ++scan; if (!*scan) break; ++scan; continue; }
-                            if (*scan == L'"') inString = false;
-                        } else {
-                            if (*scan == L'"') inString = true;
-                            else if (*scan == L'{') ++depth;
-                            else if (*scan == L'}') { --depth; if (depth == 0) { ++scan; break; } }
-                        }
-                        ++scan;
-                    }
-                    const wchar_t* assetsEnd = scan;
-                    const wchar_t* it = assetsBegin;
-                    while (it < assetsEnd) {
-                        SkipJsonSpaces(it);
-                        if (*it == L'{') {
-                            const wchar_t* objBegin = it;
-                            const wchar_t* probe = it + 1;
-                            SkipJsonContainer(probe, L'{', L'}');
-                            GithubAsset asset;
-                            if (ParseAssetBlock(objBegin, probe, asset)) {
-                                release.assets.push_back(asset);
-                            }
-                            it = probe;
-                        } else {
-                            ++it;
-                        }
-                    }
-                }
-                continue;
-            }
-            q = save;
-        }
-        // Valor no buscado: saltarlo con seguridad.
-        SkipJsonSpaces(q);
-        if (*q == L'"') { std::wstring v; ParseJsonString(q, v); continue; }
-        if (*q == L'{') { SkipJsonContainer(q, L'{', L'}'); continue; }
-        if (*q == L'[') { SkipJsonContainer(q, L'[', L']'); continue; }
-        if (*q == L',' || *q == L'}') { ++q; continue; }
-        if (*q == 0) break;
-        ++q;
-    }
-
-    release.valid = !release.tag.empty();
-    return release;
-}
-
 const GithubAsset* FindInstallerAsset(const GithubRelease& release) {
-    for (const auto& a : release.assets) {
-        if (_wcsicmp(a.name.c_str(), artpicst::kInstallerAsset) == 0) return &a;
-    }
-    return nullptr;
+    return artpicst::releasejson::FindInstallerAsset(release, artpicst::kInstallerAsset);
 }
 
 // ----------------------------------------------------------------------------
@@ -851,13 +623,17 @@ static bool DownloadInstallerOnce(const GithubAsset& asset, std::wstring& outFil
     }
 
     // Verificación SHA-256 si el release publica digest para este asset.
+    // FIX (fail-closed): antes, si el archivo no podía abrirse para hashear,
+    // el hash salía vacío y la verificación SE CONSIDERABA SUPERADA — se
+    // ejecutaba un instalador sin verificar. Ahora un hash no calculable es
+    // un fallo y se descarta la descarga.
     if (!asset.digest.empty()) {
         std::wstring expected = asset.digest;
         std::transform(expected.begin(), expected.end(), expected.begin(), ::towlower);
         const size_t colon = expected.find(L':');
         if (colon != std::wstring::npos) expected = expected.substr(colon + 1);
         const std::wstring actual = Sha256OfFile(partPath);
-        if (!actual.empty() && _wcsicmp(actual.c_str(), expected.c_str()) != 0) {
+        if (actual.empty() || _wcsicmp(actual.c_str(), expected.c_str()) != 0) {
             DeleteFileW(partPath.c_str());
             return false;
         }
@@ -1461,6 +1237,12 @@ static int RunSelfTest() {
         { L"auto-100", L"auto-99", 1 },
         { L"1.0.0-rc1", L"1.0.0-rc2", -1 },
         { L"0",       L"auto-59", -1 },
+        // Casos límite añadidos por la auditoría:
+        { L"1.0.0-rc1", L"1.0.0",    -1 },   // release final > pre-release
+        { L"1.0.0",    L"1.0.0-rc1",  1 },
+        { L"auto-1",  L"auto-1-rc1",  1 },   // números iguales, solo remoto es pre-release
+        { L"v1.2.3",  L"1.2.3",       0 },   // prefijo decorativo ignorable
+        { L"auto-9",  L"auto-10",    -1 },   // comparación numérica, no lexicográfica
     };
     for (const auto& vc : versionCases) {
         const int got = artpicst::CompareVersionTags(vc.local, vc.remote);
@@ -1504,8 +1286,127 @@ static int RunSelfTest() {
         ++failures;
     }
 
+    // ------------------------------------------------------------------
+    // REGRESIÓN DE SEGURIDAD: entradas malformadas/truncadas. El parser
+    // debe TERMINAR (sin bucles infinitos) y nunca marcar release.valid
+    // con datos corruptos. Estos casos cubren los bugs de la auditoría:
+    // \u sin dígitos al final, cadenas sin cierre y documentos cortados.
+    // ------------------------------------------------------------------
+    struct MalformedCase { const wchar_t* label; const wchar_t* json; };
+    const MalformedCase malformed[] = {
+        { L"documento vacío",                L"" },
+        { L"no-objeto",                      L"[1,2,3]" },
+        { L"solo apertura",                  L"{" },
+        { L"corte tras clave",               L"{\"tag_name\":" },
+        { L"corte a mitad de cadena",        L"{\"tag_name\":\"auto-5" },
+        { L"cadena sin cierre",              L"{\"tag_name\":\"auto-59\"\"body\":\"sin fin" },
+        { L"\\u al final del buffer",        L"{\"tag_name\":\"auto\\u" },
+        { L"\\u incompleto",                 L"{\"tag_name\":\"auto\\u00" },
+        { L"\\u con dígitos cortados",       L"{\"body\":\"x\\uZZZZ\"}" },
+        { L"escape solitario",               L"{\"tag_name\":\"auto-59\\\" },
+        { L"objeto sin cerrar",              L"{\"tag_name\":\"auto-59\",\"assets\":[{" },
+        { L"array de assets sin cerrar",     L"{\"tag_name\":\"auto-59\",\"assets\":[{\"name\":\"x.exe\"" },
+        { L"assets anidados corruptos",      L"{\"assets\":[{\"name\":{\"name\":{\"a\":\"b" },
+        { L"claves duplicadas",              L"{\"tag_name\":\"a\",\"tag_name\":\"auto-59\"}" },
+        { L"JSON anidado profundo",          L"{\"a\":{\"b\":{\"c\":{\"d\":{\"e\":1}}}}},\"tag_name\":\"auto-59\"}" },
+        { L"tag con escape unicode válido",  L"{\"tag_name\":\"auto-\\u0035\\u0039\"}" },   // auto-59
+        { L"valores sin comillas",           L"{\"tag_name\":auto-59}" },
+        { L"solo comillas dobles",           L"\"\"\"\"" },
+        { L"número gigante en size",         L"{\"assets\":[{\"name\":\"artpicst-installer.exe\",\"size\":99999999999999999999}]}" },
+    };
+    for (const auto& mc : malformed) {
+        const GithubRelease r = ParseReleaseJson(mc.json);
+        // Un documento corrupto solo puede ser "válido" si el tag quedó
+        // íntegro (p. ej. claves duplicadas o escapes legítimos).
+        if (r.valid && r.tag.empty()) {
+            wprintf(L"[FAIL] Malformed(%ls): valid=true con tag vacío\n", mc.label);
+            ++failures;
+        }
+    }
+    // Caso concreto del fix \u: el tag NO debe recoger basura más allá del buffer.
+    {
+        const GithubRelease r = ParseReleaseJson(L"{\"tag_name\":\"auto\\u");
+        if (r.tag != L"auto") {
+            wprintf(L"[FAIL] Malformed(\\u truncado): tag=\"%ls\" (esperado \"auto\")\n", r.tag.c_str());
+            ++failures;
+        }
+    }
+    // Caso concreto del fix de escapes legítimos: \u0035\u0039 == "59".
+    {
+        const GithubRelease r = ParseReleaseJson(L"{\"tag_name\":\"auto-\\u0035\\u0039\"}");
+        if (!r.valid || r.tag != L"auto-59") {
+            wprintf(L"[FAIL] Malformed(\\u válido): tag=\"%ls\" (esperado \"auto-59\")\n", r.tag.c_str());
+            ++failures;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // FUZZING DETERMINISTA (offline, sin dependencias): mutaciones del
+    // documento válido con PRNG xorshift32 de semilla fija. Propiedades:
+    //   1. TERMINACIÓN: cada entrada debe parsearse sin colgarse (el bucle
+    //      del fuzzer pone cota de wall-clock por entrada).
+    //   2. CONSISTENCIA: valid==true implica tag no vacío.
+    // Ejecutar con ARTPICST_FUZZ_ITERS=N para estirar la campaña local.
+    // ------------------------------------------------------------------
+    {
+        wchar_t envBuf[16] = {};
+        const DWORD envLen = GetEnvironmentVariableW(L"ARTPICST_FUZZ_ITERS", envBuf, 16);
+        unsigned long fuzzIters = (envLen > 0 && envLen < 16) ? _wtoi(envBuf) : 4000u;
+        if (fuzzIters == 0) fuzzIters = 4000u;
+
+        const std::wstring seedDoc(json);
+        const size_t seedLen = seedDoc.size();
+        unsigned int rng = 0x12345678u;   // semilla fija: fallos reproducibles
+        auto nextRand = [&rng]() {
+            rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
+            return rng;
+        };
+        const wchar_t alphabet[] = L"{}[]\":,\\untdig0123456789abcdefXYZ art";
+        unsigned long mutationChecks = 0;
+        for (unsigned long iter = 0; iter < fuzzIters; ++iter) {
+            std::wstring mutant = seedDoc;
+            const int mutations = 1 + static_cast<int>(nextRand() % 4u);
+            for (int m = 0; m < mutations; ++m) {
+                const unsigned int op = nextRand() % 3u;
+                const size_t pos = static_cast<size_t>(nextRand()) % (seedLen + 1);
+                switch (op) {
+                    case 0:   // sustitución
+                        if (pos < mutant.size()) mutant[pos] = alphabet[nextRand() % (sizeof(alphabet)/sizeof(alphabet[0]) - 1)];
+                        break;
+                    case 1:   // inserción
+                        mutant.insert(mutant.begin() + static_cast<long>(pos),
+                                      alphabet[nextRand() % (sizeof(alphabet)/sizeof(alphabet[0]) - 1)]);
+                        break;
+                    default:  // borrado
+                        if (pos < mutant.size()) mutant.erase(mutant.begin() + static_cast<long>(pos));
+                        break;
+                }
+            }
+            // Truncamientos sistemáticos adicionales (1 de cada 8 iteraciones).
+            if ((iter & 7u) == 0u && !mutant.empty()) {
+                mutant.resize(1 + nextRand() % mutant.size());
+            }
+            const unsigned long long t0 = GetTickCount64();
+            const GithubRelease fr = ParseReleaseJson(mutant);
+            const unsigned long long dt = GetTickCount64() - t0;
+            ++mutationChecks;
+            if (fr.valid && fr.tag.empty()) {
+                wprintf(L"[FAIL] Fuzz iter %lu: valid=true con tag vacío\n", iter);
+                ++failures;
+                if (failures > 5) break;   // no inundar la consola
+            }
+            if (dt > 1000) {   // un doc de ~600 chars no debe tardar 1 s
+                wprintf(L"[FAIL] Fuzz iter %lu: parse colgado (%llums)\n", iter, dt);
+                ++failures;
+                break;
+            }
+        }
+        wprintf(L"[IN] fuzz: %lu mutaciones ejecutadas sin cuelgues\n", mutationChecks);
+    }
+
     if (failures == 0) {
-        wprintf(L"[OK] selftest: comparador de versiones, parser JSON y notas correctos\n");
+        wprintf(L"[OK] selftest: comparador de versiones, parser JSON, notas y\n");
+        wprintf(L"     regresión de seguridad (malformados + fuzz) correctos\n");
         return 0;
     }
     wprintf(L"[FAIL] selftest: %d fallos\n", failures);

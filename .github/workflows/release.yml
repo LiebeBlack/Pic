@@ -31,6 +31,33 @@ jobs:
           $tag = if ($env:GITHUB_REF -like "refs/tags/*") { $env:GITHUB_REF_NAME } else { "auto-$env:GITHUB_RUN_NUMBER" }
           echo "ARTPICST_TAG=$tag" >> $env:GITHUB_ENV
 
+      # GATE DE VERSIÓN: version.json, installer/version.hpp y los recursos
+      # VERSIONINFO de los tres .rc deben declarar EXACTAMENTE la misma
+      # versión. Una discrepancia aborta el release antes de compilar.
+      - name: Verificar consistencia de versión
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $versions = @{}
+          $versions["version.json"] = (Get-Content version.json -Raw | ConvertFrom-Json).version
+          $versions["installer/version.hpp"] = if ((Get-Content installer/version.hpp -Raw) -match 'kAppVersion\s*=\s*L"([^"]+)"') { $Matches[1] } else { "" }
+          $rcFiles = @("artpicst.rc", "updater/artpicst_updater.rc", "installer/artpicst_installer.rc", "installer/artpicst_installer.rc.in")
+          foreach ($rc in $rcFiles) {
+            $content = Get-Content $rc -Raw
+            $versions[$rc] = if ($content -match 'VALUE "FileVersion", "([^"]+)"') { $Matches[1] } else { "" }
+          }
+          $expected = $versions["version.json"]
+          $bad = @()
+          foreach ($entry in $versions.GetEnumerator()) {
+            if ($entry.Value -ne $expected) { $bad += "$($entry.Key) = '$($entry.Value)'" }
+          }
+          if ($bad.Count -gt 0) {
+            Write-Host "::error::Discrepancia de versión (version.json = '$expected'):" 
+            $bad | ForEach-Object { Write-Host "::error::  $_" }
+            exit 1
+          }
+          Write-Host "Version consistente en todos los ficheros: $expected" -ForegroundColor Green
+
       - name: Generar icono multirresolucion
         run: python scripts/generate_icon.py
 
