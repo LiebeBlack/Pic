@@ -367,8 +367,11 @@ void TestAllocatorFuzz() {
             artpicst::AlignedPixelFree(p);
             break;
         }
-        p[0] = 0x5A; p[size - 1] = 0xA5;
-        if (p[0] != 0x5A || p[size - 1] != 0xA5) {
+        // size==1: p[0] y p[size-1] son el MISMO byte — escribir dos valores
+        // distintos hace que el último gane. Solo se verifica el byte final.
+        p[0] = 0x5A;
+        p[size - 1] = 0xA5;
+        if (p[size - 1] != 0xA5) {
             std::wprintf(L"[FAIL] Fuzz alloc %lu: buffer no escribible (size=%zu)\n", i, size);
             ++g_failures;
         }
