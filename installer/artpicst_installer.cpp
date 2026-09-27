@@ -80,7 +80,12 @@ constexpr UINT RES_APP_README  = 204;   // RCDATA README.md
 constexpr UINT RES_APP_UPDATER = 205;   // RCDATA artpicst_updater.exe
 
 const wchar_t APP_NAME[]       = L"ARTPICST";
-const wchar_t APP_VERSION[]    = L"1.2.0";
+// Fuente única de verdad (version.hpp). Un array wchar_t[] no puede
+// inicializarse desde un puntero: se replica el literal y el static_assert
+// garantiza en tiempo de compilación que nunca se desincronicen.
+const wchar_t APP_VERSION[]    = L"1.2.1";
+static_assert(std::wstring_view(APP_VERSION) == std::wstring_view(artpicst::kAppVersion),
+              "APP_VERSION debe coincidir con artpicst::kAppVersion (installer/version.hpp)");
 const wchar_t CLASS_NAME[]     = L"ARTPICSTInstallerWindow";
 const wchar_t UNINSTALL_REG_KEY[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\ARTPICST";
 const wchar_t APP_URL[]        = L"https://github.com/LiebeBlack/Pic";
@@ -198,6 +203,13 @@ struct InstallerState {
 
 InstallerState g_state;
 bool g_lastRunSucceeded = false;   // resultado del último RunPipeline (modo silencioso)
+std::wstring g_lastError;          // último error del pipeline (exit codes del modo --silent)
+
+// Exit codes del modo silencioso (--silent): estables para scripts y CI.
+constexpr int kSilentExitOk            = 0;   // operación completada
+constexpr int kSilentExitFailed        = 1;   // fallo genérico (con rollback)
+constexpr int kSilentExitPayloadMissing= 2;   // payload del instalador incompleto
+constexpr int kSilentExitFilesLocked   = 3;   // archivos en uso: cerrar ARTPICST y reintentar
 constexpr UINT WM_APP_PIPE = WM_APP + 0x210;
 constexpr UINT TIMER_PROGRESS = 1;
 constexpr UINT TIMER_RELAUNCH = 2;
@@ -1136,6 +1148,7 @@ void RunPipeline(AppMode mode) {
     // La marca final garantiza una duración EXACTA de 34.0 s (o 14 s en
     // desinstalación) cuando hay pacing; en --silent se completa al momento.
     g_lastRunSucceeded = ok;
+    g_lastError = ok ? std::wstring() : error;
     // FIX: sin UI también se refleja el tiempo trabajado (lo pide la consola
     // "t = X.X s" si el pipeline llegara a tener log visible).
     g_state.workElapsed = clock.Elapsed();
@@ -1548,7 +1561,8 @@ void RenderWelcome(Graphics& g, const Fonts& fonts, float W, float H) {
     DrawLogo(g, fonts, cx, 122.0f, 64.0f);
 
     RectF nameRect(cx - 200.0f, 164.0f, 400.0f, 42.0f);
-    DrawTextIn(g, APP_NAME, nameRect, fonts.fTitle, COL_TEXT, true, false);
+    std::wstring nameAndVersion = std::wstring(APP_NAME) + L"  v" + APP_VERSION;
+    DrawTextIn(g, nameAndVersion.c_str(), nameRect, fonts.fTitle, COL_TEXT, true, false);
 
     RectF tagRect(cx - 280.0f, 210.0f, 560.0f, 22.0f);
     DrawTextIn(g, L"Visor de imágenes premium para Windows — rápido, ligero y moderno",
@@ -2295,25 +2309,61 @@ static float GetSystemScale() {
 }
 
 // Ejecuta un trabajo SIN interfaz (--silent). Devuelve el código de salida.
+// Reglas del modo desatendido:
+//   · CERO ventanas y CERO MessageBox: cualquier problema se comunica por el
+//     exit code (ver kSilentExit*) y por el log del propio pipeline.
+//   · Validación previa del payload antes de tocar el sistema (instalación y
+//     actualización): un paquete roto no debe dejar restos a medio copiar.
+//   · La app SOLO se relanza en modo actualización (--update), nunca tras una
+//     instalación desatendida explícita.
 static int RunSilent(AppMode mode) {
     g_state.hwnd = nullptr;      // PipeUi destruye los mensajes sin UI
     g_state.silent = true;
-    if (mode != AppMode::Uninstall && g_state.installPath.empty()) {
+
+    if (mode == AppMode::Uninstall) {
+        // Desinstalación desatendida: resolver SIEMPRE la carpeta registrada
+        // (antes quedaba vacía si --silent no iba acompañado de --dir).
+        if (g_state.installPath.empty()) g_state.installPath = DetectInstallDir();
+        g_state.uninstallInfoDir = g_state.installPath;
+    } else if (g_state.installPath.empty()) {
         g_state.installPath = DetectInstallDir();
     }
+
+    // Validación previa del payload (solo instalación/actualización).
+    if (mode != AppMode::Uninstall) {
+        int present = 0;
+        for (int i = 0; i < kPayloadCount; ++i) {
+            if (IsResourcePresent(kPayload[i].id)) ++present;
+        }
+        const bool mainAvailable = IsResourcePresent(RES_APP_EXE) ||
+            GetFileAttributesW((GetModuleFolder() + L"\\artpicst.exe").c_str()) != INVALID_FILE_ATTRIBUTES;
+        if (!mainAvailable || present < 2) {
+            return kSilentExitPayloadMissing;
+        }
+    }
+
     // COM es necesario para crear accesos directos en el hilo del pipeline.
     const HRESULT comHr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     RunPipeline(mode);
     if (SUCCEEDED(comHr)) CoUninitialize();
 
+    if (!g_lastRunSucceeded) {
+        // Archivos bloqueados (app en ejecución) merecen un código propio:
+        // el script puede cerrar ARTPICST y reintentar.
+        if (g_lastError.find(L"está en uso") != std::wstring::npos) {
+            return kSilentExitFilesLocked;
+        }
+        return kSilentExitFailed;
+    }
+
     // Actualización silenciosa: la aplicación se reabre automáticamente.
-    if (mode == AppMode::Update && g_lastRunSucceeded) {
+    if (mode == AppMode::Update) {
         const std::wstring exe = g_state.installPath + L"\\artpicst.exe";
         if (GetFileAttributesW(exe.c_str()) != INVALID_FILE_ATTRIBUTES) {
             LaunchAppForUser(exe, g_state.installPath);
         }
     }
-    return g_lastRunSucceeded ? 0 : 1;
+    return kSilentExitOk;
 }
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine, int nCmdShow) {

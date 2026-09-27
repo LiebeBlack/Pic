@@ -69,9 +69,12 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <vector>
+
+#include "../installer/version.hpp"   // artpicst::kAppVersion / kRepoUrl (fuente única de verdad)
 
 // Directivas de enlace de MSVC. Se aíslan bajo _MSC_VER porque GCC/Clang no las
 // implementan y con -Wall emiten un aviso por cada línea (build limpio).
@@ -97,7 +100,16 @@ using namespace Gdiplus;
 // Configuración de aplicación y constantes visuales
 const wchar_t CLASS_NAME[] = L"ARTPICSTViewerWindow";   // distinto del updater/installer (single-instance)
 const wchar_t APP_NAME_TEXT[] = L"ARTPICST";
-const wchar_t APP_VERSION_TEXT[] = L"1.2.0";
+// Fuente única de verdad de la versión para TODA la UI del visor (Acerca de,
+// guía F1, OSD): coincide con version.json y con APP_VERSION del instalador
+// (artpicst::kAppVersion en installer/version.hpp). Un array wchar_t[] no puede
+// inicializarse desde un puntero, así que se replica el literal y un
+// static_assert garantiza que NUNCA se desincronicen en tiempo de compilación.
+const wchar_t APP_VERSION_TEXT[] = L"1.2.1";
+static_assert(std::wstring_view(APP_VERSION_TEXT) == std::wstring_view(artpicst::kAppVersion),
+              "APP_VERSION_TEXT debe coincidir con artpicst::kAppVersion (installer/version.hpp)");
+const wchar_t APP_REPO_URL[] = artpicst::kRepoUrl;
+const wchar_t APP_LICENSE_TEXT[] = L"Software libre y de código abierto (licencia MIT).";
 
 // Sistema de temas inteligente
 enum class ThemeMode {
@@ -939,11 +951,33 @@ LRESULT CALLBACK ThemedDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
                 const float textW = (static_cast<float>(client.right) - padX * 2.0f > 80.0f)
                                     ? static_cast<float>(client.right) - padX * 2.0f
                                     : 80.0f;
-                float messageFontSize = GetAdaptiveFontSize(st->message.c_str(),
-                                                            static_cast<int>(textW), static_cast<int>(available),
-                                                            L"Segoe UI");
-                if (messageFontSize < 10.5f) messageFontSize = 10.5f;
-                if (messageFontSize > 14.0f) messageFontSize = 14.0f;
+                float messageFontSize = 14.0f;
+                {
+                    // Ajuste por MEDICIÓN REAL: se elige el mayor tamaño cuya
+                    // altura medida (con ajuste de línea) cabe en el área
+                    // disponible. Nunca recorta por heurística de longitud:
+                    // textos largos bajan de tamaño en pasos de 0,5 pt hasta
+                    // caber (suelo 8 pt; por debajo, el diálogo ya fue
+                    // dimensionado por CalculateDialogSize para evitarlo).
+                    const FontFamily fitFamily(L"Segoe UI");
+                    StringFormat fitFormat;
+                    fitFormat.SetAlignment(StringAlignmentNear);
+                    fitFormat.SetLineAlignment(StringAlignmentNear);
+                    bool fitted = false;
+                    for (float sz = 14.0f; sz >= 8.0f; sz -= 0.5f) {
+                        Font fitFont(&fitFamily, sz, FontStyleRegular, UnitPoint);
+                        RectF measured;
+                        if (graphics.MeasureString(st->message.c_str(), -1, &fitFont,
+                                                   RectF(0.0f, 0.0f, textW, available),
+                                                   &fitFormat, &measured) == Ok &&
+                            measured.Height <= available) {
+                            messageFontSize = sz;
+                            fitted = true;
+                            break;
+                        }
+                    }
+                    if (!fitted) messageFontSize = 8.0f;
+                }
                 Gdiplus::FontFamily messageFamily(L"Segoe UI");
                 Gdiplus::Font messageFont(&messageFamily, messageFontSize, FontStyleRegular, UnitPoint);
                 StringFormat messageFormat;
@@ -1391,26 +1425,72 @@ TextSizeInfo CalculateOptimalTextSize(const wchar_t* text, int maxWidth, int max
 }
 
 void CalculateDialogSize(const wchar_t* title, const wchar_t* message, UINT buttons, int& outWidth, int& outHeight) {
-    // Calcular tamaño basado en contenido
-    TextSizeInfo titleInfo = CalculateOptimalTextSize(title, 700, 100, L"Segoe UI");
-    TextSizeInfo messageInfo = CalculateOptimalTextSize(message, 700, 400, L"Segoe UI");
-    
-    // Combinar tamaños
-    outWidth = std::max(titleInfo.optimalWidth, messageInfo.optimalWidth);
-    outHeight = titleInfo.optimalHeight + messageInfo.optimalHeight + 80; // Espacio para botones
-    
-    // Ajustar según tipo de botones
-    if (buttons == MB_YESNO) {
-        outWidth = std::max(outWidth, 500); // Mínimo para dos botones
+    // Presupuesto de pantalla: el diálogo NUNCA excede el área de trabajo
+    // (antes un texto largo generaba ventanas de 700 px que se salían de
+    // pantalla en equipos al 125 % y quedaba texto invisible sin scroll).
+    RECT work{};
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+    const int maxW = std::min(880, (work.right - work.left) - 48);
+    const int maxH = std::min(860, (work.bottom - work.top) - 48);
+    const float ui = static_cast<float>(g_uiScale) / 100.0f;
+
+    // Medición REAL (GDI+) en lugar de heurísticas por longitud de texto.
+    int titleWidthPx = 0;
+    int messageWidthPx = 0;
+    int messageHeightPx = 0;
+    HDC hdc = GetDC(nullptr);
+    if (hdc) {
+        Graphics g(hdc);
+        FontFamily fam(L"Segoe UI");
+
+        // Título: una línea; se mide a 15 pt (rango del pintado: 13–17) con
+        // margen para que no aparezca elipsis en títulos largos.
+        if (title && title[0]) {
+            Font f(&fam, 15.0f * ui, FontStyleBold, UnitPoint);
+            RectF b;
+            if (g.MeasureString(title, -1, &f, RectF(0.0f, 0.0f, 4096.0f, 128.0f), nullptr, &b) == Ok) {
+                titleWidthPx = static_cast<int>(b.Width);
+            }
+        }
+
+        // Mensaje: medición con ajuste de línea al ancho objetivo (720 px de
+        // diseño). El pintado elige su tamaño por ajuste real dentro del área
+        // disponible, así que medir a la base (11 pt) garantiza que el tamaño
+        // elegido por el pintado cabrá siempre en la altura calculada aquí.
+        if (message && message[0]) {
+            Font f(&fam, 11.0f * ui, FontStyleRegular, UnitPoint);
+            StringFormat sf;
+            sf.SetAlignment(StringAlignmentNear);
+            sf.SetLineAlignment(StringAlignmentNear);
+            const float targetW = 720.0f * ui;
+            RectF b;
+            if (g.MeasureString(message, -1, &f, RectF(0.0f, 0.0f, targetW, 16384.0f), &sf, &b) == Ok) {
+                messageWidthPx = static_cast<int>(std::min(b.Width, targetW));
+                messageHeightPx = static_cast<int>(b.Height);
+            }
+        }
+        ReleaseDC(nullptr, hdc);
     }
-    
-    // Ajustar según escala UI
-    outWidth = outWidth * g_uiScale / 100;
-    outHeight = outHeight * g_uiScale / 100;
-    
-    // Límites razonables
-    outWidth = std::max(400, std::min(outWidth, 900));
-    outHeight = std::max(250, std::min(outHeight, 700));
+
+    // Ancho: mensaje + márgenes laterales (32 px por lado), título junto al
+    // icono (74 px) y mínimos por tipo de botones. Todo en píxeles finales.
+    int width = 440;
+    if (buttons == MB_YESNO) width = std::max(width, 500);
+    if (messageWidthPx > 0)  width = std::max(width, messageWidthPx + static_cast<int>(64.0f * ui) + 12);
+    if (titleWidthPx > 0)    width = std::max(width, titleWidthPx + static_cast<int>(74.0f * ui) + 60);
+    width = std::min(width, maxW);
+
+    // Alto: cabecera (icono+separador ≈ 88 px) + zona de texto + botones
+    // (74 px), con holgura para ClearType. El mínimo garantiza aire para
+    // mensajes de una línea.
+    int height = messageHeightPx > 0
+        ? messageHeightPx + static_cast<int>(172.0f * ui) + 12
+        : 250;
+    height = std::max(height, buttons == MB_YESNO ? 320 : 250);
+    height = std::min(height, maxH);
+
+    outWidth = width;
+    outHeight = height;
 }
 
 float GetAdaptiveFontSize(const wchar_t* text, int availableWidth, int availableHeight, const wchar_t* fontName) {
@@ -1688,16 +1768,19 @@ void ShowAboutDialog(HWND hwnd) {
     about += L"Versión: ";
     about += APP_VERSION_TEXT;
     about += L" (Compilación Estable)\n";
-    about += L"Arquitectura: Nativo C++17 para Windows (x64)\n\n";
+    about += L"Arquitectura: Nativo C++23 para Windows (x64) — Direct2D + GDI+ + WIC\n\n";
     about += L"Características principales:\n";
     about += L"  • Motores de descodificación: stb_image, WIC y GDI+.\n";
     about += L"  • Soporte para más de 30 formatos: PNG, JPG, BMP, GIF,\n";
     about += L"    WebP, TIFF, AVIF, HEIC, RAW, HDR, PSD, ICO, etc.\n";
+    about += L"  • Render por GPU (Direct2D) con fallback GDI+ automático.\n";
     about += L"  • Caché LRU inteligente y liberación dinámica de recursos.\n";
     about += L"  • Interfaz adaptativa (modo oscuro/claro) con alto DPI.\n\n";
-    about += L"Licencia: Software libre y de código abierto.\n";
-    about += L"Repositorio: https://github.com/LiebeBlack/Pic\n";
-    about += L"Copyright © 2026 ARTPICST. Todos los derechos reservados.";
+    about += L"Licencia: ";
+    about += APP_LICENSE_TEXT;
+    about += L"\nRepositorio: ";
+    about += APP_REPO_URL;
+    about += L"\nCopyright © 2026 ARTPICST. Todos los derechos reservados.";
     ShowThemedMessageBox(hwnd ? hwnd : nullptr, L"Acerca de ARTPICST", about.c_str(), MB_OK, MB_ICONINFORMATION);
 }
 
@@ -1719,8 +1802,10 @@ void ShowProgramInfoDialog(HWND hwnd) {
     info += L"  G : Alternar escala de grises (B/N)\n";
     info += L"  N : Alternar inversión cromática (Negativo)\n";
     info += L"  T : Alternar tema visual (Oscuro / Claro)\n";
+    info += L"  Ctrl+U : Buscar actualizaciones ahora\n";
     info += L"  F5 : Iniciar / detener presentación automática\n";
-    info += L"  F11 / Doble clic : Pantalla completa (Esc para salir)\n";
+    info += L"  F11 / Doble clic : Pantalla completa (Esc para salir o cerrar)\n";
+    info += L"  Esc : Salir de pantalla completa · detener presentación · cerrar\n";
     info += L"  Supr : Mover imagen a la Papelera de reciclaje\n";
     info += L"  E / Ctrl+I : Metadatos y propiedades EXIF\n";
     info += L"  Ctrl+S : Guardar / exportar imagen\n";
@@ -1728,6 +1813,7 @@ void ShowProgramInfoDialog(HWND hwnd) {
     info += L"  Ctrl+E : Mostrar en el Explorador de archivos\n";
     info += L"  Ctrl+C / Ctrl+Shift+C : Copiar imagen / ruta\n";
     info += L"  Ctrl+O / Ctrl+Shift+O : Abrir imagen / carpeta\n";
+    info += L"  Ctrl+Shift+A : Acerca de ARTPICST (versión y licencia)\n";
     info += L"  I : Fijar o alternar barra de información\n\n";
     info += L"CONTROLES DE RATON:\n";
     info += L"  Clic izquierdo + arrastrar : Desplazar imagen\n";
@@ -3067,6 +3153,11 @@ struct GpuState {
     IDWriteTextFormat* fmtOsd = nullptr;
     IDWriteTextFormat* fmtTitle = nullptr;
     IDWriteTextFormat* fmtHint = nullptr;
+
+    // DPI del monitor en el que se creó el target (0 = sin crear aún). Con el
+    // manifiesto PerMonitorV2 la ventana puede moverse entre monitores al
+    // 100 % y al 150 %: al cambiar, el target se recrea con el DPI nuevo.
+    UINT createdDpi = 0;
 };
 
 GpuState g_gpu;
@@ -3203,6 +3294,7 @@ void GpuShutdown() {
     GpuSafeRelease(g_gpu.fmtTitle);
     GpuSafeRelease(g_gpu.fmtOsd);
     GpuSafeRelease(g_gpu.fmtHud);
+    g_gpu.createdDpi = 0;
     if (g_gpu.dwrite) {
         g_gpu.dwrite->Release();
         g_gpu.dwrite = nullptr;
@@ -3216,6 +3308,35 @@ void GpuShutdown() {
     g_gpu.attemptFailed = false;
 }
 
+// DPI actual del monitor que contiene la ventana (PerMonitorV2). Devuelve 96
+// si la API no está disponible (Windows 7) o si la ventana está minimizada.
+static UINT GpuWindowDpi() {
+    if (!g_state.hwnd) return 96;
+    using PFN = UINT(WINAPI*)(HWND);
+    static PFN fn = nullptr;
+    static bool resolved = false;
+    if (!resolved) {
+        resolved = true;
+        if (HMODULE user32 = GetModuleHandleW(L"user32.dll")) {
+            if (FARPROC raw = GetProcAddress(user32, "GetDpiForWindow")) {
+                memcpy(&fn, &raw, sizeof(fn));
+            }
+        }
+    }
+    UINT dpi = 96;
+    if (fn) {
+        dpi = fn(g_state.hwnd);
+    } else {
+        HDC dc = GetDC(g_state.hwnd);
+        if (dc) {
+            const int px = GetDeviceCaps(dc, LOGPIXELSX);
+            ReleaseDC(g_state.hwnd, dc);
+            if (px >= 48) dpi = static_cast<UINT>(px);
+        }
+    }
+    return (dpi >= 48 && dpi <= 4800) ? dpi : 96u;
+}
+
 // (Re)crea el render target del tamaño del cliente. Devuelve true si quedó listo.
 static bool GpuEnsureTarget() {
     if (!g_gpu.factory || !g_state.hwnd) return false;
@@ -3225,6 +3346,13 @@ static bool GpuEnsureTarget() {
     const UINT w = static_cast<UINT>(std::max(0L, client.right - client.left));
     const UINT h = static_cast<UINT>(std::max(0L, client.bottom - client.top));
     if (w == 0 || h == 0) return false;
+
+    // Cambio de DPI (arrastre entre monitores o cambio de escala): el target
+    // se recrea para que el texto y el OSD vuelvan a escalar con nitidez.
+    const UINT dpi = GpuWindowDpi();
+    if (g_gpu.target && g_gpu.createdDpi != 0 && g_gpu.createdDpi != dpi) {
+        GpuReleaseAll();
+    }
 
     D2D1_SIZE_U size = D2D1::SizeU(w, h);
     if (g_gpu.target) {
@@ -3236,7 +3364,7 @@ static bool GpuEnsureTarget() {
     D2D1_RENDER_TARGET_PROPERTIES rtProps = D2D1::RenderTargetProperties(
         D2D1_RENDER_TARGET_TYPE_HARDWARE,
         D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE),
-        96.0f, 96.0f,                       // 1 unidad D2D = 1 píxel (DPIs fijos)
+        96.0f, 96.0f,                       // campo informativo: el DPI real se aplica con SetDpi
         D2D1_RENDER_TARGET_USAGE_NONE,
         D2D1_FEATURE_LEVEL_DEFAULT);
 
@@ -3248,7 +3376,12 @@ static bool GpuEnsureTarget() {
         g_gpu.target = nullptr;
         return false;
     }
-    g_gpu.target->SetDpi(96.0f, 96.0f); // coordenadas = píxeles físicos
+    // DPI real del monitor: 1 unidad D2D = 1 píxel físico en cualquier escala.
+    // (Antes se fijaba 96 siempre: en monitores al 125/150 % el texto DirectWrite
+    // y el OSD se veían pequeños y con submuestreo borroso.)
+    const FLOAT dpiF = static_cast<FLOAT>(dpi);
+    g_gpu.target->SetDpi(dpiF, dpiF);
+    g_gpu.createdDpi = dpi;
     return true;
 }
 
@@ -4284,17 +4417,24 @@ void ShowContextMenu(HWND hwnd, int x, int y) {
     AppendMenuW(menu, MF_STRING, 13, L"Volteo horizontal\tH");
     AppendMenuW(menu, MF_STRING, 14, L"Volteo vertical\tV");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, 24, g_state.effectUltraClarity ? L"Desactivar Ultra-Claridad HDR\tD" : L"✨ Modo Ultra-Claridad (Detalles HDR)\tD");
-    AppendMenuW(menu, MF_STRING, 20, g_state.effectGrayscale ? L"Desactivar escala de grises\tG" : L"Escala de grises (B/N)\tG");
-    AppendMenuW(menu, MF_STRING, 21, g_state.effectInvert ? L"Desactivar invertir colores\tN" : L"Invertir colores (Negativo)\tN");
-    AppendMenuW(menu, MF_STRING, 15, g_state.isSlideshowActive ? L"Detener presentación\tF5" : L"Iniciar presentación\tF5");
+    AppendMenuW(menu, MF_STRING, 24, L"✨ Ultra-Claridad HDR (Detalles)\tD");
+    AppendMenuW(menu, MF_STRING, 20, L"Escala de grises (B/N)\tG");
+    AppendMenuW(menu, MF_STRING, 21, L"Invertir colores (Negativo)\tN");
+    AppendMenuW(menu, MF_STRING, 15, L"Presentación automática\tF5");
     AppendMenuW(menu, MF_STRING, 8, L"Pantalla completa\tF11");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, 22, L"Ver metadatos / EXIF...\tE");
     AppendMenuW(menu, MF_STRING, 16, L"Eliminar a papelera\tSupr");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, 25, L"Buscar actualizaciones...");
-    AppendMenuW(menu, MF_STRING, 11, L"Acerca de ARTPICST");
+    AppendMenuW(menu, MF_STRING, 25, L"Buscar actualizaciones...\tCtrl + U");
+    AppendMenuW(menu, MF_STRING, 11, L"Acerca de ARTPICST\tCtrl + Shift + A");
+    // Marcar los modos ACTIVOS con un check (√) en lugar de reescribir la
+    // etiqueta: el texto permanece estable y el estado se ve de un golpe.
+    if (g_state.effectUltraClarity) CheckMenuItem(menu, 24, MF_BYCOMMAND | MF_CHECKED);
+    if (g_state.effectGrayscale)    CheckMenuItem(menu, 20, MF_BYCOMMAND | MF_CHECKED);
+    if (g_state.effectInvert)       CheckMenuItem(menu, 21, MF_BYCOMMAND | MF_CHECKED);
+    if (g_state.isSlideshowActive)  CheckMenuItem(menu, 15, MF_BYCOMMAND | MF_CHECKED);
+    if (g_state.isFullscreen)       CheckMenuItem(menu, 8, MF_BYCOMMAND | MF_CHECKED);
 
     const int cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, x, y, 0, hwnd, nullptr);
     DestroyMenu(menu);
@@ -4401,6 +4541,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 }
             }
             g_gpu.retryRequested = true; // nuevo tamaño: reintentar GPU si falló
+            // Cambio de DPI (arrastre entre monitores): recrear el target para
+            // reescalar texto y OSD con el DPI nuevo y sin borrosidad.
+            if (g_gpu.enabled && g_gpu.createdDpi != 0 && g_gpu.createdDpi != GpuWindowDpi()) {
+                GpuReleaseAll();
+            }
             KillTimer(hwnd, TIMER_GPU_RETRY);
             const int width = LOWORD(lParam);
             const int height = HIWORD(lParam);
@@ -4533,7 +4678,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     if (ctrl) SetAsWallpaper();
                     break;
                 case 'U':
-                    // Update functionality removed for lightweight implementation
+                    if (ctrl) updater::CheckForUpdatesInteractive(hwnd);
                     break;
                 case 'D':
                     ToggleUltraClarity();

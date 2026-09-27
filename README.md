@@ -111,11 +111,23 @@ artpicst_updater.exe --background     # chequeo silencioso (1 vez al día)
 artpicst_updater.exe --selftest       # autotest (parser JSON, SHA-256, comparador de versiones)
 ```
 
+El instalador también admite modo **desatendido** (sin ventanas, con exit codes
+para scripts y CI):
+
+```bat
+artpicst_installer.exe --silent                       # instalación desatendida
+artpicst_installer.exe --silent --dir "C:\MiCarpeta"  # a una ruta concreta
+artpicst_installer.exe --silent --uninstall           # desinstalación desatendida
+```
+
+Exit codes: `0` OK · `1` fallo genérico (con rollback) · `2` payload incompleto ·
+`3` archivos en uso (cerrar ARTPICST y reintentar).
+
 ## 🔄 Auto-Actualización
 
 1. El visor lanza `artpicst_updater.exe --background` como máximo una vez al día (hilo en segundo plano, la UI nunca se bloquea).
 2. El updater consulta `https://api.github.com/repos/LiebeBlack/Pic/releases/latest` y compara la versión local con la publicada (soporta prefijos `v`, sufijos y números de más de un dígito).
-3. Si hay versión nueva, muestra una notificación flotante minimalista con **Instalar actualización ahora** / **Recordar más tarde** y opción de instalar automáticamente futuras versiones.
+3. Si hay versión nueva, muestra una notificación flotante minimalista con **Instalar actualización ahora** / **Recordar más tarde** y opción de instalar automáticamente futuras versiones (si se activa, los chequeos diarios descargan e instalan en silencio).
 4. Al aceptar: descarga `artpicst-installer.exe` con progreso real, verifica su hash SHA-256 y lo ejecuta con `--update <payload> --dir <dir>`.
 5. El instalador sustituye los archivos, cierra el visor si sigue abierto y lo reinicia.
 

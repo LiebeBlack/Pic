@@ -34,6 +34,7 @@ namespace updater {
 constexpr wchar_t kUpdaterExe[] = L"artpicst_updater.exe";
 constexpr wchar_t kRegKeyApp[] = L"Software\\ARTPICST";
 constexpr wchar_t kRegValLastCheck[] = L"LastUpdateCheck";
+constexpr wchar_t kRegValAutoMode[] = L"AutoInstallUpdates";   // checkbox del updater (REG_QWORD)
 
 inline bool ReadLastCheck(unsigned long long& out) {
     HKEY hKey = nullptr;
@@ -63,6 +64,19 @@ inline bool AlreadyCheckedToday() {
     unsigned long long last = 0;
     if (!ReadLastCheck(last)) return false;
     return NowUnix() - last < 86400ull;   // política: 1 comprobación al día
+}
+
+// ¿El usuario activó "Instalar actualizaciones automáticas" en la
+// notificación del updater? (el updater lo guarda como REG_QWORD).
+inline bool ReadAutoInstallEnabled() {
+    HKEY hKey = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, kRegKeyApp, 0, KEY_READ, &hKey) != ERROR_SUCCESS) return false;
+    unsigned long long value = 0;
+    DWORD type = 0, size = sizeof(value);
+    const LSTATUS r = RegQueryValueExW(hKey, kRegValAutoMode, nullptr, &type,
+                                       reinterpret_cast<LPBYTE>(&value), &size);
+    RegCloseKey(hKey);
+    return r == ERROR_SUCCESS && type == REG_QWORD && size == sizeof(value) && value != 0;
 }
 
 // Lanza artpicst_updater.exe con argumentos. Devuelve true si se inició.
@@ -108,8 +122,11 @@ inline void StartBackgroundDailyCheck() {
             Sleep(1000);
         }
         if (AlreadyCheckedToday()) return;
+        // Modo EXPLÍCITO según la configuración del usuario: con auto-instalación
+        // activada el updater descarga e instala en silencio (--background); sin
+        // ella muestra la notificación flotante de siempre (sin argumentos).
         // El propio updater guarda LastUpdateCheck tras consultar GitHub.
-        LaunchUpdaterProcess(L"", nullptr);
+        LaunchUpdaterProcess(ReadAutoInstallEnabled() ? L"--background" : L"", nullptr);
     }).detach();
 }
 

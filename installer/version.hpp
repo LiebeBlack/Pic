@@ -8,6 +8,7 @@
 #pragma once
 
 #include <string>
+#include <string_view>
 #include <vector>
 #include <cwctype>
 #include <cstdlib>
@@ -17,6 +18,10 @@ namespace artpicst {
 // ----------------------------------------------------------------------------
 // Identidad del producto y del repositorio de releases
 // ----------------------------------------------------------------------------
+// kAppVersion es la FUENTE ÚNICA DE VERDAD de la versión para visor,
+// instalador y updater. Mantener sincronizada con version.json y con los
+// recursos VERSIONINFO (.rc) al publicar.
+inline constexpr const wchar_t* kAppVersion     = L"1.2.1";
 inline constexpr const wchar_t* kAppName        = L"ARTPICST";
 inline constexpr const wchar_t* kRepoOwner      = L"LiebeBlack";
 inline constexpr const wchar_t* kRepoName       = L"Pic";

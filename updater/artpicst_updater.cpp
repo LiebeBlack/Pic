@@ -789,7 +789,7 @@ CheckOutcome CheckForUpdate() {
     return outcome;
 }
 
-bool DownloadInstaller(const GithubAsset& asset, std::wstring& outFile) {
+static bool DownloadInstallerOnce(const GithubAsset& asset, std::wstring& outFile) {
     const std::wstring dir = GetTempUpdatesDir();
     CreateDirectoryW(dir.c_str(), nullptr);
     std::wstring finalPath = dir + L"\\" + asset.name;
@@ -827,12 +827,18 @@ bool DownloadInstaller(const GithubAsset& asset, std::wstring& outFile) {
         if (bytesRead == 0) break;
         DWORD written = 0;
         if (!WriteFile(file, buffer, bytesRead, &written, nullptr) || written != bytesRead) { ok = false; break; }
-        g_upd.bytesDone += static_cast<long long>(bytesRead);
-        lastData = std::chrono::steady_clock::now();
-        if (std::chrono::duration<double>(std::chrono::steady_clock::now() - lastData).count() > kDownloadTimeout) {
+        // Detección de estancamiento: si llevamos >60 s sin recibir datos
+        // (WinHttpReadData se quedó colgado hasta su timeout interno), abortar
+        // y dejar que el reintento de DownloadInstaller tome el relevo.
+        // FIX: antes se actualizaba lastData ANTES de comprobar el timeout,
+        // así que la comparación era siempre 0 y nunca disparaba.
+        const auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration<double>(now - lastData).count() > kDownloadTimeout) {
             ok = false;
             break;
         }
+        g_upd.bytesDone += static_cast<long long>(bytesRead);
+        lastData = now;
     }
     CloseHandle(file);
     WinHttpCloseHandle(request);
@@ -860,6 +866,27 @@ bool DownloadInstaller(const GithubAsset& asset, std::wstring& outFile) {
     MoveFileExW(partPath.c_str(), finalPath.c_str(), MOVEFILE_REPLACE_EXISTING);
     outFile = finalPath;
     return true;
+}
+
+// Descarga con UN reintento: la primera pasada suele fallar por cortes de red
+// o por un .part corrupto de una sesión anterior. Entre intentos se purgan los
+// restos (.part y archivo final a medias) para que la segunda empiece limpia.
+bool DownloadInstaller(const GithubAsset& asset, std::wstring& outFile) {
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        if (attempt > 0) {
+            const std::wstring dir = GetTempUpdatesDir();
+            DeleteFileW((dir + L"\\" + asset.name).c_str());
+            DeleteFileW((dir + L"\\" + asset.name + L".part").c_str());
+            Sleep(1500);   // respiro breve antes del reintento
+        }
+        std::wstring file;
+        if (DownloadInstallerOnce(asset, file)) {
+            outFile = file;
+            return true;
+        }
+        if (g_upd.cancelRequested) break;
+    }
+    return false;
 }
 
 // Encadena el instalador oficial con el payload descargado. La elevación la
@@ -1519,6 +1546,21 @@ static void EnableDpiAwareness() {
     SetProcessDPIAware();
 }
 
+// Espera real al hilo de red con timeout global de 10 minutos. FIX CRÍTICO:
+// antes el modo silencioso dormía 1,5 s y el proceso moría con la descarga a
+// medias (un instalador de ~15 MB a 3 MB/s tarda ~5 s). StartUpdateWorker ya
+// dejó g_workerActive=true (exchange) antes de crear el hilo, así que la señal
+// está garantizada al entrar aquí.
+static void RunSilentWorkerAndWait() {
+    StartUpdateWorker(true);
+    constexpr DWORD kSilentTimeoutMs = 10ull * 60ull * 1000ull;   // 10 min
+    const DWORD start = GetTickCount();
+    while (g_workerActive.load(std::memory_order_seq_cst)) {
+        if (GetTickCount() - start > kSilentTimeoutMs) break;   // red de seguridad
+        Sleep(250);
+    }
+}
+
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
     g_hInstance = hInstance;
 
@@ -1557,9 +1599,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
 
     // --background: descarga silenciosa + instalación automática sin UI.
     if (g_cfg.background) {
-        StartUpdateWorker(true);
-        // El hilo encadena el instalador; este proceso termina enseguida.
-        Sleep(1500);
+        RunSilentWorkerAndWait();
         GdiplusShutdown(g_gdiplusToken);
         if (SUCCEEDED(comHr)) CoUninitialize();
         return 0;
@@ -1567,6 +1607,16 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
 
     // ¿Debe mostrarse algo? Postpone diario y rate-limit silencioso.
     if (!g_cfg.forced && Postponed()) {
+        GdiplusShutdown(g_gdiplusToken);
+        if (SUCCEEDED(comHr)) CoUninitialize();
+        return 0;
+    }
+
+    // El usuario activó "Instalar actualizaciones automáticamente": el chequeo
+    // diario (sin argumentos) instala en silencio, igual que --background, y
+    // solo muestra UI si la comprobación fue FORZADA desde el menú del visor.
+    if (AutoInstallEnabled() && !g_cfg.forced) {
+        RunSilentWorkerAndWait();
         GdiplusShutdown(g_gdiplusToken);
         if (SUCCEEDED(comHr)) CoUninitialize();
         return 0;

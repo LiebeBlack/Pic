@@ -47,7 +47,10 @@ trabajo ya terminó.
 
 1. **Arranque del visor.** En `WM_CREATE` se lanza `StartBackgroundDailyCheck()`:
    un hilo detached espera 20-30 s (xorshift32 sobre el reloj) y, si la política
-   de 1 chequeo/día lo permite, ejecuta `artpicst_updater.exe` (sin argumentos).
+   de 1 chequeo/día lo permite, ejecuta `artpicst_updater.exe`. El modo es
+   EXPLÍCITO según la configuración del usuario: con `AutoInstallUpdates=1` se
+   lanza con `--background` (descarga e instala en silencio) y sin ella, sin
+   argumentos (muestra la notificación flotante).
 2. **Consulta.** El updater hace `GET https://api.github.com/repos/LiebeBlack/Pic/releases/latest`
    con WinHTTP (TLS, timeouts de 8 s, reintentos con espera lineal, cabeceras
    `User-Agent` y `Accept: application/vnd.github+json`).
@@ -69,7 +72,10 @@ trabajo ya terminó.
 7. **Descarga.** A `%LOCALAPPDATA%\ARTPICST\updates` con progreso real (bytes,
    velocidad media), guard de 60 s sin datos y verificación **SHA-256** si el
    release publica `digest` (`sha256:...`). Descarga en `.part` + rename: nunca
-   queda un archivo a medias con nombre definitivo.
+   queda un archivo a medias con nombre definitivo. Ante un corte de red o un
+   `.part` corrupto de una sesión anterior se reintenta UNA vez con limpieza
+   previa de los restos; el guard de 60 s sin datos sí dispara (antes se
+   actualizaba la marca antes de comparar y nunca saltaba).
 8. **Instalación encadenada.** Se ejecuta el instalador descargado con
    `--update <payload> --dir <dir>`; el instalador (manifiesto
    `requireAdministrator`) pide UAC él mismo, aparta los binarios actuales como
@@ -88,6 +94,7 @@ trabajo ya terminó.
 | Cierre de la notificación | automático | 5 min de descarga máxima |
 | Purga de descargas | > 7 días | `PurgeOldDownloads()` en cada arranque |
 | Timeout de descarga | 60 s sin datos | `kDownloadTimeout` |
+| Espera del modo silencioso | hasta 10 min | `RunSilentWorkerAndWait()` (el proceso ya NO muere a los 1,5 s con la descarga a medias) |
 
 ## 4. Seguridad
 
@@ -118,7 +125,7 @@ Estado compartido worker ↔ UI: `phase` (atómico), `bytesDone` / `bytesTotal`
 
 ```
 Software\ARTPICST
-  Version          = 1.2.0            (lo escribe el instalador)
+  Version          = 1.2.1            (lo escribe el instalador)
   InstallDir       = C:\Program Files\ARTPICST
   LastUpdateCheck  = <unix QWORD>     (lo escribe el updater)
   AutoInstallUpdates = 1              (checkbox de la notificación)
@@ -127,12 +134,32 @@ Software\ARTPICST
 ## 7. CLI del updater
 
 ```bat
-artpicst_updater.exe                :: chequeo + notificación flotante (usado por el visor)
+artpicst_updater.exe                :: chequeo + notificación flotante (usado por el visor;
+                                    ::   instala en silencio si AutoInstallUpdates=1)
 artpicst_updater.exe --check        :: consulta y devuelve exit code (0=actualización, 1=al día, 3=sin red)
 artpicst_updater.exe --check --forced
 artpicst_updater.exe --background   :: descarga + instalación silenciosa (checkbox auto)
 artpicst_updater.exe --selftest     :: autotest offline (gate de CI)
 ```
+
+### Modo desatendido del instalador (`--silent`)
+
+```bat
+artpicst_installer.exe --silent                       :: instalación desatendida (ruta registrada o por defecto)
+artpicst_installer.exe --silent --dir "C:\MiCarpeta"  :: instalación desatendida a una ruta concreta
+artpicst_installer.exe --silent --uninstall           :: desinstalación desatendida
+```
+
+Cero ventanas y cero MessageBox: todo problema se comunica por exit code.
+
+| Exit code | Significado |
+|---|---|
+| `0` | Operación completada |
+| `1` | Fallo genérico (con rollback automático) |
+| `2` | Payload del instalador incompleto (validado ANTES de tocar el sistema) |
+| `3` | Archivos en uso: cerrar ARTPICST y reintentar |
+
+En instalación desatendida la app NO se relanza; solo en modo `--update`.
 
 El `--selftest` valida el comparador de versiones (casos `auto-N`, semver,
 prereleases), el parser JSON (tag, body, asset y digest) y el limpiador de
