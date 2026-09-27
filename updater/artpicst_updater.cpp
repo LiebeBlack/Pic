@@ -1303,7 +1303,7 @@ static int RunSelfTest() {
         { L"\\u al final del buffer",        L"{\"tag_name\":\"auto\\u" },
         { L"\\u incompleto",                 L"{\"tag_name\":\"auto\\u00" },
         { L"\\u con dígitos cortados",       L"{\"body\":\"x\\uZZZZ\"}" },
-        { L"escape solitario",               L"{\"tag_name\":\"auto-59\\\" },
+        { L"escape solitario",               L"{\"tag_name\":\"auto-59\\\"" },
         { L"objeto sin cerrar",              L"{\"tag_name\":\"auto-59\",\"assets\":[{" },
         { L"array de assets sin cerrar",     L"{\"tag_name\":\"auto-59\",\"assets\":[{\"name\":\"x.exe\"" },
         { L"assets anidados corruptos",      L"{\"assets\":[{\"name\":{\"name\":{\"a\":\"b" },
