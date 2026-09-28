@@ -196,7 +196,10 @@ jobs:
             build = [int]$env:GITHUB_RUN_NUMBER
             build_date = $env:ARTPICST_DATE
           } | ConvertTo-Json
-          Set-Content -Path (Join-Path $dist "version.json") -Value $versionInfo -Encoding UTF8
+          # WriteAllText UTF-8 sin BOM: el BOM de Set-Content (PS 5.1) se
+          # colaria como primer caracter invisible del JSON.
+          $utf8 = New-Object System.Text.UTF8Encoding($false)
+          [System.IO.File]::WriteAllText((Join-Path $dist "version.json"), $versionInfo, $utf8)
 
       - name: Crear ZIP portable
         shell: powershell
@@ -230,6 +233,7 @@ jobs:
           # (queda en el repo si el paso de commit esta activo) y se usa como
           # body de la release. El updater lo lee del campo "body" del JSON de
           # la API - sincronizacion transparente app <-> GitHub Releases.
+          $utf8 = New-Object System.Text.UTF8Encoding($false)
           $tag = $env:ARTPICST_TAG
           $date = [DateTime]::UtcNow.ToString('yyyy-MM-dd')
           $lines = @()
@@ -250,9 +254,10 @@ jobs:
           $lines += "### Notas"
           $lines += "- Instalador autocontenido (visor + updater + icono + docs)."
           $lines += "- El auto-updater compara SOLO dentro de su linea: estable (vX.Y.Z) o continua (auto-N-YYYYMMDD)."
-          Set-Content -Path "CHANGELOG.md" -Value ($lines -join "`n") -Encoding UTF8
+          # WriteAllText UTF-8 sin BOM: el BOM de Set-Content colaria un
+          # caracter invisible al principio del body de la release.
+          [System.IO.File]::WriteAllText("$env:GITHUB_WORKSPACE\CHANGELOG.md", ($lines -join "`n") + "`n", $utf8)
           # Mismo criterio: append UTF-8 sin BOM, nunca ">>" de PS 5.1.
-          $utf8 = New-Object System.Text.UTF8Encoding($false)
           [System.IO.File]::AppendAllText($env:GITHUB_ENV, "ARTPICST_BODY_FILE=$env:GITHUB_WORKSPACE\CHANGELOG.md`n", $utf8)
 
       - name: Publicar release en GitHub
