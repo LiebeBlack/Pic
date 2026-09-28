@@ -269,7 +269,7 @@ void LoadLocalInstallInfo() {
             }
         }
     }
-    if (g_cfg.localVersion.empty()) g_cfg.localVersion = L"0";
+    if (g_cfg.localVersion.empty()) g_cfg.localVersion = artpicst::kUnknownVersion;   // "0": más vieja que todo
 }
 
 unsigned long long NowUnix() {
@@ -1327,6 +1327,14 @@ static int RunSelfTest() {
         { L"auto-80-20260901", L"auto-80-20260928", -1 },   // la fecha desempata
         { L"auto-80-20260928", L"auto-80", 1 },      // sin fecha < con fecha (mismo run)
         { L"auto-81-20260101", L"auto-80-20261231", 1 }, // el run manda sobre la fecha
+        // REGRESIÓN CI: el sufijo "-YYYYMMDD" del tag continuo es la fecha de
+        // build del MISMO run (no pre-release): con fecha > sin fecha, y la
+        // fecha mayor desempata. Y "0" es el marcador de versión desconocida:
+        // siempre más vieja que cualquier tag real de cualquier línea.
+        { L"auto-80", L"auto-80-20260928", -1 },   // sin fecha < con fecha
+        { L"auto-59", L"auto-59-20260928", -1 },
+        { L"0",       L"v1.2.1", -1 },             // desconocida < estable
+        { L"0",       L"auto-59", -1 },            // desconocida < continua
     };
     for (const auto& vc : versionCases) {
         const int got = artpicst::CompareVersionTags(vc.local, vc.remote);

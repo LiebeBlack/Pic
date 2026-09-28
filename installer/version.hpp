@@ -93,9 +93,26 @@ inline bool IsContinuousTag(const std::wstring& tag) {
     return tag.rfind(L"auto-", 0) == 0;
 }
 
+// Sufijo de fecha de build ("-20260928") en un tag de la línea continua.
+inline bool IsDateSuffix(const std::wstring& prerelease) {
+    if (prerelease.size() < 2 || prerelease[0] != L'-') return false;
+    for (size_t i = 1; i < prerelease.size(); ++i)
+        if (!std::iswdigit(static_cast<wint_t>(prerelease[i]))) return false;
+    return true;
+}
+
+// Versión local DESCONOCIDA: marcador que usa el updater cuando ni el registro
+// ni la línea de comandos aportan versión. El comparador la trata como más
+// vieja que cualquier tag real de CUALQUIER línea, para que la primera
+// consulta ofrezca ponerse al día en vez de callarse por el guard de líneas.
+inline constexpr const wchar_t* kUnknownVersion = L"0";
+
 // Devuelve >0 si local es más nueva, <0 si remota es más nueva, 0 si iguales.
 inline int CompareVersionTags(const std::wstring& local, const std::wstring& remote) {
     if (local == remote) return 0;
+    // Versión desconocida: siempre "más vieja" que un tag reconocible.
+    if (local == kUnknownVersion) return -1;
+    if (remote == kUnknownVersion) return 1;
     // FIX FALSOS POSITIVOS: las dos líneas de versiones son INCOMPARABLES entre
     // sí. "auto-80" vs semver "1.2.1" comparaba 1 < 80 y avisaba SIEMPRE de
     // actualizaciones aun estando en la última versión (bucle diario de
@@ -113,6 +130,15 @@ inline int CompareVersionTags(const std::wstring& local, const std::wstring& rem
         if (a != b) return a > b ? 1 : -1;
     }
     if (lp != rp) {
+        // En la línea continua, el sufijo "-YYYYMMDD" es la FECHA de build del
+        // mismo run: NO es pre-release, es una build más nueva (más específica)
+        // que el tag sin fecha. "-rc1"/"-beta" sí siguen siendo pre-release.
+        if (IsContinuousTag(local)) {
+            const bool ld = IsDateSuffix(lp), rd = IsDateSuffix(rp);
+            if (ld != rd) return ld ? 1 : -1;   // la fecha manda sobre sin fecha
+            if (ld) return lp > rp ? 1 : -1;    // fecha vs fecha (8 dígitos)
+            // ambas no-fecha (rc/beta): criterio semver de abajo
+        }
         if (lp.empty()) return 1;    // release final > pre-release (semver)
         if (rp.empty()) return -1;
         return lp > rp ? 1 : -1;
