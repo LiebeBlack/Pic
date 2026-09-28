@@ -28,8 +28,8 @@ jobs:
       - name: "Definir versión (fecha UTC: auto-<run>-YYYYMMDD)"
         shell: powershell
         run: |
-          # Esquema estandarizado: los builds de la línea continua usan
-          # auto-<run>-YYYYMMDD (UTC) — sin "Latest-80.X" ni "auto-80" simple.
+          # Esquema estandarizado: los builds de la linea continua usan
+          # auto-<run>-YYYYMMDD (UTC) - sin "Latest-80.X" ni "auto-80" simple.
           # Los tags v* manuales se respetan tal cual.
           # Se escribe con AppendAllText (UTF-8 sin BOM) y NO con ">>": el
           # append de PS 5.1 es UTF-16LE y corrompe GITHUB_ENV si un paso
@@ -64,7 +64,7 @@ jobs:
             if ($entry.Value -ne $expected) { $bad += "$($entry.Key) = '$($entry.Value)'" }
           }
           if ($bad.Count -gt 0) {
-            Write-Host "::error::Discrepancia de versión (version.json = '$expected'):" 
+            Write-Host "::error::Discrepancia de version (version.json = '$expected'):" 
             $bad | ForEach-Object { Write-Host "::error::  $_" }
             exit 1
           }
@@ -127,7 +127,7 @@ jobs:
           set GATE_RC=%errorlevel%
           type selftest.log
           if %GATE_RC% equ 0 goto gate_ok
-          echo ::error::Updater selftest FAILED con exit code %GATE_RC% (salida arriba; vacío = crash antes de escribir).
+          echo ::error::Updater selftest FAILED con exit code %GATE_RC% (salida arriba; vacio = crash antes de escribir).
           exit /b 1
           :gate_ok
           echo Updater selftest OK.
@@ -226,14 +226,14 @@ jobs:
         if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
         shell: powershell
         run: |
-          # Changelog estándar para el auto-updater: se escribe en CHANGELOG.md
-          # (queda en el repo si el paso de commit está activo) y se usa como
+          # Changelog estandar para el auto-updater: se escribe en CHANGELOG.md
+          # (queda en el repo si el paso de commit esta activo) y se usa como
           # body de la release. El updater lo lee del campo "body" del JSON de
-          # la API — sincronización transparente app <-> GitHub Releases.
+          # la API - sincronizacion transparente app <-> GitHub Releases.
           $tag = $env:ARTPICST_TAG
           $date = (Get-Date).ToUniversalTime().ToString("yyyy-MM-dd")
           $lines = @()
-          $lines += "## $tag — $date"
+          $lines += "## $tag - $date"
           $lines += ""
           $lines += "### Cambios en esta build"
           $since = ""
@@ -241,7 +241,7 @@ jobs:
           if (-not $since) { try { $since = git describe --tags --abbrev=0 2>$null; } catch { } }
           if ($since) {
             $log = git log --pretty="- %s (%h)" "$since..HEAD"
-            if ($log) { $lines += $log } else { $lines += "- Build continuo sin cambios de código nuevos." }
+            if ($log) { $lines += $log } else { $lines += "- Build continuo sin cambios de codigo nuevos." }
           } else {
             $log = git log --pretty="- %s (%h)" -20
             if ($log) { $lines += $log } else { $lines += "- Primera build del esquema de versiones continuas." }
