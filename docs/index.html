@@ -189,13 +189,13 @@
   .chip b{color:var(--text); font-weight:600;}
 
   pre{
-    background:var(--code-bg); border:1px solid var(--border); border-radius:14px;
+    position:relative; background:var(--code-bg); border:1px solid var(--border); border-radius:14px;
     padding:20px 22px; overflow-x:auto; font-size:13.5px; line-height:1.7;
     font-family:Consolas,"Cascadia Mono",Menlo,monospace;
   }
   pre .c{color:var(--text-dim);}
   .copy-btn{
-    float:right; margin:-34px 6px 0 0; position:relative; z-index:2;
+    position:absolute; top:10px; right:12px; z-index:2;
     background:var(--panel2); border:1px solid var(--border2); color:var(--text-soft);
     font-size:12px; padding:5px 12px; border-radius:8px; cursor:pointer;
   }
@@ -232,7 +232,7 @@
 <header class="nav">
   <div class="wrap nav-inner">
     <a class="brand" href="#inicio"><span class="logo-tile">A</span> ARTPICST</a>
-    <nav class="nav-links">
+    <nav class="nav-links" aria-label="Secciones de la página">
       <a href="#caracteristicas">Características</a>
       <a href="#rendimiento">Rendimiento</a>
       <a href="#formatos">Formatos</a>
@@ -470,11 +470,15 @@
     <h2 class="sec-title">Descárgalo o compílalo tú mismo</h2>
     <p class="sec-sub">El instalador es una unidad autocontenida: incrusta el visor, el módulo de actualización, el icono y la documentación, y despliega todo con un asistente gráfico pitch-black con consola de log en vivo. También puedes compilar desde el código con Visual Studio o MinGW.</p>
 
+    <div class="card reveal" style="margin-bottom:24px; background:linear-gradient(135deg, color-mix(in srgb, var(--acc-a) 8%, var(--panel)), color-mix(in srgb, var(--acc-b) 8%, var(--panel))); border-color:var(--border2);">
+      <p style="font-size:14.5px;"><b class="grad-text">Novedades de la versión:</b> instalador rediseñado con barra lateral de pasos, nueva página de <b>carpeta de destino</b> (selector nativo, espacio libre real en disco y detección de instalaciones previas) y estadísticas reales al completar la instalación.</p>
+    </div>
+
     <div class="grid" style="margin-bottom:36px;">
       <div class="card reveal">
         <div class="ico">📦</div>
         <h3>Instalador autocontenido (recomendado)</h3>
-        <p>Asistente premium paso a paso: instalación tradicional en <code class="inline-code">%ProgramFiles%\ARTPICST</code> (con UAC y degradación a instalación por usuario), accesos en escritorio y menú Inicio, asociación opcional de formatos sin secuestrar tu visor predeterminado, rollback automático y desinstalador gráfico integrado.</p>
+        <p>Asistente premium <b>rediseñado</b>: barra lateral con los 5 pasos del asistente, página de <b>carpeta de destino</b> con selector nativo, espacio libre real en disco y detección de instalaciones previas, instalación tradicional en <code class="inline-code">%ProgramFiles%\ARTPICST</code> (con UAC y degradación a instalación por usuario), accesos en escritorio y menú Inicio, asociación opcional de formatos sin secuestrar tu visor predeterminado, rollback automático, estadísticas reales al terminar y desinstalador gráfico integrado.</p>
         <p style="margin-top:14px;"><a class="btn btn-primary" href="https://github.com/LiebeBlack/Pic/releases/latest/download/artpicst-installer.exe">⬇ artpicst-installer.exe</a></p>
         <p style="font-size:12.5px; color:var(--text-dim); margin-top:10px;">Enlace directo a la última versión publicada en GitHub Releases. Es el mismo asset que descarga e instala el auto-actualizador.</p>
       </div>
@@ -510,9 +514,9 @@
         <p class="kicker">Build en tres sabores</p>
         <h2 class="sec-title">Compilación de un toque</h2>
         <p style="margin-bottom:18px; color:var(--text-soft); font-size:14.5px;">Cualquiera de estos comandos produce los 3 binarios en <code class="inline-code">dist\</code>: visor, updater e instalador autocontenido.</p>
-        <pre id="code-ps"><span class="c"># Opción 1 — PowerShell (recomendada)</span>
+        <pre id="code-ps"><button class="copy-btn" type="button" aria-label="Copiar comando">Copiar</button><span class="c"># Opción 1 — PowerShell (recomendada)</span>
 powershell -ExecutionPolicy Bypass -File build.ps1</pre>
-        <pre id="code-bat"><span class="c"># Opción 2 — Batch · Opción 3 — MinGW</span>
+        <pre id="code-bat"><button class="copy-btn" type="button" aria-label="Copiar comandos">Copiar</button><span class="c"># Opción 2 — Batch · Opción 3 — MinGW</span>
 build.bat
 build_mingw.bat</pre>
         <p style="margin-top:16px; color:var(--text-dim); font-size:13px;">Orden interno: recursos → visor → updater (con selftest como control de calidad) → payload autocontenido (Python) → instalador. El asset oficial de release es <code class="inline-code">artpicst-installer.exe</code>; la CI (GitHub Actions) lo publica junto al ZIP portable en cada push.</p>
@@ -526,7 +530,7 @@ build_mingw.bat</pre>
   <div class="wrap">
     <p class="kicker">Línea de comandos</p>
     <h2 class="sec-title">Integra ARTPICST en tu flujo</h2>
-    <pre id="code-cli"><span class="c"># Abre el visor, una carpeta o una imagen concreta</span>
+    <pre id="code-cli"><button class="copy-btn" type="button" aria-label="Copiar comandos">Copiar</button><span class="c"># Abre el visor, una carpeta o una imagen concreta</span>
 artpicst.exe
 artpicst.exe "C:\Fotos"
 artpicst.exe "C:\Fotos\imagen.jpg"
@@ -536,6 +540,17 @@ artpicst.exe --maximized "C:\Fotos"
 artpicst.exe --fullscreen "C:\Fotos"
 artpicst.exe --register
 artpicst.exe --unregister</pre>
+
+    <p class="kicker" style="margin-top:36px;">Instalador desatendido</p>
+    <h3 style="font-size:20px; margin-bottom:12px;">Para scripts y despliegues administrados</h3>
+    <pre id="code-silent"><button class="copy-btn" type="button" aria-label="Copiar comandos">Copiar</button><span class="c"># Instalación y desinstalación silenciosas (sin ventanas, exit codes estables)</span>
+artpicst_installer.exe --silent
+artpicst_installer.exe --uninstall --silent
+
+<span class="c"># Exit codes: 0 correcto · 1 fallo (con rollback) · 2 payload incompleto · 3 archivos en uso</span>
+
+<span class="c"># Actualización en cadena con payload externo</span>
+artpicst_installer.exe --update "nuevo_payload.exe" --dir "C:\Program Files\ARTPICST"</pre>
   </div>
 </section>
 
@@ -574,7 +589,7 @@ artpicst.exe --unregister</pre>
         <p style="color:var(--text-soft); font-size:14.5px;">El módulo funciona también de forma autónoma, ideal para scripts y despliegues administrados:</p>
       </div>
       <div>
-        <pre id="code-updater"><span class="c"># Buscar actualizaciones (interactivo)</span>
+        <pre id="code-updater"><button class="copy-btn" type="button" aria-label="Copiar comandos">Copiar</button><span class="c"># Buscar actualizaciones (interactivo)</span>
 artpicst_updater.exe --check
 artpicst_updater.exe --forced
 
@@ -600,7 +615,7 @@ artpicst_updater.exe --selftest</pre>
       <div class="card reveal">
         <div class="ico">🛠️</div>
         <h3>Instalador</h3>
-        <p>C++ con GDI+: asistente gráfico con degradados, esquinas redondeadas, detección de DPI y barra de título oscura. Icono y metadatos de versión integrados en el ejecutable.</p>
+        <p>C++ con GDI+: asistente gráfico "pitch-black" con barra lateral de pasos, página de destino con selector de carpeta y espacio en disco, consola de log en vivo, detección de DPI y estadísticas reales de la instalación. El visor, el updater, el icono y la documentación viajan incrustados como recursos.</p>
       </div>
       <div class="card reveal">
         <div class="ico">🤖</div>
@@ -621,6 +636,10 @@ artpicst_updater.exe --selftest</pre>
       <details class="faq-item reveal">
         <summary>¿Es realmente gratis?</summary>
         <p>Sí. ARTPICST es gratuito y de código abierto: úsalo, cópialo y modifícalo libremente para fines personales. No está permitida su venta ni su redistribución comercial sin autorización previa.</p>
+      </details>
+      <details class="faq-item reveal">
+        <summary>¿Necesito internet para instalarlo?</summary>
+        <p>No. El instalador es 100% autocontenido: el visor, el módulo de actualización, el icono y la documentación viajan incrustados dentro del propio ejecutable. Solo se necesita conexión para el chequeo opcional de actualizaciones.</p>
       </details>
       <details class="faq-item reveal">
         <summary>¿Necesito permisos de administrador para instalarlo?</summary>
@@ -701,6 +720,32 @@ artpicst_updater.exe --selftest</pre>
   ['caracteristicas','rendimiento','formatos','atajos','descargar','actualizar','faq'].forEach(function(id){
     var el = document.getElementById(id);
     if (el) spy.observe(el);
+  });
+
+  /* ===== Botones "Copiar" en los bloques de código ===== */
+  document.querySelectorAll('.copy-btn').forEach(function(btn){
+    btn.addEventListener('click', function(){
+      var pre = btn.closest('pre');
+      if (!pre) return;
+      var clone = pre.cloneNode(true);
+      var ghost = clone.querySelector('.copy-btn');
+      if (ghost) ghost.remove();
+      var code = clone.textContent.replace(/^\n/, '');
+      var done = function(ok){
+        btn.textContent = ok ? '¡Copiado!' : 'Error';
+        setTimeout(function(){ btn.textContent = 'Copiar'; }, 1600);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText){
+        navigator.clipboard.writeText(code).then(function(){ done(true); }, function(){ done(false); });
+      } else {
+        var ta = document.createElement('textarea');
+        ta.value = code; document.body.appendChild(ta); ta.select();
+        var ok = false;
+        try { ok = document.execCommand('copy'); } catch(e){}
+        document.body.removeChild(ta);
+        done(ok);
+      }
+    });
   });
 </script>
 </body>

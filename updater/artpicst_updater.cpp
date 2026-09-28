@@ -1087,15 +1087,29 @@ LRESULT CALLBACK UpdaterWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             }
             break;
         case WM_PAINT: {
+            // FIX PARPADEO: mismo doble búfer que instalador y visor — el
+            // progreso de descarga se repinta varias veces por segundo y el
+            // pintado directo a pantalla titilaba en cada frame.
             PAINTSTRUCT ps;
             HDC hdc = BeginPaint(hwnd, &ps);
             if (hdc) {
                 RECT client;
                 GetClientRect(hwnd, &client);
-                Graphics g(hdc);
-                g.SetSmoothingMode(SmoothingModeHighQuality);
-                g.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
-                RenderUpdater(g, static_cast<float>(client.right), static_cast<float>(client.bottom));
+                const int widthPx = (client.right - client.left > 0) ? client.right - client.left : 1;
+                const int heightPx = (client.bottom - client.top > 0) ? client.bottom - client.top : 1;
+                HDC memDc = CreateCompatibleDC(hdc);
+                HBITMAP memBmp = memDc ? CreateCompatibleBitmap(hdc, widthPx, heightPx) : nullptr;
+                HGDIOBJ oldBmp = memBmp ? SelectObject(memDc, memBmp) : nullptr;
+                if (memDc && memBmp) {
+                    Graphics g(memDc);
+                    g.SetSmoothingMode(SmoothingModeHighQuality);
+                    g.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
+                    RenderUpdater(g, static_cast<float>(client.right), static_cast<float>(client.bottom));
+                    BitBlt(hdc, 0, 0, widthPx, heightPx, memDc, 0, 0, SRCCOPY);
+                    SelectObject(memDc, oldBmp);
+                    DeleteObject(memBmp);
+                }
+                if (memDc) DeleteDC(memDc);
             }
             EndPaint(hwnd, &ps);
             return 0;

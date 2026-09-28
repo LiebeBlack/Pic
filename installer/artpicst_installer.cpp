@@ -97,24 +97,24 @@ const wchar_t UNINSTALL_REG_KEY[] = L"Software\\Microsoft\\Windows\\CurrentVersi
 const wchar_t APP_URL[]        = L"https://github.com/LiebeBlack/Pic";
 
 // ============================================================================
-// Paleta "Pitch-Black Neon" (#000000 fondo, #0A0A0A paneles, neón exacto)
+// Paleta "Midnight Sapphire" (azul noche profundo + zafiro -> violeta)
 // ============================================================================
-const Color COL_BG(255, 0, 0, 0);                      // #000000 fondo principal
-const Color COL_PANEL(255, 10, 10, 10);                // #0A0A0A paneles / encabezado
-const Color COL_PANEL_DEEP(255, 8, 8, 10);             // paneles hundidos (log, caja licencia)
-const Color COL_PANEL_BORDER(255, 32, 38, 50);
-const Color COL_ACCENT_A(255, 0, 240, 255);            // #00F0FF cian neón
-const Color COL_ACCENT_B(255, 112, 0, 255);            // #7000FF púrpura neón
-const Color COL_TEXT(255, 236, 240, 246);
-const Color COL_TEXT_SOFT(255, 150, 160, 178);
-const Color COL_TEXT_DIM(255, 100, 110, 128);
-const Color COL_BTN_GHOST(255, 18, 20, 26);
-const Color COL_BTN_GHOST_HOT(255, 28, 32, 42);
-const Color COL_BTN_GHOST_BORDER(255, 44, 52, 68);
-const Color COL_BTN_GHOST_BORDER_HOT(255, 0, 240, 255);
-const Color COL_SUCCESS(255, 60, 230, 140);
-const Color COL_ERROR(255, 255, 84, 92);
-const Color COL_WARN(255, 255, 186, 70);
+const Color COL_BG(255, 7, 11, 22);                    // #070B16 fondo principal
+const Color COL_PANEL(255, 12, 18, 34);                // #0C1222 paneles / encabezado
+const Color COL_PANEL_DEEP(255, 9, 14, 26);            // paneles hundidos (log, caja licencia)
+const Color COL_PANEL_BORDER(255, 27, 36, 58);
+const Color COL_ACCENT_A(255, 86, 160, 255);           // #56A0FF azul zafiro
+const Color COL_ACCENT_B(255, 165, 92, 255);           // #A55CFF violeta
+const Color COL_TEXT(255, 232, 238, 251);
+const Color COL_TEXT_SOFT(255, 158, 174, 205);
+const Color COL_TEXT_DIM(255, 106, 120, 150);
+const Color COL_BTN_GHOST(255, 20, 27, 44);
+const Color COL_BTN_GHOST_HOT(255, 31, 42, 66);
+const Color COL_BTN_GHOST_BORDER(255, 45, 58, 88);
+const Color COL_BTN_GHOST_BORDER_HOT(255, 86, 160, 255);
+const Color COL_SUCCESS(255, 64, 214, 156);
+const Color COL_ERROR(255, 255, 107, 107);
+const Color COL_WARN(255, 250, 190, 80);
 const Color COL_DISABLED_TEXT(255, 92, 100, 116);
 
 // Tamaño de diseño (unidades lógicas 96 DPI); la ventana se escala por g_scale
@@ -134,6 +134,12 @@ const float RIGHT_MARGIN = 40.0f;   // margen derecho del contenido
 unsigned long long g_bytesDeployed = 0;
 int g_shortcutsCreated = 0;
 
+// Sincronización de repintado parcial (anti-parpadeo): el temporizador de
+// progreso solo invalida las regiones cuyo contenido cambió desde el último
+// fotograma pintado.
+int g_paintedTenth = -1;      // décimas de segundo ya pintadas en la UI
+int g_paintedLogSize = -1;    // líneas de log ya pintadas en la consola
+
 // Duración exacta de la simulación de instalación/actualización y desinstalación.
 constexpr double kInstallDurationSeconds = 34.0;
 constexpr double kUninstallDurationSeconds = 14.0;
@@ -151,6 +157,8 @@ enum HoverZone {
     HOVER_NEXT,
     HOVER_CANCEL,
     HOVER_BROWSE,
+    HOVER_WEB,
+    HOVER_CHECK,
     HOVER_ROW_DESKTOP,
     HOVER_ROW_STARTMENU,
     HOVER_ROW_ASSOC
@@ -201,6 +209,7 @@ struct InstallerState {
     std::wstring updatePayloadPath;
     bool relaunchAfterUpdate = true;
     bool keepUserConfig = true;   // desinstalación: conservar config del usuario
+    bool launchOnFinish = true;   // página final: ejecutar ARTPICST al cerrar
 
     // Página "Destino" (rediseño): hechos calculados al entrar en el paso.
     unsigned long long destFreeBytes = 0;        // espacio libre en la unidad
@@ -1440,6 +1449,15 @@ struct Fonts {
           fMono(&monoFamily, 11.0f, FontStyleRegular, UnitPixel) {}
 };
 
+// Caché global de fuentes: las clases Font/FontFamily de GDI+ son caras de
+// construir y ANTES se recreaban en cada repintado (~30/s durante la
+// instalación). Con el doble búfer + esta caché el repintado del progreso es
+// O(1) sin parpadeo ni tirones.
+Fonts& SharedFonts() {
+    static Fonts instance;   // construcción perezosa tras GdiplusStartup
+    return instance;
+}
+
 static void DrawLogo(Graphics& g, const Fonts& fonts, float cx, float cy, float size) {
     const RectF tile(cx - size * 0.5f, cy - size * 0.5f, size, size);
     FillRoundGradient(g, tile, size * 0.24f, COL_ACCENT_A, COL_ACCENT_B);
@@ -1448,7 +1466,7 @@ static void DrawLogo(Graphics& g, const Fonts& fonts, float cx, float cy, float 
     DrawTextIn(g, L"A", tile, fonts.fLogo, Color(255, 255, 255, 255), true, true);
 }
 
-// Fondo general negro puro + barra de acento superior (cian -> violeta).
+// Fondo Midnight Sapphire con resplandores zafiro/violeta + barra superior.
 static void DrawChrome(Graphics& g, const Fonts&, float W, float H) {
     SolidBrush bg(COL_BG);
     g.FillRectangle(&bg, 0.0f, 0.0f, W, H);
@@ -1600,17 +1618,15 @@ static void DrawLogConsole(Graphics& g, const Fonts& fonts, const RectF& rc) {
     FillRound(g, rc, 10.0f, COL_PANEL_DEEP);
     StrokeRound(g, rc, 10.0f, COL_PANEL_BORDER, 1.0f);
 
-    // Cabecera del panel
-    RectF headLabel(rc.X + 16.0f, rc.Y + 10.0f, rc.Width - 90.0f, 14.0f);
+    // Cabecera del panel (el cronómetro vive bajo la barra de progreso:
+    // aquí solo el título — el reloj duplicado quedaba congelado entre
+    // invalidaciones de la consola).
+    RectF headLabel(rc.X + 16.0f, rc.Y + 10.0f, rc.Width - 32.0f, 14.0f);
     DrawTextIn(g, L"CONSOLA DE INSTALACIÓN", headLabel, fonts.fLabel, COL_TEXT_DIM, false, true);
-    wchar_t elapsed[32] = {};
-    swprintf(elapsed, 32, L"t = %.1f s", g_state.workElapsed);
-    RectF headTime(rc.X + rc.Width - 96.0f, rc.Y + 10.0f, 80.0f, 14.0f);
-    DrawTextIn(g, elapsed, headTime, fonts.fTiny, COL_ACCENT_A, false, true, StringTrimmingNone, true);
 
     const float padX = 16.0f;
     const float lineH = 17.0f;
-    const float listTop = rc.Y + 34.0f;
+    const float listTop = rc.Y + 30.0f;
     const float listBottom = rc.Y + rc.Height - 12.0f;
     const int visible = static_cast<int>((listBottom - listTop) / lineH);
     if (visible <= 0) return;
@@ -1669,6 +1685,12 @@ struct LayoutRects {
     RectF browse;
     RectF rows[3];
     int rowCount = 0;
+    // Zonas animadas durante el trabajo (invalidación selectiva sin parpadeo).
+    RectF work;
+    RectF time;
+    RectF log;
+    RectF web;
+    RectF check;
 };
 
 float DesignX(int physicalX) { return static_cast<float>(physicalX) / g_scale; }
@@ -1685,6 +1707,14 @@ LayoutRects ComputeLayout(float W, float H) {
     r.back = RectF(contentX, buttonY, 124.0f, buttonH);
     r.cancel = RectF(contentRight - 76.0f, 64.0f, 76.0f, 24.0f);   // bajo la banda del encabezado
     r.browse = RectF(contentX, 158.0f, 118.0f, 30.0f);
+    r.work = RectF(contentX, 42.0f, contentRight - contentX, 104.0f);
+    r.time = RectF(contentX, 128.0f, 140.0f, 16.0f);
+    r.log = RectF(contentX, 152.0f, contentRight - contentX, H - 152.0f - 62.0f);
+    {
+        const float rowW = ((contentRight - contentX) - 12.0f) * 0.5f;
+        r.web = RectF(contentX, 312.0f, rowW, 36.0f);
+        r.check = RectF(contentX + rowW + 12.0f, 312.0f, rowW, 36.0f);
+    }
 
     if (g_state.currentStep == WizardStep::License || g_state.currentStep == WizardStep::UninstallConfirm) {
         const float rowH = 36.0f;
@@ -1707,6 +1737,11 @@ int HoverZoneAt(const LayoutRects& r, float lx, float ly) {
     };
     if (hit(r.cancel)) return HOVER_CANCEL;
     if (g_state.currentStep == WizardStep::Destination && hit(r.browse)) return HOVER_BROWSE;
+    if (g_state.currentStep == WizardStep::Complete && g_state.installSucceeded &&
+        g_state.mode != AppMode::Uninstall) {
+        if (hit(r.web)) return HOVER_WEB;
+        if (hit(r.check)) return HOVER_CHECK;
+    }
     if (g_state.currentStep == WizardStep::License ||
         g_state.currentStep == WizardStep::Destination ||
         g_state.currentStep == WizardStep::UninstallConfirm) {
@@ -1986,28 +2021,39 @@ void RenderWorking(Graphics& g, const Fonts& fonts, float W, float H) {
         g_state.mode == AppMode::Uninstall ? L"Desinstalando ARTPICST" :
         g_state.mode == AppMode::Update    ? L"Actualizando ARTPICST" :
                                              L"Instalando ARTPICST";
-    RectF titleRect(contentX, 46.0f, CW, 30.0f);
+    RectF titleRect(contentX, 42.0f, CW, 30.0f);
     DrawTextIn(g, title, titleRect, fonts.fHeading, COL_TEXT, true, true);
 
-    RectF statusRect(contentX, 82.0f, CW, 20.0f);
+    RectF statusRect(contentX, 76.0f, CW, 20.0f);
     DrawTextIn(g, g_state.installStatus.c_str(), statusRect, fonts.fSmall, COL_TEXT_SOFT, true, true);
 
-    const RectF track(contentX, 114.0f, CW, 10.0f);
+    // Barra de progreso REORGANIZADA: más alta (14 px), a todo el ancho del
+    // contenido, con porcentaje integrado a la derecha dentro de la banda.
+    const RectF track(contentX, 108.0f, CW, 14.0f);
     DrawProgressBar(g, track, g_state.progressShown);
-
     wchar_t percentText[32];
     swprintf(percentText, 32, L"%.0f%%", g_state.progressShown);
-    RectF pctRect(contentX, 130.0f, 120.0f, 18.0f);
-    DrawTextIn(g, percentText, pctRect, fonts.fLabel, COL_ACCENT_A, false, true, StringTrimmingNone, true);
+    RectF pctRect(track.X + track.Width - 64.0f, track.Y + 1.0f, 56.0f, 12.0f);
+    DrawTextIn(g, percentText, pctRect, fonts.fTiny, COL_TEXT, false, true,
+               StringTrimmingNone, true);
 
-    // Consola de log: se estira con la ventana (ancho/alto fluidos).
-    const RectF console(contentX, 158.0f, CW, H - 158.0f - 78.0f);
+    // Marca de tiempo a la izquierda, bajo la barra (la consola ya no
+    // duplica el cronómetro en su cabecera).
+    wchar_t timeText[32];
+    swprintf(timeText, 32, L"%.1f s", g_state.workElapsed);
+    RectF timeRect(contentX, 128.0f, 120.0f, 16.0f);
+    DrawTextIn(g, timeText, timeRect, fonts.fTiny, COL_TEXT_DIM, false, true,
+               StringTrimmingNone, true);
+
+    // Consola de log: comienza más abajo y llega hasta los botones (todo el
+    // alto extra ganado por eliminar la cabecera duplicada).
+    const RectF console(contentX, 152.0f, CW, H - 152.0f - 76.0f);
     DrawLogConsole(g, fonts, console);
 
     std::wstring dest = (g_state.mode == AppMode::Uninstall)
         ? (L"Desinstalando de: " + g_state.uninstallInfoDir)
         : (L"Destino: " + g_state.installPath);
-    RectF destRect(contentX, H - 52.0f, CW, 18.0f);
+    RectF destRect(contentX, H - 50.0f, CW, 18.0f);
     DrawTextIn(g, dest.c_str(), destRect, fonts.fTiny, COL_TEXT_DIM, true, true,
                StringTrimmingEllipsisCharacter, true);
 }
@@ -2019,21 +2065,32 @@ void RenderComplete(Graphics& g, const Fonts& fonts, float W) {
     const float cx = contentX + CW * 0.5f;
 
     if (g_state.installSucceeded) {
-        const float r = 34.0f;
-        const float cy = 118.0f;
+        // --- Sello "clásico pero moderno": disco con halo degradado y marca
+        //     de verificación, evocando los finales de los instaladores
+        //     clásicos pero con luz neón. ---
+        const float r = 32.0f;
+        const float cy = 96.0f;
+        for (int i = 3; i >= 1; --i) {
+            const float rr = r + i * 7.0f;
+            const RectF halo(cx - rr, cy - rr, rr * 2.0f, rr * 2.0f);
+            GraphicsPath haloPath;
+            RoundPath(haloPath, halo, rr);
+            SolidBrush haloBrush(Color(static_cast<BYTE>(20 - i * 5), 86, 160, 255));
+            g.FillPath(&haloBrush, &haloPath);
+        }
         const RectF ring(cx - r, cy - r, r * 2.0f, r * 2.0f);
         GraphicsPath ringPath;
         RoundPath(ringPath, ring, r);
         SolidBrush ringBrush(COL_SUCCESS);
         g.FillPath(&ringBrush, &ringPath);
-        DrawCheckMark(g, cx - 14.0f, cy + 1.0f, cx - 4.0f, cy + 11.0f, cx + 15.0f, cy - 11.0f, 4.0f,
+        DrawCheckMark(g, cx - 13.0f, cy + 1.0f, cx - 4.0f, cy + 10.0f, cx + 14.0f, cy - 10.0f, 4.0f,
                       Color(255, 255, 255, 255));
 
         const wchar_t* title =
             g_state.mode == AppMode::Uninstall ? L"Desinstalación completada" :
             g_state.mode == AppMode::Update    ? L"Actualización completada" :
                                                  L"Instalación completada";
-        RectF titleRect(contentX, 172.0f, CW, 40.0f);
+        RectF titleRect(contentX, 142.0f, CW, 38.0f);
         DrawTextIn(g, title, titleRect, fonts.fTitle, COL_TEXT, true, true);
 
         std::wstring sub;
@@ -2044,30 +2101,56 @@ void RenderComplete(Graphics& g, const Fonts& fonts, float W) {
         } else {
             sub = L"Gracias por elegir ARTPICST.  " + g_state.installPath;
         }
-        RectF subRect(contentX, 218.0f, CW, 22.0f);
+        RectF subRect(contentX, 184.0f, CW, 22.0f);
         DrawTextIn(g, sub.c_str(), subRect, fonts.fSmall, COL_TEXT_SOFT, true, true,
                    StringTrimmingEllipsisCharacter, true);
 
-        // Tarjeta de estadísticas REALES de la operación.
+        // --- Tres tarjetas de estadísticas REALES de la operación. ---
         if (g_state.mode != AppMode::Uninstall) {
-            const RectF stats(cx - 210.0f, 258.0f, 420.0f, 100.0f);
-            FillRound(g, stats, 12.0f, COL_PANEL);
-            StrokeRound(g, stats, 12.0f, COL_PANEL_BORDER, 1.0f);
-            const wchar_t* labels[] = { L"VERSIÓN INSTALADA", L"TAMAÑO INSTALADO", L"ACCESOS DIRECTOS" };
-            const std::wstring sizes[] = {
+            const wchar_t* labels[] = { L"VERSIÓN", L"TAMAÑO", L"ACCESOS" };
+            const std::wstring values[] = {
                 std::wstring(APP_VERSION),
                 g_bytesDeployed > 0 ? FormatBytes(g_bytesDeployed) : std::wstring(L"—"),
                 std::to_wstring(g_shortcutsCreated),
             };
-            float iy = stats.Y + 14.0f;
+            const float cardW = (CW - 24.0f) / 3.0f;
+            const float cardY = 222.0f;
             for (int i = 0; i < 3; ++i) {
-                RectF labelRect(stats.X + 18.0f, iy, 190.0f, 16.0f);
-                DrawTextIn(g, labels[i], labelRect, fonts.fLabel, COL_TEXT_DIM, false, true);
-                RectF valueRect(stats.X + 212.0f, iy - 1.0f, stats.Width - 230.0f, 18.0f);
-                DrawTextIn(g, sizes[i].c_str(), valueRect, fonts.fSmall, COL_TEXT, false, true,
+                const RectF rc(contentX + i * (cardW + 12.0f), cardY, cardW, 64.0f);
+                FillRound(g, rc, 10.0f, COL_PANEL);
+                StrokeRound(g, rc, 10.0f, COL_PANEL_BORDER, 1.0f);
+                RectF v(rc.X + 12.0f, rc.Y + 11.0f, rc.Width - 24.0f, 26.0f);
+                DrawTextIn(g, values[i].c_str(), v, fonts.fBody,
+                           i == 0 ? COL_ACCENT_A : COL_TEXT, true, true,
                            StringTrimmingEllipsisCharacter, true);
-                iy += 28.0f;
+                RectF l(rc.X + 12.0f, rc.Y + 41.0f, rc.Width - 24.0f, 13.0f);
+                DrawTextIn(g, labels[i], l, fonts.fLabel, COL_TEXT_DIM, true, true);
             }
+
+            // --- Fila final clásica: enlace a la web + casilla de ejecución. ---
+            const float rowW = (CW - 12.0f) * 0.5f;
+            const RectF web(contentX, 312.0f, rowW, 36.0f);
+            const RectF check(contentX + rowW + 12.0f, 312.0f, rowW, 36.0f);
+
+            FillRound(g, web, 9.0f, COL_BTN_GHOST);
+            StrokeRound(g, web, 9.0f,
+                        g_state.hoverZone == HOVER_WEB ? COL_BTN_GHOST_BORDER_HOT : COL_BTN_GHOST_BORDER, 1.0f);
+            Pen arrow(Color(255, 86, 160, 255), 1.6f);
+            arrow.SetStartCap(LineCapRound);
+            arrow.SetEndCap(LineCapRound);
+            const float ax = web.X + 22.0f, ay = web.Y + web.Height * 0.5f;
+            g.DrawLine(&arrow, ax, ay, ax + 12.0f, ay);
+            g.DrawLine(&arrow, ax + 8.0f, ay - 4.0f, ax + 12.0f, ay);
+            g.DrawLine(&arrow, ax + 8.0f, ay + 4.0f, ax + 12.0f, ay);
+            RectF webText(web.X + 44.0f, web.Y, web.Width - 54.0f, web.Height);
+            DrawTextIn(g, L"Visitar la web de ARTPICST", webText, fonts.fSmall,
+                       g_state.hoverZone == HOVER_WEB ? COL_ACCENT_A : COL_TEXT_SOFT, false, true);
+
+            const RectF boxRect(check.X + 10.0f, check.Y + (check.Height - 18.0f) * 0.5f, 18.0f, 18.0f);
+            DrawCheckBox(g, boxRect, g_state.launchOnFinish);
+            RectF checkText(check.X + 38.0f, check.Y, check.Width - 48.0f, check.Height);
+            DrawTextIn(g, L"Ejecutar ARTPICST al cerrar", checkText, fonts.fSmall,
+                       g_state.hoverZone == HOVER_CHECK ? COL_TEXT : COL_TEXT_SOFT, false, true);
         }
     } else {
         const float r = 34.0f;
@@ -2105,7 +2188,10 @@ void RenderWindow(Graphics& g, const RECT& client) {
     const float W = static_cast<float>(client.right) / g_scale;
     const float H = static_cast<float>(client.bottom) / g_scale;
 
-    Fonts fonts;
+    // FIX ANTI-PARPADEO/LAG: las fuentes GDI+ se creaban aquí en CADA
+    // repintado (~30 veces por segundo durante la instalación). Se usa una
+    // caché global construida una sola vez.
+    const Fonts& fonts = SharedFonts();
     DrawChrome(g, fonts, W, H);
     DrawSidebar(g, fonts, W, H);
     DrawPageHeader(g, fonts, W, SubtitleForHeader());
@@ -2178,6 +2264,8 @@ void StartWork(AppMode mode) {
     g_bytesDeployed = 0;
     g_shortcutsCreated = 0;
     g_state.log.clear();
+    g_paintedTenth = -1;
+    g_paintedLogSize = -1;
     g_state.logScroll = 0;
     g_state.workTotalSeconds = (mode == AppMode::Uninstall) ? kUninstallDurationSeconds
                                                            : kInstallDurationSeconds;
@@ -2269,7 +2357,8 @@ void InvokePrimaryAction() {
                     PostMessageW(g_state.hwnd, WM_CLOSE, 0, 0);
                 }
             } else {
-                PostMessageW(g_state.hwnd, WM_CLOSE, 0, 0);
+                // Reintento idéntico al de InvokeBackAction.
+                StartWork(g_state.mode);
             }
             break;
     }
@@ -2292,11 +2381,11 @@ void InvokeBackAction() {
             PostMessageW(g_state.hwnd, WM_CLOSE, 0, 0);
             break;
         case WizardStep::Complete:
-            if (g_state.installSucceeded || g_state.mode != AppMode::Uninstall) {
+            if (g_state.installSucceeded || g_state.mode == AppMode::Uninstall) {
                 PostMessageW(g_state.hwnd, WM_CLOSE, 0, 0);
             } else {
                 // "Reintentar"
-                StartWork(g_state.mode == AppMode::Uninstall ? AppMode::Uninstall : AppMode::Install);
+                StartWork(g_state.mode);   // "Reintentar": relanza el MISMO trabajo
             }
             break;
         default:
@@ -2370,7 +2459,35 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     }
                 }
                 g_state.workElapsed = g_state.workTotalSeconds * (g_state.progressShown / 100.0);
-                InvalidateRect(hwnd, nullptr, FALSE);
+                // FIX ANTI-PARPADEO: en vez de invalidar TODA la ventana a
+                // 30 fps, solo se invalidan las regiones cuyo contenido ha
+                // cambiado desde el último fotograma pintado.
+                RECT client{};
+                GetClientRect(hwnd, &client);
+                const float W = static_cast<float>(client.right) / g_scale;
+                const float H = static_cast<float>(client.bottom) / g_scale;
+                const LayoutRects layout = ComputeLayout(W, H);
+                auto invalidateRectF = [&](const RectF& rc) {
+                    RECT phys{
+                        static_cast<LONG>(rc.X * g_scale) - 1,
+                        static_cast<LONG>(rc.Y * g_scale) - 1,
+                        static_cast<LONG>((rc.X + rc.Width) * g_scale) + 1,
+                        static_cast<LONG>((rc.Y + rc.Height) * g_scale) + 1 };
+                    InvalidateRect(hwnd, &phys, FALSE);
+                };
+                // La zona de progreso solo se repinta cuando su contenido
+                // cambia: en reposo (target alcanzado, sin líneas nuevas) la
+                // ventana queda a cero invalidaciones.
+                const int shownTenth = static_cast<int>(g_state.progressShown * 10.0);
+                if (shownTenth != g_paintedTenth) {
+                    invalidateRectF(layout.work);
+                    invalidateRectF(layout.time);
+                    g_paintedTenth = shownTenth;
+                }
+                if (static_cast<int>(g_state.log.size()) != g_paintedLogSize) {
+                    invalidateRectF(layout.log);
+                    g_paintedLogSize = static_cast<int>(g_state.log.size());
+                }
                 return 0;
             }
             if (wParam == TIMER_RELAUNCH) {
@@ -2409,8 +2526,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             const int delta = GET_WHEEL_DELTA_WPARAM(wParam);
             RECT client{};
             GetClientRect(hwnd, &client);
-            const float consoleH = static_cast<float>(client.bottom) / g_scale - 158.0f - 78.0f;
-            const int visible = static_cast<int>((consoleH - 46.0f) / 17.0f);
+            const float consoleH = static_cast<float>(client.bottom) / g_scale - 152.0f - 76.0f;
+            const int visible = static_cast<int>((consoleH - 42.0f) / 17.0f);   // cabecera 30 + margen inferior 12
             const int maxScroll = static_cast<int>(g_state.log.size()) > visible
                                       ? static_cast<int>(g_state.log.size()) - visible : 0;
             int scroll = g_state.logScroll - (delta > 0 ? 3 : -3);
@@ -2428,25 +2545,40 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (g_state.isWorking) return 0;
             return DefWindowProcW(hwnd, msg, wParam, lParam);
         case WM_PAINT: {
+            // FIX ANTI-PARPADEO: el repintado iba DIRECTO a la ventana
+            // (BeginPaint) y cada ciclo del temporizador borraba primero la
+            // región con el pincel de fondo antes de dibujar arriba: parpadeo
+            // y tirones durante el progreso. Ahora se compone todo en un
+            // bitmap de memoria y se copia en UNA sola pasada.
             PAINTSTRUCT ps;
             HDC hdc = BeginPaint(hwnd, &ps);
             if (hdc) {
-                Graphics graphics(hdc);
-                graphics.ScaleTransform(g_scale, g_scale);
-                graphics.SetCompositingQuality(CompositingQualityHighQuality);
-                graphics.SetSmoothingMode(SmoothingModeHighQuality);
-                graphics.SetPixelOffsetMode(PixelOffsetModeHalf);
-                graphics.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
-
-                graphics.SetClip(RectF(
-                    static_cast<REAL>(ps.rcPaint.left) / g_scale,
-                    static_cast<REAL>(ps.rcPaint.top) / g_scale,
-                    static_cast<REAL>(ps.rcPaint.right - ps.rcPaint.left) / g_scale,
-                    static_cast<REAL>(ps.rcPaint.bottom - ps.rcPaint.top) / g_scale));
-
                 RECT client;
                 GetClientRect(hwnd, &client);
-                RenderWindow(graphics, client);
+                const int widthPx = (client.right - client.left > 0) ? client.right - client.left : 1;
+                const int heightPx = (client.bottom - client.top > 0) ? client.bottom - client.top : 1;
+
+                HDC memDc = CreateCompatibleDC(hdc);
+                HBITMAP memBmp = memDc ? CreateCompatibleBitmap(hdc, widthPx, heightPx) : nullptr;
+                HGDIOBJ oldBmp = (memDc && memBmp) ? SelectObject(memDc, memBmp) : nullptr;
+
+                if (memDc && memBmp) {
+                    Graphics graphics(memDc);
+                    graphics.ScaleTransform(g_scale, g_scale);
+                    graphics.SetCompositingQuality(CompositingQualityHighQuality);
+                    graphics.SetSmoothingMode(SmoothingModeHighQuality);
+                    graphics.SetPixelOffsetMode(PixelOffsetModeHalf);
+                    graphics.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
+                    graphics.SetTextContrast(4000);
+
+                    RenderWindow(graphics, client);
+
+                    // Copia atómica del frame compuesto a la ventana real.
+                    BitBlt(hdc, 0, 0, widthPx, heightPx, memDc, 0, 0, SRCCOPY);
+                    SelectObject(memDc, oldBmp);
+                    DeleteObject(memBmp);
+                }
+                if (memDc) DeleteDC(memDc);
             }
             EndPaint(hwnd, &ps);
             return 0;
@@ -2486,6 +2618,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     else if (z == HOVER_NEXT) rc = &lr.next;
                     else if (z == HOVER_CANCEL) rc = &lr.cancel;
                     else if (z == HOVER_BROWSE) rc = &lr.browse;
+                    else if (z == HOVER_WEB) rc = &lr.web;
+                    else if (z == HOVER_CHECK) rc = &lr.check;
                     else if (z >= HOVER_ROW_DESKTOP && z < HOVER_ROW_DESKTOP + lr.rowCount)
                         rc = &lr.rows[z - HOVER_ROW_DESKTOP];
                     if (!rc) return;
@@ -2558,6 +2692,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (g_state.currentStep == WizardStep::Destination && hit(layout.browse, lx, ly)) {
                 BrowseForDestination();
                 return 0;
+            }
+            if (g_state.currentStep == WizardStep::Complete && g_state.installSucceeded &&
+                g_state.mode != AppMode::Uninstall) {
+                if (hit(layout.web, lx, ly)) {
+                    ShellExecuteW(hwnd, L"open", APP_URL, nullptr, nullptr, SW_SHOWNORMAL);
+                    return 0;
+                }
+                if (hit(layout.check, lx, ly)) {
+                    g_state.launchOnFinish = !g_state.launchOnFinish;
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                    return 0;
+                }
             }
             if (hit(layout.next, lx, ly)) {
                 InvokePrimaryAction();

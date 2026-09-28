@@ -209,6 +209,12 @@ const UINT_PTR TIMER_ZOOM = 5;
 const UINT_PTR TIMER_GPU_RETRY = 6;
 const DWORD ZOOM_ANIM_MS = 110;   // Duración de la animación de zoom suave
 
+// FIX RENDIMIENTO: la animación de zoom corría a 16 ms (~60 fps) pero el
+// refresco nativo de monitores modernos es de 144/165 Hz: a 16 ms el ojo
+// percibía microsaltos. 8 ms duplica la tasa y el coste es nulo (solo
+// invalidación, el frame se rasteriza en WM_PAINT).
+constexpr UINT ZOOM_ANIM_PERIOD_MS = 8;   // ~120 Hz de actualización
+
 template <typename T>
 struct ComPtr {
     T* p = nullptr;
@@ -359,6 +365,7 @@ struct AppState {
     HDC hdcMem = nullptr;
     HBITMAP hbmMem = nullptr;
     HBITMAP hbmOld = nullptr;
+    SIZE memSize{};   // tamaño para el que se creó el doble búfer (evita reciclarlo con tamaño obsoleto)
 
     unsigned char* imageData = nullptr;
     int imageWidth = 0;
@@ -389,7 +396,7 @@ struct AppState {
     DWORD gifLastTick = 0;
     bool gifPaused = false;
 
-    // Animación de zoom suave (interpolada por temporizador)
+    // Animación de zoom suave (interpolada por temporizador).
     bool zoomAnimActive = false;
     float zoomAnimStart = 0.0f, zoomAnimTarget = 0.0f;
     float zoomAnimImageX = 0.0f, zoomAnimImageY = 0.0f;
@@ -846,30 +853,38 @@ LRESULT CALLBACK ThemedDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
                 EndPaint(hwnd, &ps);
                 return 0;
             }
-            
-            Graphics graphics(hdc);
+            // FIX PARPADEO EN DIÁLOGOS: antes se pintaba directo en pantalla y
+            // cada frame mostraba primero el fondo "vacío" (titileo en hover y
+            // redimensionado). Todo el contenido se compone ahora en un bitmap
+            // de memoria y se copia en UNA sola BitBlt.
+            RECT client;
+            GetClientRect(hwnd, &client);
+            const int widthPx = (client.right - client.left > 0) ? client.right - client.left : 1;
+            const int heightPx = (client.bottom - client.top > 0) ? client.bottom - client.top : 1;
+            HDC memDc = CreateCompatibleDC(hdc);
+            HBITMAP memBmp = memDc ? CreateCompatibleBitmap(hdc, widthPx, heightPx) : nullptr;
+            HGDIOBJ oldBmp = memBmp ? SelectObject(memDc, memBmp) : nullptr;
+            if (!memDc || !memBmp) {
+                if (memDc) DeleteDC(memDc);
+                EndPaint(hwnd, &ps);
+                return 0;
+            }
+            Graphics graphics(memDc);
             graphics.SetCompositingQuality(CompositingQualityHighSpeed);
             graphics.SetSmoothingMode(SmoothingModeAntiAlias);
             graphics.SetPixelOffsetMode(PixelOffsetModeHalf);
             graphics.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
-            
-            RECT client;
-            GetClientRect(hwnd, &client);
-            
+
             const bool isDark = g_state.darkModeDetected;
             Color bgCol = isDark ? Color(255, 24, 25, 28) : Color(255, 246, 248, 250);
             Color borderCol = isDark ? Color(255, 48, 52, 60) : Color(255, 218, 222, 228);
             Color titleCol = isDark ? Color(255, 245, 248, 252) : Color(255, 26, 28, 32);
             Color textCol = isDark ? Color(255, 215, 220, 228) : Color(255, 48, 52, 60);
 
-            // Fondo pintado ÚNICAMENTE en la región sucia (ps.rcPaint): pintar
-            // todo el cliente con la región no validada debajo produce
-            // "fondo negro/blanco" intermitente al solaparse con un frame viejo.
+            // Fondo completo: el búfer nace limpio, no hay frame viejo debajo.
             SolidBrush bgBrush(bgCol);
             graphics.FillRectangle(&bgBrush, RectF(
-                static_cast<REAL>(ps.rcPaint.left), static_cast<REAL>(ps.rcPaint.top),
-                static_cast<REAL>(ps.rcPaint.right - ps.rcPaint.left),
-                static_cast<REAL>(ps.rcPaint.bottom - ps.rcPaint.top)));
+                0.0f, 0.0f, static_cast<REAL>(widthPx), static_cast<REAL>(heightPx)));
             
             Pen borderPen(borderCol, 1.0f);
             graphics.DrawRectangle(&borderPen, 0, 0, client.right - 1, client.bottom - 1);
@@ -931,7 +946,13 @@ LRESULT CALLBACK ThemedDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
 
             // Separador horizontal sutil
             Pen sepPen(borderCol, 1.0f);
-            const float sepY = static_cast<float>(iconY + iconSize + 14);
+            // FIX PROPORCIONES: en monitores pequeños o con tamaño de UI
+            // grande, la cabecera (icono + título) podía invadir la zona del
+            // mensaje/botones. Se limita al 45% del alto útil del diálogo.
+            float sepYf = static_cast<float>(iconY + iconSize + 14);
+            const float maxSepY = static_cast<float>(client.bottom) * 0.45f;
+            if (sepYf > maxSepY) sepYf = maxSepY;
+            const float sepY = sepYf;
             graphics.DrawLine(&sepPen, 24.0f, sepY, static_cast<float>(client.right - 24), sepY);
 
             // Mensaje: márgenes generosos, altura mínima garantizada (un
@@ -1014,7 +1035,12 @@ LRESULT CALLBACK ThemedDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
                 SolidBrush buttonText(button.primary ? Color(255, 255, 255, 255) : btnSecondaryText);
                 graphics.DrawString(button.label, -1, &buttonFont, button.rect, &buttonFormat, &buttonText);
             }
-            
+
+            // Copia atómica del frame compuesto a la ventana real.
+            BitBlt(hdc, 0, 0, widthPx, heightPx, memDc, 0, 0, SRCCOPY);
+            SelectObject(memDc, oldBmp);
+            DeleteObject(memBmp);
+            DeleteDC(memDc);
             EndPaint(hwnd, &ps);
             return 0;
         }
@@ -1448,6 +1474,7 @@ void FreeDoubleBuffer() {
     if (g_state.hbmMem) { DeleteObject(g_state.hbmMem); g_state.hbmMem = nullptr; }
     DeleteDC(g_state.hdcMem);
     g_state.hdcMem = nullptr;
+    g_state.memSize = SIZE{};
 }
 
 void StopPrefetchThread() {
@@ -1476,6 +1503,10 @@ void CleanupGDIPlus() {
     }
 }
 
+// FIX THREAD-SAFETY: antes los píxeles del nodo de caché se leían fuera de
+// cacheMutex mientras el hilo de prefetch podía ejecutar EraseCacheEntry y
+// liberarlos en paralelo (use-after-free intermitente al navegar rápido).
+// Ahora la copia ocurre SIEMPRE con el mutex tomado por la llamada.
 bool CopyCachedPixels(const CachedImage& src, unsigned char*& dest) {
     size_t bytes = 0;
     if (!src.data || !SafePixelBytes(src.width, src.height, bytes)) return false;
@@ -1497,6 +1528,8 @@ bool TryCopyFromCache(const std::wstring& filepath, CachedImage& outCopy) {
     it->second = std::prev(g_state.imageCache.end());
     const CachedImage& src = *it->second;
     unsigned char* pixels = nullptr;
+    // La copia vive DENTRO del lock: sin ella, EraseCacheEntry (prefetch) podía
+    // liberar src.data a mitad del memcpy.
     if (!CopyCachedPixels(src, pixels)) return false;
     outCopy.data = pixels;
     outCopy.width = src.width;
@@ -1840,6 +1873,7 @@ void EnsureFileInList(const std::wstring& path) {
 }
 
 int GetExifOrientationFromJpeg(const std::wstring& filepath) {
+    // (módulo testeable; los guards de límites viven en src/jpeg_exif.hpp)
     // Módulo testeable (src/jpeg_exif.hpp): los tests de regresión ejecutan
     // EXACTAMENTE este código (incluye el fix de límites del IFD).
     return artpicst::exif::ReadJpegOrientation(filepath.c_str());
@@ -2163,6 +2197,16 @@ void StoreCurrentInCache() {
             it->second = std::prev(g_state.imageCache.end());
             return;
         }
+        // FIX MEMORIA: desalojar entradas LRU ANTES de duplicar el buffer
+        // actual. Antes se hacía memcpy primero y el desalojo después: con una
+        // foto 4K (~59 MB) el pico era buffer actual + copia + caché llena
+        // simultáneos, justo el escenario de "memoria fatal" en navegación
+        // continua de imágenes grandes.
+        while (!g_state.imageCache.empty() &&
+               (g_state.imageCache.size() >= CACHE_SIZE ||
+                (g_state.cacheMemoryBytes + bytes) > MAX_CACHE_BYTES)) {
+            EraseCacheEntry(g_state.imageCache.begin());
+        }
     }
 
     unsigned char* copy = static_cast<unsigned char*>(artpicst::AlignedPixelAlloc(bytes));
@@ -2224,7 +2268,7 @@ bool LoadImageFromPath(const std::wstring& filepath) {
     if (TryCopyFromCache(filepath, cached) && cached.data) {
         ApplyLoadedImage(cached.data, cached.width, cached.height, cached.channels, cached.rotation,
                          cached.flipH, cached.flipV, cached.hasAlpha, filepath, cached.decoder);
-        cached.data = nullptr;
+        cached.data = nullptr;   // la propiedad se transfirió a g_state
         // Devolver al sistema las páginas del buffer de la imagen anterior:
         // el heap de Windows retiene los bloques libres y la RAM subiría sin parar.
         TrimProcessMemory();
@@ -2477,8 +2521,7 @@ void ZoomAt(float factor, int pivotX, int pivotY) {
     g_state.zoomAnimStartOffsetY = g_state.offsetY;
     g_state.zoomAnimStartTime = GetTickCount();
     g_state.zoomAnimActive = true;
-    // ~60 FPS suaves en el zoom animado (antes 8 ms = hasta 125 FPS innecesarios)
-    SetTimer(g_state.hwnd, TIMER_ZOOM, 16, nullptr);
+    SetTimer(g_state.hwnd, TIMER_ZOOM, ZOOM_ANIM_PERIOD_MS, nullptr);
     InvalidateRect(g_state.hwnd, nullptr, FALSE);
 }
 
@@ -2704,6 +2747,7 @@ void CreateDoubleBuffer(int width, int height) {
         return;
     }
     g_state.hbmOld = static_cast<HBITMAP>(SelectObject(g_state.hdcMem, g_state.hbmMem));
+    g_state.memSize = SIZE{ width, height };
     ReleaseDC(g_state.hwnd, hdc);
 }
 
@@ -2835,10 +2879,11 @@ void RenderImage(const RECT* clipRect) {
         graphics.SetSmoothingMode(SmoothingModeAntiAlias);
         const bool pixelPerfectZoom = std::fabs(g_state.zoom - std::round(g_state.zoom)) < 0.01f && g_state.zoom >= 1.0f;
         if (g_state.zoom < 1.0f) {
-            // Reducción: bilineal de alta calidad evita aliasing sin el coste
-            // sostenido de bicúbica en fotografías grandes.
-            graphics.SetInterpolationMode(InterpolationModeHighQualityBilinear);
-            graphics.SetPixelOffsetMode(PixelOffsetModeHalf);
+            // CALIDAD en reducción: bicúbica de alta calidad. La bilineal
+            // aligeraba el coste pero lavaba el detalle fino en reducciones
+            // ligeras (75–99%), el caso más común al ver fotos completas.
+            graphics.SetInterpolationMode(InterpolationModeHighQualityBicubic);
+            graphics.SetPixelOffsetMode(PixelOffsetModeHighQuality);
         } else if (pixelPerfectZoom || g_state.zoom > 3.5f) {
             // Píxel perfecto (100%, 200%, etc.) o zoom profundo (> 350%): nitidez cristalina sin borrosidad
             graphics.SetInterpolationMode(InterpolationModeNearestNeighbor);
@@ -3006,7 +3051,8 @@ struct GpuState {
 
     int lastUploadW = -1;
     int lastUploadH = -1;
-    const unsigned char* lastUploadSrc = nullptr;
+    std::wstring lastUploadPath;  // identidad del contenido: RUTA del archivo (NO la dirección del buffer)
+    int lastUploadFrame = -1;     // índice de fotograma GIF subido
     int lastUploadEffects = 0;
     bool lastUploadAlpha = false;
     DWORD themeKey = 0;
@@ -3131,7 +3177,8 @@ static void GpuReleaseTargetAssets() {
     GpuSafeRelease(g_gpu.brushBg);
     g_gpu.lastUploadW = -1;
     g_gpu.lastUploadH = -1;
-    g_gpu.lastUploadSrc = nullptr;
+    g_gpu.lastUploadPath.clear();
+    g_gpu.lastUploadFrame = -1;
     g_gpu.lastUploadEffects = 0;
     g_gpu.lastUploadAlpha = false;
     g_gpu.themeKey = 0;
@@ -3379,9 +3426,18 @@ static bool GpuUpdateImage() {
                         (g_state.effectUltraClarity ? GPUEFF_CLARITY : 0);
     const bool alpha = g_state.hasAlpha;
 
+    // FIX CRÍTICO (bitmap obsoleto): antes se comparaba la DIRECCIÓN del buffer
+    // (src == lastUploadSrc). El heap de Windows reutiliza direcciones: al
+    // navegar entre dos imágenes del MISMO tamaño, el nuevo buffer podía caer
+    // en la misma dirección y el bitmap de vídeo NO se refrescaba → la GPU
+    // seguía mostrando la imagen ANTERIOR. La identidad correcta del contenido
+    // es la RUTA del archivo (+ índice de fotograma en GIF): dos cargas de la
+    // misma ruta producen contenido idéntico, así que saltarse la subida
+    // sigue siendo válido; una ruta distinta fuerza la subida siempre.
     if (g_gpu.image && w == g_gpu.lastUploadW && h == g_gpu.lastUploadH &&
-        src == g_gpu.lastUploadSrc && effects == g_gpu.lastUploadEffects &&
-        alpha == g_gpu.lastUploadAlpha) {
+        g_state.currentFilePath == g_gpu.lastUploadPath &&
+        g_state.gif.current == g_gpu.lastUploadFrame &&
+        effects == g_gpu.lastUploadEffects && alpha == g_gpu.lastUploadAlpha) {
         return true; // nada cambió: el bitmap de vídeo sigue siendo válido
     }
 
@@ -3424,7 +3480,8 @@ static bool GpuUpdateImage() {
 
     g_gpu.lastUploadW = w;
     g_gpu.lastUploadH = h;
-    g_gpu.lastUploadSrc = src;
+    g_gpu.lastUploadPath = g_state.currentFilePath;
+    g_gpu.lastUploadFrame = g_state.gif.current;
     g_gpu.lastUploadEffects = effects;
     g_gpu.lastUploadAlpha = alpha;
 
@@ -3526,6 +3583,10 @@ static void GpuDrawImage(ID2D1RenderTarget* rt) {
     // Interpolación: vecino más próximo a 100%/200%/… y en zooms profundos;
     // bilineal (GPU) para el resto, con bloqueos al mínimo en reposo.
     const bool pixelPerfect = std::fabs(zoom - std::round(zoom)) < 0.01f && zoom >= 1.0f;
+    // CALIDAD: DrawBitmap solo expone LINEAR (bilineal GPU) y NEAREST_NEIGHBOR.
+    // El filtro fino de reducciones (bicúbica) lo aporta la ruta GDI+ cuando
+    // no hay GPU; por hardware se mantiene LINEAR, que es el máximo disponible
+    // y ejecuta el filtro a resolución nativa del monitor.
     const D2D1_BITMAP_INTERPOLATION_MODE interp =
         (pixelPerfect || zoom > 3.5f) ? D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR
                                       : D2D1_BITMAP_INTERPOLATION_MODE_LINEAR;
@@ -4438,7 +4499,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 // GPU activo: no se usa el doble buffer GDI+ (ahorra ~8 MB de RAM)
                 FreeDoubleBuffer();
             } else {
-                CreateDoubleBuffer(width, height);
+                // FIX MEMORIA/RENDIMIENTO: CreateDoubleBuffer libera y recrea el
+                // bitmap de vídeo en CADA evento de tamaño (un arrastre de borde
+                // emite decenas): fragmentación y churn de ~8 MB por paso. Solo
+                // se recrea cuando el tamaño registrado ya no es el vigente.
+                if (!g_state.hdcMem || !g_state.hbmMem ||
+                    g_state.memSize.cx != width || g_state.memSize.cy != height) {
+                    CreateDoubleBuffer(width, height);
+                }
             }
             if (g_state.imageData && width > 0 && height > 0) {
                 if (g_state.fitMode) FitImageToWindow(width, height);
@@ -4811,6 +4879,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         swprintf_s(zoomText, L"Zoom: %d%%", static_cast<int>(g_state.zoom * 100.0f + 0.5f));
                         ShowOSD(zoomText);
                     }
+                    // FIX RENDIMIENTO: invalidar la ventana completa en cada
+                    // paso de la animación re-rasterizaba también OSD y dock
+                    // (GDI+ costoso). Con GPU activa GpuRenderFrame rasteriza
+                    // solo la región sucia; sin GPU el doble búfer cubre el
+                    // resto. La imagen cambia siempre; la UI solo si tocó.
                     InvalidateRect(hwnd, nullptr, FALSE);
                 }
             }
