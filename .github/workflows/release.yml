@@ -25,7 +25,7 @@ jobs:
         with:
           arch: x64
 
-      - name: Definir versión (fecha UTC: auto-<run>-YYYYMMDD)
+      - name: "Definir versión (fecha UTC: auto-<run>-YYYYMMDD)"
         shell: powershell
         run: |
           # Esquema estandarizado: los builds de la línea continua usan
