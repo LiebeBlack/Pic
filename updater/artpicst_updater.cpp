@@ -129,6 +129,7 @@ constexpr UINT WM_UPD_UPTODATE = WM_APP + 0x32;  // ya en la última versión
 constexpr UINT WM_UPD_CHECK_NO = WM_APP + 0x33;  // --check: sin actualización
 constexpr UINT WM_UPD_CHECK_YES = WM_APP + 0x34; // --check: con actualización
 constexpr UINT WM_UPD_FAILED = WM_APP + 0x35;    // fallo de descarga/instalación
+constexpr UINT WM_UPD_SHOW_ASK = WM_APP + 0x36;  // ASÍNCRONO: resultado "actualización disponible"
 constexpr UINT WM_QUIT_APP = WM_APP + 0x30;      // cierre controlado desde hilo
 
 // Único estado mutable compartido entre el hilo de red y la UI (protegido).
@@ -723,6 +724,10 @@ void UpdateWorkerThread(bool silentStart) {
             PostMessageW(g_hwnd, WM_APP + 0x32, 0, 0);   // "Estás al día"
         }
         if (g_cfg.checkOnly) PostMessageW(g_hwnd, WM_APP + 0x33, 0, 0);
+        // FIX COLGADO: en el chequeo diario sin forzar la ventana visible
+        // (vista "Comprobando...") se quedaba abierta y el proceso no moría:
+        // nadie publicaba el cierre. Cierre silencioso e inmediato.
+        if (g_hwnd) PostMessageW(g_hwnd, WM_QUIT_APP, 0, 0);
         g_workerActive = false;
         return;
     }
@@ -748,12 +753,13 @@ void UpdateWorkerThread(bool silentStart) {
         return;
     }
 
-    // Modo interactivo: mostrar la notificación flotante.
+    // Modo interactivo: ASÍNCRONO. FIX CRÍTICO: el worker (hilo de red) llamaba
+    // a ShowWindow/InvalidateRect directamente sobre una ventana creada en el
+    // hilo de UI — cross-thread puede bloquear la UI (la ventana quedaba "No
+    // responde" hasta que la red respondía). Ahora solo se publica un mensaje
+    // y el hilo de UI hace TODO el trabajo de ventana.
     g_upd.phase = UpdatePhase::Available;
-    if (g_hwnd) {
-        ShowWindow(g_hwnd, SW_SHOWNOACTIVATE);
-        InvalidateRect(g_hwnd, nullptr, TRUE);
-    }
+    if (g_hwnd) PostMessageW(g_hwnd, WM_UPD_SHOW_ASK, 0, 0);
     g_workerActive = false;
 }
 
@@ -785,16 +791,16 @@ const Color COL_SUCCESS(255, 60, 230, 140);
 const Color COL_ERROR(255, 255, 84, 92);
 const Color COL_WARN(255, 255, 186, 70);
 
-enum HoverZone { UZ_NONE = 0, UZ_INSTALL, UZ_LATER, UZ_CHECKBOX, UZ_CLOSE, UZ_RETRY };
-enum class UpdView { Ask, Downloading, Toast };
+enum HoverZone { UZ_NONE = 0, UZ_INSTALL, UZ_LATER, UZ_CHECKBOX, UZ_CLOSE, UZ_RETRY, UZ_MORE };
+enum class UpdView { Checking, Ask, Downloading, Toast };
 
-UpdView  g_view = UpdView::Ask;
+UpdView  g_view = UpdView::Checking;   // la ventana nace en "Comprobando..."
 int      g_hover = UZ_NONE;
 bool     g_autoInstallChecked = false;   // checkbox de la notificación
 bool     g_mouseTracking = false;
 float    g_scale = 1.0f;
 
-struct UiRects { RectF install, later, checkbox, close, retry; float toastH; };
+struct UiRects { RectF install, later, checkbox, close, retry, more; float toastH; };
 
 UiRects ComputeUiRects(float W, float H) {
     UiRects r{};
@@ -802,12 +808,15 @@ UiRects ComputeUiRects(float W, float H) {
         r.close = RectF(W - 40.0f, 10.0f, 26.0f, 26.0f);
     } else if (g_view == UpdView::Toast) {
         r.toastH = H;
+    } else if (g_view == UpdView::Checking) {
+        r.close = RectF(W - 34.0f, 10.0f, 22.0f, 22.0f);   // cerrable durante el chequeo
     } else {
         const float btnY = H - 44.0f;
         r.install = RectF(W - 190.0f, btnY, 176.0f, 32.0f);
         r.later   = RectF(14.0f, btnY, 132.0f, 32.0f);
-        r.checkbox = RectF(16.0f, btnY - 34.0f, W - 60.0f, 20.0f);
+        r.checkbox = RectF(16.0f, btnY - 30.0f, W - 60.0f, 20.0f);
         r.close   = RectF(W - 34.0f, 10.0f, 22.0f, 22.0f);
+        r.more    = RectF(14.0f, 132.0f, W - 28.0f, 16.0f);
     }
     return r;
 }
@@ -912,8 +921,25 @@ void RenderUpdater(Graphics& g, float W, float H) {
 
     DrawLogoMark(g, fonts, RectF(14.0f, 14.0f, 34.0f, 34.0f));
     RectF headRect(58.0f, 14.0f, W - 96.0f, 20.0f);
-    DrawTextIn(g, L"ACTUALIZACIÓN DISPONIBLE", headRect, fonts.label, COL_ACCENT_A, false, true,
-               StringTrimmingNone, true);
+    DrawTextIn(g, g_view == UpdView::Checking ? L"COMPROBANDO ACTUALIZACIONES…" : L"ACTUALIZACIÓN DISPONIBLE",
+               headRect, fonts.label, COL_ACCENT_A, false, true, StringTrimmingNone, true);
+
+    if (g_view == UpdView::Checking) {
+        // Vista intermedia asíncrona: la ventana aparece AL INSTANTE (sin
+        // esperar a la red) y es cerrable; al llegar el resultado se transforma
+        // en la vista Ask (o se cierra sola si no hay novedades).
+        RectF msg(14.0f, 44.0f, W - 28.0f, 22.0f);
+        DrawTextIn(g, L"Consultando GitHub Releases…", msg, fonts.title, COL_TEXT, false, true,
+                   StringTrimmingEllipsisCharacter, true);
+        RectF hint(14.0f, 70.0f, W - 28.0f, 40.0f);
+        DrawTextIn(g, L"Se comparará tu versión instalada con la última publicada.\nPuedes cerrar esta ventana sin esperar.",
+                   hint, fonts.smallFont, COL_TEXT_SOFT, false, true);
+        const RectF& c = r.close;
+        FillRound(g, c, 6.0f, g_hover == UZ_CLOSE ? COL_BTN_HOT : COL_BTN);
+        StrokeRound(g, c, 6.0f, g_hover == UZ_CLOSE ? COL_BTN_BORDER_HOT : COL_BTN_BORDER, 1.0f);
+        DrawTextIn(g, L"✕", c, fonts.smallFont, g_hover == UZ_CLOSE ? COL_TEXT : COL_TEXT_SOFT, true, true);
+        return;
+    }
 
     if (g_view == UpdView::Downloading) {
         RectF title(14.0f, 44.0f, W - 28.0f, 22.0f);
@@ -960,9 +986,23 @@ void RenderUpdater(Graphics& g, float W, float H) {
     DrawTextIn(g, titleText.c_str(), title, fonts.title, COL_TEXT, false, true,
                StringTrimmingEllipsisCharacter, true);
 
-    RectF body(14.0f, 64.0f, W - 28.0f, 46.0f);
-    const std::wstring notes = CleanReleaseNotes(g_upd.release.body, 180);
+    // Changelog sincronizado: las notas de la RELEASE de GitHub viajan dentro
+    // del propio JSON de la API (release.body) — siempre es el texto oficial.
+    RectF body(14.0f, 64.0f, W - 28.0f, 66.0f);
+    const std::wstring notes = CleanReleaseNotes(g_upd.release.body, 320);
     DrawTextIn(g, notes.c_str(), body, fonts.body, COL_TEXT_SOFT, false, false);
+
+    // Enlace al changelog completo en GitHub Releases.
+    const RectF more(14.0f, 132.0f, W - 28.0f, 16.0f);
+    const bool moreHot = (g_hover == UZ_MORE);
+    DrawTextIn(g, L"Ver el changelog completo en GitHub →", more, fonts.smallFont,
+               moreHot ? Color(255, 130, 210, 255) : COL_ACCENT_A, false, true,
+               StringTrimmingEllipsisCharacter, true);
+    if (moreHot) {
+        Pen underline(Color(255, 130, 210, 255), 1.0f);
+        g.DrawLine(&underline, more.X, more.Y + more.Height - 1.0f,
+                   more.X + 208.0f, more.Y + more.Height - 1.0f);
+    }
 
     // Checkbox "Instalar actualizaciones automáticas en segundo plano en el futuro"
     const RectF cb = r.checkbox;
@@ -1006,6 +1046,7 @@ int HitZoneAt(float W, float H, float x, float y) {
     if (hit(r.later, x, y)) return UZ_LATER;
     if (hit(r.checkbox, x, y)) return UZ_CHECKBOX;
     if (hit(r.close, x, y)) return UZ_CLOSE;
+    if (hit(r.more, x, y)) return UZ_MORE;
     return UZ_NONE;
 }
 
@@ -1023,9 +1064,15 @@ void OnInstallNow() {
     SetTimer(g_hwnd, 2, 33, nullptr);   // repintar progreso ~30 fps
     InvalidateRect(g_hwnd, nullptr, TRUE);
 
+    // FIX CRASH: antes el hilo se lanzaba con detach() y WM_DESTROY hacia
+    // join() de una variable NUNCA asignada — el join era inútil y el proceso
+    // podía morir a mitad de descarga (instalador .part corrupto). Ahora el
+    // hilo vive en g_downloadThread: WM_DESTROY lo espera de verdad.
     // Copia propia del asset: el hilo puede sobrevivir a un Reset() del
     // release global (p. ej. si el usuario relanza una comprobación).
-    std::thread([assetCopy = *asset]() {
+    if (g_downloadThread.joinable()) g_downloadThread.join();   // por si acaso
+    const GithubAsset assetCopy = *asset;
+    g_downloadThread = std::thread([assetCopy]() {
         std::wstring file;
         if (DownloadInstaller(assetCopy, file)) {
             g_upd.downloadedFile = file;
@@ -1042,7 +1089,7 @@ void OnInstallNow() {
             g_upd.phase = UpdatePhase::Failed;
             PostMessageW(g_hwnd, WM_APP + 0x35, 0, 0);
         }
-    }).detach();
+    });
 }
 
 LRESULT CALLBACK UpdaterWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -1177,6 +1224,12 @@ LRESULT CALLBACK UpdaterWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             } else if (zone == UZ_CHECKBOX) {
                 g_autoInstallChecked = !g_autoInstallChecked;
                 InvalidateRect(hwnd, nullptr, FALSE);
+            } else if (zone == UZ_MORE) {
+                // Changelog completo: la release oficial en GitHub.
+                wchar_t url[512] = {};
+                swprintf(url, 512, L"https://github.com/%ls/%ls/releases/tag/%ls",
+                         artpicst::kRepoOwner, artpicst::kRepoName, g_upd.release.tag.c_str());
+                ShellExecuteW(hwnd, L"open", url, nullptr, nullptr, SW_SHOWNORMAL);
             } else if (zone == UZ_CLOSE) {
                 PostQuitMessage(0);
             }
@@ -1211,6 +1264,14 @@ LRESULT CALLBACK UpdaterWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         case WM_UPD_CHECK_YES:  // --check: hay actualización
             PostQuitMessage(0);
             return 0;
+        case WM_UPD_SHOW_ASK: {
+            // Recibido en el hilo de UI: SOLO aquí se toca la ventana. La
+            // notificación pasa de "Comprobando..." a la vista con botones;
+            // todos los controles responden desde este mismo instante.
+            g_view = UpdView::Ask;
+            InvalidateRect(hwnd, nullptr, TRUE);
+            return 0;
+        }
         case WM_UPD_FAILED: {   // fallo de descarga/instalación
             g_view = UpdView::Toast;
             RECT rc{ 0, 0, 400, 72 };
@@ -1222,8 +1283,8 @@ LRESULT CALLBACK UpdaterWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             return 0;
         }
         case WM_DESTROY:
-            // Un clic en "Instalar ahora" lanza un hilo detached: sin esta
-            // espera el proceso moriría a mitad de descarga/instalación.
+            // FIX CRASH: espera REAL al hilo de "Instalar ahora" (antes era un
+            // join() de un thread nunca asignado porque el hilo iba detached).
             if (g_downloadThread.joinable()) g_downloadThread.join();
             PostQuitMessage(0);
             return 0;
@@ -1257,6 +1318,15 @@ static int RunSelfTest() {
         { L"auto-1",  L"auto-1-rc1",  1 },   // números iguales, solo remoto es pre-release
         { L"v1.2.3",  L"1.2.3",       0 },   // prefijo decorativo ignorable
         { L"auto-9",  L"auto-10",    -1 },   // comparación numérica, no lexicográfica
+        // REGRESIÓN del bucle de falsos positivos: líneas de versiones
+        // INCOMPARABLES (continua vs estable) NUNCA avisan; y con el esquema
+        // de fecha, "auto-80-20260928" debe superar a "auto-80-20260901".
+        { L"1.2.1",   L"auto-80",     0 },   // línea distinta: sin aviso
+        { L"1.2.1",   L"auto-80-20260928", 0 },
+        { L"auto-80", L"1.2.1",        0 },
+        { L"auto-80-20260901", L"auto-80-20260928", -1 },   // la fecha desempata
+        { L"auto-80-20260928", L"auto-80", 1 },      // sin fecha < con fecha (mismo run)
+        { L"auto-81-20260101", L"auto-80-20261231", 1 }, // el run manda sobre la fecha
     };
     for (const auto& vc : versionCases) {
         const int got = artpicst::CompareVersionTags(vc.local, vc.remote);

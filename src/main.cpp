@@ -3268,7 +3268,17 @@ static bool GpuEnsureTarget() {
     if (g_gpu.target) {
         const D2D1_SIZE_U cur = g_gpu.target->GetPixelSize();
         if (cur.width == w && cur.height == h) return true;
-        GpuReleaseAll(); // cambió el tamaño: recrear en el siguiente intento
+        // FIX ESTABILIDAD RESIZE: HwndRenderTarget se REDIMENSIONA con Resize()
+        // (barato, conserva pinceles y bitmap de imagen). Antes GpuReleaseAll()
+        // destruyó TODO el contexto en cada paso del arrastre: ventana sin
+        // contenido un frame (flash negro) y riesgo de crash si EndDraw de otro
+        // pintado en curso pisaba la destrucción. Si Resize falla (dispositivo
+        // perdido), ahí sí se libera todo para recrear.
+        if (SUCCEEDED(g_gpu.target->Resize(size))) {
+            g_gpu.createdDpi = dpi;
+            return true;
+        }
+        GpuReleaseAll();   // dispositivo perdido: recreación completa
     }
 
     D2D1_RENDER_TARGET_PROPERTIES rtProps = D2D1::RenderTargetProperties(
@@ -4326,11 +4336,15 @@ void InvokeHud(HudId id) {
                 RECT rect{};
                 GetClientRect(g_state.hwnd, &rect);
                 FitImageToWindow(rect.right, rect.bottom);
+                SaveViewerPref(ViewerPref::FitModeOnOpen, 1u);   // persistir modo zoom
                 ShowOSD(L"Ajuste perfecto");
                 InvalidateRect(g_state.hwnd, nullptr, FALSE);
             }
             break;
-        case HUD_ONE: ActualSize(); break;
+        case HUD_ONE:
+            ActualSize();
+            SaveViewerPref(ViewerPref::FitModeOnOpen, 0u);       // persistir modo zoom
+            break;
         case HUD_CLARITY: ToggleUltraClarity(); break;
         case HUD_ROT: RotateImage(90); break;
         case HUD_FLIP: FlipHorizontal(); break;
@@ -4662,8 +4676,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 case 'I':
                     if (ctrl) ShowExifDialog(hwnd);
                     else {
-                        // ShowOSD ya repinta solo la banda del OSD
+                        // ShowOSD ya repinta solo la banda del OSD; la
+                        // preferencia se persiste para la próxima sesión.
                         g_state.osdPinned = !g_state.osdPinned;
+                        SaveViewerPref(ViewerPref::OsdPinned, g_state.osdPinned ? 1u : 0u);
                         ShowOSD(g_state.osdPinned ? L"Info fija" : L"Info auto");
                     }
                     break;
@@ -4912,6 +4928,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
         }
         case WM_DESTROY:
+            // Persistir preferencias ANTES de desmontar recursos (la sesión
+            // local ya no puede quedar corrupta: valores DWORD atómicos).
+            SaveViewerPreferences();
             GpuShutdown();
             KillTimer(hwnd, TIMER_OSD);
             KillTimer(hwnd, TIMER_SLIDESHOW);
@@ -4950,6 +4969,78 @@ bool SetRegStringValue(HKEY root, const std::wstring& key, const std::wstring& n
                                   reinterpret_cast<const BYTE*>(value.c_str()), bytes) == ERROR_SUCCESS;
     RegCloseKey(hKey);
     return ok;
+}
+
+// ============================================================================
+// Persistencia de preferencias de usuario (C23, escritura atómica)
+// ----------------------------------------------------------------------------
+// Antes NO existía: el modo de zoom (ajustar/100%), el OSD fijo y el auto-hide
+// del dock se perdían en cada cierre (y un ajuste de zoom “a mano” podía
+// corromper el arranque siguiente si algún valor quedaba a medias). Ahora viven
+// en HKCU\Software\ARTPICST\Viewer con valores escalares pequeños: el registro
+// es transaccional por valor, así que no puede quedar un “archivo de sesión”
+// corrupto a medio escribir.
+// ============================================================================
+constexpr wchar_t kViewerPrefsKey[] = L"Software\\ARTPICST\\Viewer";
+
+enum class ViewerPref : DWORD {
+    FitModeOnOpen = 1,   // 1 = “ajustar a la ventana” al abrir (por defecto)
+    OsdPinned     = 2,   // OSD fijo (tecla I)
+    DockAutoHide  = 3,   // auto-ocultar el dock inferior
+    UiScale       = 4    // tamaño de interfaz elegido (0..2)
+};
+
+// Nombre de valor estable y legible: la representación decimal del enumerado.
+inline void ViewerPrefName(ViewerPref pref, wchar_t (&name)[16]) {
+    const DWORD id = static_cast<DWORD>(pref);
+    _ultow_s(id, name, 10);
+}
+
+void SaveViewerPref(ViewerPref pref, DWORD value) {
+    wchar_t name[16] = {};
+    ViewerPrefName(pref, name);
+    HKEY hKey = nullptr;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, kViewerPrefsKey, 0, nullptr,
+                        REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr, &hKey, nullptr) != ERROR_SUCCESS) return;
+    const DWORD v = value;
+    RegSetValueExW(hKey, name, 0, REG_DWORD,
+                   reinterpret_cast<const BYTE*>(&v), sizeof(v));
+    RegCloseKey(hKey);
+}
+
+bool LoadViewerPref(ViewerPref pref, DWORD& outValue) {
+    HKEY hKey = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, kViewerPrefsKey, 0, KEY_READ, &hKey) != ERROR_SUCCESS) return false;
+    DWORD type = 0, size = sizeof(outValue);
+    wchar_t name[16] = {};
+    ViewerPrefName(pref, name);
+    const LSTATUS r = RegQueryValueExW(hKey, name, nullptr, &type,
+                                       reinterpret_cast<LPBYTE>(&outValue), &size);
+    RegCloseKey(hKey);
+    return r == ERROR_SUCCESS && type == REG_DWORD && size == sizeof(outValue);
+}
+
+void LoadViewerPreferences() {
+    DWORD v = 0;
+    if (LoadViewerPref(ViewerPref::FitModeOnOpen, v)) g_state.fitMode = (v != 0);
+    if (LoadViewerPref(ViewerPref::OsdPinned, v))     g_state.osdPinned = (v != 0);
+    if (LoadViewerPref(ViewerPref::DockAutoHide, v))  g_state.dockAutoHide = (v != 0);
+    if (LoadViewerPref(ViewerPref::UiScale, v) && v <= 2) {
+        ApplyUISize(static_cast<UISize>(v));   // 0..2: Small/Medium/Large
+    }
+}
+
+void SaveViewerPreferences() {
+    SaveViewerPref(ViewerPref::FitModeOnOpen, g_state.fitMode ? 1u : 0u);
+    SaveViewerPref(ViewerPref::OsdPinned,     g_state.osdPinned ? 1u : 0u);
+    SaveViewerPref(ViewerPref::DockAutoHide,  g_state.dockAutoHide ? 1u : 0u);
+    DWORD ui = 1;
+    switch (g_currentUISize) {
+        case UISize::Small:  ui = 0; break;
+        case UISize::Medium: ui = 1; break;
+        case UISize::Large:  ui = 2; break;
+    }
+    SaveViewerPref(ViewerPref::UiScale, ui);
 }
 
 bool RegisterFileAssociationForCurrentUser() {
@@ -5113,6 +5204,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
     
     // Inicializar sistemas inteligentes
     InitializeIntelligentUI();
+    // PREFERENCIAS de la sesión anterior (después de InitializeIntelligentUI
+    // para que el tamaño de UI del usuario pueda sobreescribir el detectado).
+    LoadViewerPreferences();
 
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);

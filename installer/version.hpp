@@ -88,9 +88,21 @@ inline std::vector<long long> ParseVersionNumbers(const std::wstring& tag, std::
     return numbers;
 }
 
+// ¿Tag de línea continua de CI ("auto-80", "auto-80-20260928")?
+inline bool IsContinuousTag(const std::wstring& tag) {
+    return tag.rfind(L"auto-", 0) == 0;
+}
+
 // Devuelve >0 si local es más nueva, <0 si remota es más nueva, 0 si iguales.
 inline int CompareVersionTags(const std::wstring& local, const std::wstring& remote) {
     if (local == remote) return 0;
+    // FIX FALSOS POSITIVOS: las dos líneas de versiones son INCOMPARABLES entre
+    // sí. "auto-80" vs semver "1.2.1" comparaba 1 < 80 y avisaba SIEMPRE de
+    // actualizaciones aun estando en la última versión (bucle diario de
+    // notificaciones falsas). Política: la línea continua (auto-N-YYYYMMDD)
+    // solo se compara entre builds auto-*; la estable (v1.2.1) solo con tags
+    // semver. Entre líneas: 0 (sin aviso).
+    if (IsContinuousTag(local) != IsContinuousTag(remote)) return 0;
     std::wstring lp, rp;
     const std::vector<long long> ln = ParseVersionNumbers(local, lp);
     const std::vector<long long> rn = ParseVersionNumbers(remote, rp);

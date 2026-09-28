@@ -111,7 +111,13 @@ inline bool LaunchUpdaterProcess(const wchar_t* args, HWND hwnd) {
 
 // Comprobación diaria en segundo plano: 20-30 s tras arrancar el visor.
 inline void StartBackgroundDailyCheck() {
+    // C23 / saneamiento de hilos: el hilo SOLO toca Win32 (registro +
+    // ShellExecute) y su vida útil (≤ 30 s) está garantizada por el contrato
+    // documentado en la cabecera: el visor nunca muere antes. detach() es
+    // correcto aquí; se documenta explícitamente para auditorías futuras.
     std::thread([]() {
+        // Prioridad baja: la comprobación jamás compite con el renderizado.
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
         // Retraso pseudoaleatorio 20-30 s (xorshift32): reparte la carga y
         // nunca molesta al arranque del visor.
         unsigned int seed = static_cast<unsigned int>(
