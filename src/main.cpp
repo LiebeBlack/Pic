@@ -4327,6 +4327,78 @@ bool OpenFolderDialog(HWND hwnd) {
     return true;
 }
 
+// ============================================================================
+// Persistencia de preferencias de usuario (C23, escritura atómica)
+// ----------------------------------------------------------------------------
+// Antes NO existía: el modo de zoom (ajustar/100%), el OSD fijo y el auto-hide
+// del dock se perdían en cada cierre (y un ajuste de zoom “a mano” podía
+// corromper el arranque siguiente si algún valor quedaba a medias). Ahora viven
+// en HKCU\Software\ARTPICST\Viewer con valores escalares pequeños: el registro
+// es transaccional por valor, así que no puede quedar un “archivo de sesión”
+// corrupto a medio escribir.
+// ============================================================================
+constexpr wchar_t kViewerPrefsKey[] = L"Software\\ARTPICST\\Viewer";
+
+enum class ViewerPref : DWORD {
+    FitModeOnOpen = 1,   // 1 = “ajustar a la ventana” al abrir (por defecto)
+    OsdPinned     = 2,   // OSD fijo (tecla I)
+    DockAutoHide  = 3,   // auto-ocultar el dock inferior
+    UiScale       = 4    // tamaño de interfaz elegido (0..2)
+};
+
+// Nombre de valor estable y legible: la representación decimal del enumerado.
+inline void ViewerPrefName(ViewerPref pref, wchar_t (&name)[16]) {
+    const DWORD id = static_cast<DWORD>(pref);
+    _ultow_s(id, name, 10);
+}
+
+void SaveViewerPref(ViewerPref pref, DWORD value) {
+    wchar_t name[16] = {};
+    ViewerPrefName(pref, name);
+    HKEY hKey = nullptr;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, kViewerPrefsKey, 0, nullptr,
+                        REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr, &hKey, nullptr) != ERROR_SUCCESS) return;
+    const DWORD v = value;
+    RegSetValueExW(hKey, name, 0, REG_DWORD,
+                   reinterpret_cast<const BYTE*>(&v), sizeof(v));
+    RegCloseKey(hKey);
+}
+
+bool LoadViewerPref(ViewerPref pref, DWORD& outValue) {
+    HKEY hKey = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, kViewerPrefsKey, 0, KEY_READ, &hKey) != ERROR_SUCCESS) return false;
+    DWORD type = 0, size = sizeof(outValue);
+    wchar_t name[16] = {};
+    ViewerPrefName(pref, name);
+    const LSTATUS r = RegQueryValueExW(hKey, name, nullptr, &type,
+                                       reinterpret_cast<LPBYTE>(&outValue), &size);
+    RegCloseKey(hKey);
+    return r == ERROR_SUCCESS && type == REG_DWORD && size == sizeof(outValue);
+}
+
+void LoadViewerPreferences() {
+    DWORD v = 0;
+    if (LoadViewerPref(ViewerPref::FitModeOnOpen, v)) g_state.fitMode = (v != 0);
+    if (LoadViewerPref(ViewerPref::OsdPinned, v))     g_state.osdPinned = (v != 0);
+    if (LoadViewerPref(ViewerPref::DockAutoHide, v))  g_state.dockAutoHide = (v != 0);
+    if (LoadViewerPref(ViewerPref::UiScale, v) && v <= 2) {
+        ApplyUISize(static_cast<UISize>(v));   // 0..2: Small/Medium/Large
+    }
+}
+
+void SaveViewerPreferences() {
+    SaveViewerPref(ViewerPref::FitModeOnOpen, g_state.fitMode ? 1u : 0u);
+    SaveViewerPref(ViewerPref::OsdPinned,     g_state.osdPinned ? 1u : 0u);
+    SaveViewerPref(ViewerPref::DockAutoHide,  g_state.dockAutoHide ? 1u : 0u);
+    DWORD ui = 1;
+    switch (g_currentUISize) {
+        case UISize::Small:  ui = 0; break;
+        case UISize::Medium: ui = 1; break;
+        case UISize::Large:  ui = 2; break;
+    }
+    SaveViewerPref(ViewerPref::UiScale, ui);
+}
+
 void InvokeHud(HudId id) {
     switch (id) {
         case HUD_PREV: PreviousImage(); break;
@@ -4969,78 +5041,6 @@ bool SetRegStringValue(HKEY root, const std::wstring& key, const std::wstring& n
                                   reinterpret_cast<const BYTE*>(value.c_str()), bytes) == ERROR_SUCCESS;
     RegCloseKey(hKey);
     return ok;
-}
-
-// ============================================================================
-// Persistencia de preferencias de usuario (C23, escritura atómica)
-// ----------------------------------------------------------------------------
-// Antes NO existía: el modo de zoom (ajustar/100%), el OSD fijo y el auto-hide
-// del dock se perdían en cada cierre (y un ajuste de zoom “a mano” podía
-// corromper el arranque siguiente si algún valor quedaba a medias). Ahora viven
-// en HKCU\Software\ARTPICST\Viewer con valores escalares pequeños: el registro
-// es transaccional por valor, así que no puede quedar un “archivo de sesión”
-// corrupto a medio escribir.
-// ============================================================================
-constexpr wchar_t kViewerPrefsKey[] = L"Software\\ARTPICST\\Viewer";
-
-enum class ViewerPref : DWORD {
-    FitModeOnOpen = 1,   // 1 = “ajustar a la ventana” al abrir (por defecto)
-    OsdPinned     = 2,   // OSD fijo (tecla I)
-    DockAutoHide  = 3,   // auto-ocultar el dock inferior
-    UiScale       = 4    // tamaño de interfaz elegido (0..2)
-};
-
-// Nombre de valor estable y legible: la representación decimal del enumerado.
-inline void ViewerPrefName(ViewerPref pref, wchar_t (&name)[16]) {
-    const DWORD id = static_cast<DWORD>(pref);
-    _ultow_s(id, name, 10);
-}
-
-void SaveViewerPref(ViewerPref pref, DWORD value) {
-    wchar_t name[16] = {};
-    ViewerPrefName(pref, name);
-    HKEY hKey = nullptr;
-    if (RegCreateKeyExW(HKEY_CURRENT_USER, kViewerPrefsKey, 0, nullptr,
-                        REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr, &hKey, nullptr) != ERROR_SUCCESS) return;
-    const DWORD v = value;
-    RegSetValueExW(hKey, name, 0, REG_DWORD,
-                   reinterpret_cast<const BYTE*>(&v), sizeof(v));
-    RegCloseKey(hKey);
-}
-
-bool LoadViewerPref(ViewerPref pref, DWORD& outValue) {
-    HKEY hKey = nullptr;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, kViewerPrefsKey, 0, KEY_READ, &hKey) != ERROR_SUCCESS) return false;
-    DWORD type = 0, size = sizeof(outValue);
-    wchar_t name[16] = {};
-    ViewerPrefName(pref, name);
-    const LSTATUS r = RegQueryValueExW(hKey, name, nullptr, &type,
-                                       reinterpret_cast<LPBYTE>(&outValue), &size);
-    RegCloseKey(hKey);
-    return r == ERROR_SUCCESS && type == REG_DWORD && size == sizeof(outValue);
-}
-
-void LoadViewerPreferences() {
-    DWORD v = 0;
-    if (LoadViewerPref(ViewerPref::FitModeOnOpen, v)) g_state.fitMode = (v != 0);
-    if (LoadViewerPref(ViewerPref::OsdPinned, v))     g_state.osdPinned = (v != 0);
-    if (LoadViewerPref(ViewerPref::DockAutoHide, v))  g_state.dockAutoHide = (v != 0);
-    if (LoadViewerPref(ViewerPref::UiScale, v) && v <= 2) {
-        ApplyUISize(static_cast<UISize>(v));   // 0..2: Small/Medium/Large
-    }
-}
-
-void SaveViewerPreferences() {
-    SaveViewerPref(ViewerPref::FitModeOnOpen, g_state.fitMode ? 1u : 0u);
-    SaveViewerPref(ViewerPref::OsdPinned,     g_state.osdPinned ? 1u : 0u);
-    SaveViewerPref(ViewerPref::DockAutoHide,  g_state.dockAutoHide ? 1u : 0u);
-    DWORD ui = 1;
-    switch (g_currentUISize) {
-        case UISize::Small:  ui = 0; break;
-        case UISize::Medium: ui = 1; break;
-        case UISize::Large:  ui = 2; break;
-    }
-    SaveViewerPref(ViewerPref::UiScale, ui);
 }
 
 bool RegisterFileAssociationForCurrentUser() {
