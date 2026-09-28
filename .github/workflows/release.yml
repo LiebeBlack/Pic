@@ -31,10 +31,17 @@ jobs:
           # Esquema estandarizado: los builds de la línea continua usan
           # auto-<run>-YYYYMMDD (UTC) — sin "Latest-80.X" ni "auto-80" simple.
           # Los tags v* manuales se respetan tal cual.
-          $stamp = (Get-Date).ToUniversalTime().ToString("yyyyMMdd")
+          # Se escribe con AppendAllText (UTF-8 sin BOM) y NO con ">>": el
+          # append de PS 5.1 es UTF-16LE y corrompe GITHUB_ENV si un paso
+          # previo (p. ej. una accion de Node) ya creo el fichero en UTF-8.
+          # Ademas, $(Get-Date).ToUniversalTime() cerraba la subexpresion en
+          # Get-Date y partia la linea en varias -> "Invalid format" del runner.
+          $utf8 = New-Object System.Text.UTF8Encoding($false)
+          $nowUtc = (Get-Date).ToUniversalTime()
+          $stamp = $nowUtc.ToString("yyyyMMdd")
           $tag = if ($env:GITHUB_REF -like "refs/tags/*") { $env:GITHUB_REF_NAME } else { "auto-$env:GITHUB_RUN_NUMBER-$stamp" }
-          echo "ARTPICST_TAG=$tag" >> $env:GITHUB_ENV
-          echo "ARTPICST_DATE=$(Get-Date -Format "yyyy-MM-dd HH:mm:ss") (UTC $(Get-Date).ToUniversalTime().ToString("yyyy-MM-dd HH:mm:ss"))" >> $env:GITHUB_ENV
+          [System.IO.File]::AppendAllText($env:GITHUB_ENV, "ARTPICST_TAG=$tag`n", $utf8)
+          [System.IO.File]::AppendAllText($env:GITHUB_ENV, "ARTPICST_DATE=$($nowUtc.ToString('yyyy-MM-dd HH:mm:ss')) UTC`n", $utf8)
 
       # GATE DE VERSIÓN: version.json, installer/version.hpp y los recursos
       # VERSIONINFO de los tres .rc deben declarar EXACTAMENTE la misma
@@ -156,8 +163,11 @@ jobs:
           $installerBytes = (Get-Item "build\artpicst_installer.exe").Length
           $minExpected = (Get-Item "build\artpicst.exe").Length + (Get-Item "build\artpicst_updater.exe").Length
           if ($installerBytes -le $minExpected) { throw "El instalador autocontenido parece incompleto ($installerBytes bytes <= $minExpected bytes esperados): falta el payload." }
-          echo "ARTPICST_EXE=$(Resolve-Path build\artpicst.exe)" >> $env:GITHUB_ENV
-          echo "ARTPICST_INSTALLER=$(Resolve-Path build\artpicst_installer.exe)" >> $env:GITHUB_ENV
+          # AppendAllText UTF-8 sin BOM: el ">>" de PS 5.1 apenda UTF-16LE y
+          # corrompe GITHUB_ENV si otro paso ya lo creo en UTF-8.
+          $utf8 = New-Object System.Text.UTF8Encoding($false)
+          [System.IO.File]::AppendAllText($env:GITHUB_ENV, "ARTPICST_EXE=$(Resolve-Path build\artpicst.exe)`n", $utf8)
+          [System.IO.File]::AppendAllText($env:GITHUB_ENV, "ARTPICST_INSTALLER=$(Resolve-Path build\artpicst_installer.exe)`n", $utf8)
 
       - name: Preparar carpeta de release
         shell: powershell
@@ -241,7 +251,9 @@ jobs:
           $lines += "- Instalador autocontenido (visor + updater + icono + docs)."
           $lines += "- El auto-updater compara SOLO dentro de su linea: estable (vX.Y.Z) o continua (auto-N-YYYYMMDD)."
           Set-Content -Path "CHANGELOG.md" -Value ($lines -join "`n") -Encoding UTF8
-          echo "ARTPICST_BODY_FILE=$env:GITHUB_WORKSPACE\CHANGELOG.md" >> $env:GITHUB_ENV
+          # Mismo criterio: append UTF-8 sin BOM, nunca ">>" de PS 5.1.
+          $utf8 = New-Object System.Text.UTF8Encoding($false)
+          [System.IO.File]::AppendAllText($env:GITHUB_ENV, "ARTPICST_BODY_FILE=$env:GITHUB_WORKSPACE\CHANGELOG.md`n", $utf8)
 
       - name: Publicar release en GitHub
         if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
