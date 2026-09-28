@@ -2,7 +2,11 @@
 // ARTPICST — Instalador / Desinstalador / Actualizador premium
 // ----------------------------------------------------------------------------
 // · Asistente GDI+ "pitch-black" (#000000 / #0A0A0A) con acentos neón
-//   (#00F0FF / #7000FF), ventana ampliada (720x560), centrada y REDIMENSIONABLE.
+//   (#00F0FF / #7000FF), ventana ampliada (880x620) con BARRA LATERAL de
+//   pasos (5 etapas), centrada y REDIMENSIONABLE.
+// · Página "Destino": selector de carpeta nativo, espacio libre en disco,
+//   tamaño del payload y detección de instalaciones previas.
+// · Página "Completado": estadísticas reales (bytes instalados y accesos).
 // · La instalación, la desinstalación y la actualización corren en un hilo
 //   secundario (std::thread) y publican el progreso con PostMessage: la
 //   interfaz NUNCA se bloquea ni muestra "No responde".
@@ -114,12 +118,21 @@ const Color COL_WARN(255, 255, 186, 70);
 const Color COL_DISABLED_TEXT(255, 92, 100, 116);
 
 // Tamaño de diseño (unidades lógicas 96 DPI); la ventana se escala por g_scale
-// y es REDIMENSIONABLE entre 640x520 y tamaños arbitrarios.
-const float DESIGN_W = 720.0f;
-const float DESIGN_H = 560.0f;
-const float MIN_DESIGN_W = 640.0f;
-const float MIN_DESIGN_H = 520.0f;
+// y es REDIMENSIONABLE entre 760x560 y tamaños arbitrarios.
+const float DESIGN_W = 880.0f;
+const float DESIGN_H = 620.0f;
+const float MIN_DESIGN_W = 760.0f;
+const float MIN_DESIGN_H = 560.0f;
 float g_scale = 1.0f;
+
+// Barra lateral del rediseño: columna de pasos con logo y línea de acento.
+const float SIDEBAR_W = 208.0f;
+const float CONTENT_PAD = 28.0f;    // separación barra lateral <-> contenido
+const float RIGHT_MARGIN = 40.0f;   // margen derecho del contenido
+
+// Estadísticas reales de la instalación (se muestran en "Completado").
+unsigned long long g_bytesDeployed = 0;
+int g_shortcutsCreated = 0;
 
 // Duración exacta de la simulación de instalación/actualización y desinstalación.
 constexpr double kInstallDurationSeconds = 34.0;
@@ -130,13 +143,14 @@ constexpr double kUninstallDurationSeconds = 14.0;
 // ============================================================================
 
 enum class AppMode { Install, Uninstall, Update };
-enum class WizardStep { Welcome, License, UninstallConfirm, Working, Complete };
+enum class WizardStep { Welcome, License, Destination, UninstallConfirm, Working, Complete };
 
 enum HoverZone {
     HOVER_NONE = 0,
     HOVER_BACK,
     HOVER_NEXT,
     HOVER_CANCEL,
+    HOVER_BROWSE,
     HOVER_ROW_DESKTOP,
     HOVER_ROW_STARTMENU,
     HOVER_ROW_ASSOC
@@ -188,6 +202,12 @@ struct InstallerState {
     bool relaunchAfterUpdate = true;
     bool keepUserConfig = true;   // desinstalación: conservar config del usuario
 
+    // Página "Destino" (rediseño): hechos calculados al entrar en el paso.
+    unsigned long long destFreeBytes = 0;        // espacio libre en la unidad
+    unsigned long long payloadBytes = 0;         // tamaño del payload incrustado
+    bool existingInstallFound = false;           // instalación previa detectada
+    std::wstring existingVersion;                // versión previa registrada
+
     double workTotalSeconds  = kInstallDurationSeconds;
     double progressTarget    = 0.0;   // % objetivo publicado por el worker
     double progressShown     = 0.0;   // % animado en la UI
@@ -224,6 +244,10 @@ HKEY   RegRoot() { return g_machineWide ? HKEY_LOCAL_MACHINE : HKEY_CURRENT_USER
 std::wstring  AppKeyPath();
 unsigned int  GetDpiForSystemSafe();
 std::wstring  DetectInstallDir();
+unsigned long long DiskFreeBytes(const std::wstring& dir);
+unsigned long long PayloadTotalBytes();
+void RefreshDestinationFacts();
+bool BrowseForDestination();
 WIN32_FIND_DATAW w32Find{};   // bloque de búsqueda reutilizable de la "desfragmentación"
 
 // ============================================================================
@@ -290,7 +314,9 @@ bool CreateDirectoryTree(const std::wstring& path) {
 
 std::wstring FormatBytes(unsigned long long bytes) {
     wchar_t buf[64] = {};
-    if (bytes >= 1024ull * 1024ull) {
+    if (bytes >= 1024ull * 1024ull * 1024ull) {
+        swprintf(buf, 64, L"%.2f GB", static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0));
+    } else if (bytes >= 1024ull * 1024ull) {
         swprintf(buf, 64, L"%.2f MB", static_cast<double>(bytes) / (1024.0 * 1024.0));
     } else {
         swprintf(buf, 64, L"%.1f KB", static_cast<double>(bytes) / 1024.0);
@@ -393,6 +419,79 @@ const PayloadEntry kPayload[] = {
     { RES_APP_UPDATER, L"artpicst_updater.exe", L"Módulo de actualización" },
 };
 constexpr int kPayloadCount = static_cast<int>(sizeof(kPayload) / sizeof(kPayload[0]));
+
+// Espacio libre en la unidad que contiene 'dir'. La carpeta puede no existir
+// todavía (destino nuevo): se asciende por la ruta hasta encontrar una que sí.
+unsigned long long DiskFreeBytes(const std::wstring& dir) {
+    std::wstring probe = dir;
+    while (!probe.empty() && probe.back() == L'\\') probe.pop_back();
+    ULARGE_INTEGER freeToCaller{};
+    while (probe.size() >= 2) {
+        if (GetDiskFreeSpaceExW(probe.c_str(), &freeToCaller, nullptr, nullptr)) {
+            return freeToCaller.QuadPart;
+        }
+        const size_t slash = probe.find_last_of(L'\\');
+        if (slash == std::wstring::npos) break;
+        probe = probe.substr(0, slash);
+    }
+    return 0;
+}
+
+// Tamaño total del payload incrustado (recursos RCDATA del instalador).
+unsigned long long PayloadTotalBytes() {
+    unsigned long long total = 0;
+    if (!g_state.hInstance) return 0;
+    for (const auto& entry : kPayload) {
+        if (const HRSRC res = FindResourceW(g_state.hInstance, MAKEINTRESOURCEW(entry.id), RT_RCDATA)) {
+            total += SizeofResource(g_state.hInstance, res);
+        }
+    }
+    return total;
+}
+
+// Calcula (o recalcula) los hechos de la página Destino: espacio libre,
+// tamaño del payload y detección de una instalación previa registrada.
+void RefreshDestinationFacts() {
+    if (g_state.installPath.empty()) g_state.installPath = GetDefaultInstallPath();
+    g_state.destFreeBytes = DiskFreeBytes(g_state.installPath);
+    g_state.payloadBytes = PayloadTotalBytes();
+    g_state.existingInstallFound = false;
+    g_state.existingVersion.clear();
+    std::wstring version;
+    for (HKEY root : { HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER }) {
+        if (ReadRegStringValue(root, AppKeyPath(), L"Version", version) && !version.empty()) {
+            g_state.existingInstallFound = true;
+            g_state.existingVersion = version;
+            break;
+        }
+    }
+}
+
+// Diálogo nativo de selección de carpeta. Devuelve true si el usuario eligió
+// una carpeta (installPath actualizado y hechos recalculados).
+bool BrowseForDestination() {
+    wchar_t chosen[MAX_PATH] = {};
+    BROWSEINFOW bi{};
+    bi.hwndOwner = g_state.hwnd;
+    bi.lpszTitle = L"Elige la carpeta donde instalar ARTPICST";
+    bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE | BIF_EDITBOX;
+    LPITEMIDLIST pidl = SHBrowseForFolderW(&bi);
+    if (!pidl) return false;
+    const bool ok = SHGetPathFromIDListW(pidl, chosen) && chosen[0];
+    CoTaskMemFree(pidl);
+    if (!ok) return false;
+    std::wstring dir = chosen;
+    while (!dir.empty() && dir.back() == L'\\') dir.pop_back();
+    if (dir.size() < 3) return false;   // se rechaza la unidad raíz ("C:")
+    // Si el usuario ya eligió una carpeta con el nombre de la app, se respeta.
+    const size_t slash = dir.find_last_of(L'\\');
+    const std::wstring leaf = (slash == std::wstring::npos) ? dir : dir.substr(slash + 1);
+    if (_wcsicmp(leaf.c_str(), APP_NAME) != 0) dir += L"\\" + std::wstring(APP_NAME);
+    g_state.installPath = dir;
+    RefreshDestinationFacts();
+    if (g_state.hwnd) InvalidateRect(g_state.hwnd, nullptr, FALSE);
+    return true;
+}
 
 bool IsResourcePresent(UINT resId) {
     const HRSRC res = FindResourceW(g_state.hInstance, MAKEINTRESOURCEW(resId), RT_RCDATA);
@@ -813,6 +912,7 @@ bool TaskStageMainBinary(PipeUi& ui, const PipeJob& job, Pacer& clock, std::wstr
         error = L"No se pudo extraer artpicst.exe del instalador.";
         return false;
     }
+    g_bytesDeployed += bytes;
     ui.Log(LogKind::Ok, clock.Elapsed(), L"[OK] artpicst.exe (%ls) %ls",
            FormatBytes(bytes).c_str(), fromResource ? L"descomprimido" : L"copiado");
     return true;
@@ -837,6 +937,7 @@ bool TaskExtractResources(PipeUi& ui, const PipeJob& job, Pacer& clock, std::wst
             error = std::wstring(L"No se pudo extraer ") + kPayload[i].fileName;
             return false;
         }
+        g_bytesDeployed += bytes;
         ui.Log(LogKind::Ok, clock.Elapsed(), L"[OK] %ls (%ls) descomprimido", kPayload[i].fileName, FormatBytes(bytes).c_str());
     }
     // El propio instalador se copia como desinstalador oficial en el destino.
@@ -862,6 +963,7 @@ bool TaskCreateShortcuts(PipeUi& ui, const PipeJob& job, Pacer& clock, std::wstr
         if (CreateShortcut(menuDir + L"\\ARTPICST.lnk", job.dstDir + L"\\artpicst.exe", L"", job.dstDir)) ++created;
         CreateShortcut(menuDir + L"\\Uninstall ARTPICST.lnk", job.dstDir + L"\\artpicst_installer.exe", L"--uninstall", job.dstDir);
     }
+    g_shortcutsCreated = created;
     ui.Log(LogKind::Ok, clock.Elapsed(), L"[OK] %d accesos directos configurados", created);
     return true;
 }
@@ -1355,36 +1457,118 @@ static void DrawChrome(Graphics& g, const Fonts&, float W, float H) {
     g.FillRectangle(&accent, topBar);
 }
 
-// Encabezado común: banda #0A0A0A con logo, título del asistente y puntos de
-// progreso del paso actual (1..4).
-static void DrawPageHeader(Graphics& g, const Fonts& fonts, float W, const wchar_t* subtitle, int stepIndex) {
-    const RectF band(0.0f, 3.0f, W, 52.0f);
+// Encabezado del área de contenido: banda #0A0A0A con título y subtítulo
+// (el logo y los pasos viven en la barra lateral del rediseño).
+static void DrawPageHeader(Graphics& g, const Fonts& fonts, float W, const wchar_t* subtitle) {
+    const RectF band(SIDEBAR_W, 3.0f, W - SIDEBAR_W, 52.0f);
     SolidBrush bandBrush(COL_PANEL);
     g.FillRectangle(&bandBrush, band);
-    const RectF hairline(0.0f, band.Y + band.Height, W, 1.0f);
+    const RectF hairline(band.X, band.Y + band.Height, band.Width, 1.0f);
     SolidBrush hair(Gdiplus::Color(255, 24, 28, 38));
     g.FillRectangle(&hair, hairline);
 
-    DrawLogo(g, fonts, 34.0f, band.Y + band.Height * 0.5f, 26.0f);
-    RectF titleRect(56.0f, band.Y + 6.0f, 300.0f, 20.0f);
+    RectF titleRect(band.X + CONTENT_PAD, band.Y + 8.0f, band.Width - CONTENT_PAD * 2.0f - 90.0f, 18.0f);
     DrawTextIn(g, APP_NAME, titleRect, fonts.fLabel, COL_TEXT, false, true);
-    RectF subRect(56.0f, band.Y + 26.0f, 340.0f, 16.0f);
+    RectF subRect(band.X + CONTENT_PAD, band.Y + 28.0f, band.Width - CONTENT_PAD * 2.0f - 90.0f, 16.0f);
     DrawTextIn(g, subtitle, subRect, fonts.fTiny, COL_TEXT_DIM, false, true);
+}
 
-    // Puntos de paso (Bienvenida -> Licencia -> Proceso -> Completado)
-    const int total = 4;
-    const float dotR = 3.0f;
-    const float gapX = 16.0f;
-    float dx = W - 44.0f - (total - 1) * gapX;
-    const float dy = band.Y + band.Height * 0.5f;
-    for (int i = 0; i < total; ++i) {
-        const RectF dot(dx - dotR, dy - dotR, dotR * 2.0f, dotR * 2.0f);
-        if (i <= stepIndex) {
-            FillRoundGradient(g, dot, dotR, COL_ACCENT_A, COL_ACCENT_B);
-        } else {
-            FillRound(g, dot, dotR, Color(255, 40, 46, 60));
+// Índice del paso activo para la barra lateral (5 etapas en instalación,
+// 4 en desinstalación: el modo cambia la numeración).
+static int StepIndexForHeader() {
+    if (g_state.mode == AppMode::Uninstall) {
+        switch (g_state.currentStep) {
+            case WizardStep::Welcome:          return 0;
+            case WizardStep::UninstallConfirm: return 1;
+            case WizardStep::Working:          return 2;
+            case WizardStep::Complete:         return 3;
+            default:                           return 0;
         }
-        dx += gapX;
+    }
+    switch (g_state.currentStep) {
+        case WizardStep::Welcome:          return 0;
+        case WizardStep::License:          return 1;
+        case WizardStep::Destination:      return 2;
+        case WizardStep::UninstallConfirm: return 1;
+        case WizardStep::Working:          return 3;
+        case WizardStep::Complete:         return 4;
+    }
+    return 0;
+}
+
+// Barra lateral del rediseño: logo, versión y lista de pasos con estado
+// (hecho = neón con marca, activo = anillo acento, pendiente = gris).
+static void DrawSidebar(Graphics& g, const Fonts& fonts, float W, float H) {
+    (void)W;
+    (void)H;
+    const RectF rail(0.0f, 3.0f, SIDEBAR_W, H);
+    SolidBrush railBrush(COL_PANEL);
+    g.FillRectangle(&railBrush, rail);
+    const RectF hair(SIDEBAR_W, 3.0f, 1.0f, H);
+    SolidBrush hairBrush(Color(255, 22, 26, 36));
+    g.FillRectangle(&hairBrush, hair);
+
+    DrawLogo(g, fonts, 42.0f, 48.0f, 34.0f);
+    RectF brandRect(66.0f, 34.0f, SIDEBAR_W - 74.0f, 16.0f);
+    DrawTextIn(g, APP_NAME, brandRect, fonts.fLabel, COL_TEXT, false, true);
+    RectF brandSub(66.0f, 52.0f, SIDEBAR_W - 74.0f, 14.0f);
+    const std::wstring brandText = (g_state.mode == AppMode::Uninstall)
+        ? std::wstring(L"Desinstalador")
+        : (g_state.mode == AppMode::Update
+               ? std::wstring(L"Actualización")
+               : std::wstring(L"Asistente v") + APP_VERSION);
+    DrawTextIn(g, brandText.c_str(), brandSub, fonts.fTiny, COL_TEXT_DIM, false, true);
+
+    struct SideStep { const wchar_t* label; int state; };   // 0 pendiente, 1 activo, 2 hecho
+    SideStep steps[5];
+    int count = 0;
+    const int idx = StepIndexForHeader();
+    if (g_state.mode == AppMode::Uninstall) {
+        steps[0] = { L"Bienvenida",   idx == 0 ? 1 : 2 };
+        steps[1] = { L"Confirmación", idx == 1 ? 1 : (idx > 1 ? 2 : 0) };
+        steps[2] = { L"Progreso",     idx == 2 ? 1 : (idx > 2 ? 2 : 0) };
+        steps[3] = { L"Completado",   idx == 3 ? 1 : 0 };
+        count = 4;
+    } else {
+        steps[0] = { L"Bienvenida",   idx == 0 ? 1 : 2 };
+        steps[1] = { L"Licencia",     idx == 1 ? 1 : (idx > 1 ? 2 : 0) };
+        steps[2] = { L"Destino",      idx == 2 ? 1 : (idx > 2 ? 2 : 0) };
+        steps[3] = { L"Instalación",  idx == 3 ? 1 : (idx > 3 ? 2 : 0) };
+        steps[4] = { L"Completado",   idx == 4 ? 1 : 0 };
+        count = 5;
+    }
+
+    float y = 132.0f;
+    for (int i = 0; i < count; ++i, y += 46.0f) {
+        const bool active = steps[i].state == 1;
+        const bool done = steps[i].state == 2;
+        const float dotR = 10.0f;
+        const RectF dot(30.0f, y - dotR, dotR * 2.0f, dotR * 2.0f);
+        wchar_t num[8] = {};
+        swprintf(num, 8, L"%d", i + 1);
+        if (done) {
+            FillRoundGradient(g, dot, dotR, COL_ACCENT_A, COL_ACCENT_B);
+            DrawCheckMark(g, 35.0f, y + 0.5f, 38.5f, y + 4.5f, 45.0f, y - 4.5f, 2.0f,
+                          Color(255, 255, 255, 255));
+        } else if (active) {
+            FillRound(g, dot, dotR, Color(255, 16, 20, 28));
+            StrokeRound(g, dot, dotR, COL_ACCENT_A, 2.0f);
+            RectF numRect(30.0f, y - dotR, dotR * 2.0f, dotR * 2.0f);
+            DrawTextIn(g, num, numRect, fonts.fTiny, COL_ACCENT_A, true, true);
+        } else {
+            FillRound(g, dot, dotR, Color(255, 18, 22, 30));
+            StrokeRound(g, dot, dotR, Color(255, 44, 52, 68), 1.0f);
+            RectF numRect(30.0f, y - dotR, dotR * 2.0f, dotR * 2.0f);
+            DrawTextIn(g, num, numRect, fonts.fTiny, COL_TEXT_DIM, true, true);
+        }
+        RectF labelRect(52.0f, y - 9.0f, SIDEBAR_W - 60.0f, 18.0f);
+        DrawTextIn(g, steps[i].label, labelRect, fonts.fSmall,
+                   active ? COL_TEXT : (done ? COL_TEXT_SOFT : COL_TEXT_DIM), false, true);
+        if (i + 1 < count) {
+            const RectF link(39.0f, y + dotR + 2.0f, 2.0f, 46.0f - dotR * 2.0f - 4.0f);
+            SolidBrush linkBrush(done ? Color(255, 40, 130, 150) : Color(255, 30, 36, 48));
+            g.FillRectangle(&linkBrush, link);
+        }
     }
 }
 
@@ -1482,6 +1666,7 @@ struct LayoutRects {
     RectF back;
     RectF next;
     RectF cancel;
+    RectF browse;
     RectF rows[3];
     int rowCount = 0;
 };
@@ -1491,23 +1676,24 @@ float DesignY(int physicalY) { return static_cast<float>(physicalY) / g_scale; }
 
 LayoutRects ComputeLayout(float W, float H) {
     LayoutRects r;
-    const float margin = 44.0f;
-    const float buttonH = 42.0f;
-    const float buttonY = H - buttonH - 20.0f;
+    const float contentX = SIDEBAR_W + CONTENT_PAD;
+    const float contentRight = W - RIGHT_MARGIN;
+    const float buttonH = 44.0f;
+    const float buttonY = H - buttonH - 24.0f;
 
-    r.next = RectF(W - margin - 156.0f, buttonY, 156.0f, buttonH);
-    r.back = RectF(margin, buttonY, 118.0f, buttonH);
-    r.cancel = RectF(W - margin - 76.0f, 68.0f, 76.0f, 24.0f);
+    r.next = RectF(contentRight - 168.0f, buttonY, 168.0f, buttonH);
+    r.back = RectF(contentX, buttonY, 124.0f, buttonH);
+    r.cancel = RectF(contentRight - 76.0f, 64.0f, 76.0f, 24.0f);   // bajo la banda del encabezado
+    r.browse = RectF(contentX, 158.0f, 118.0f, 30.0f);
 
     if (g_state.currentStep == WizardStep::License || g_state.currentStep == WizardStep::UninstallConfirm) {
-        const float rowX = 52.0f;
-        const float rowW = W - rowX * 2.0f;
-        const float rowH = 34.0f;
-        const float gap = 8.0f;
-        float y = 276.0f;
+        const float rowH = 36.0f;
+        const float gap = 10.0f;
+        const float y0 = (g_state.currentStep == WizardStep::License) ? 312.0f : 272.0f;
         r.rowCount = (g_state.currentStep == WizardStep::License) ? 3 : 1;
+        float y = y0;
         for (int i = 0; i < r.rowCount; ++i) {
-            r.rows[i] = RectF(rowX, y, rowW, rowH);
+            r.rows[i] = RectF(contentX, y, contentRight - contentX, rowH);
             y += rowH + gap;
         }
     }
@@ -1520,7 +1706,9 @@ int HoverZoneAt(const LayoutRects& r, float lx, float ly) {
         return lx >= rc.X && lx <= rc.X + rc.Width && ly >= rc.Y && ly <= rc.Y + rc.Height;
     };
     if (hit(r.cancel)) return HOVER_CANCEL;
+    if (g_state.currentStep == WizardStep::Destination && hit(r.browse)) return HOVER_BROWSE;
     if (g_state.currentStep == WizardStep::License ||
+        g_state.currentStep == WizardStep::Destination ||
         g_state.currentStep == WizardStep::UninstallConfirm) {
         if (hit(r.back)) return HOVER_BACK;
         for (int i = 0; i < r.rowCount; ++i) {
@@ -1529,6 +1717,7 @@ int HoverZoneAt(const LayoutRects& r, float lx, float ly) {
     }
     if ((g_state.currentStep == WizardStep::Welcome ||
          g_state.currentStep == WizardStep::License ||
+         g_state.currentStep == WizardStep::Destination ||
          g_state.currentStep == WizardStep::UninstallConfirm ||
          g_state.currentStep == WizardStep::Complete) && hit(r.next)) {
         return HOVER_NEXT;
@@ -1558,21 +1747,24 @@ static void DrawGhostButton(Graphics& g, const Fonts& fonts, const RectF& rc, co
     DrawTextIn(g, text, rc, fonts.fSmall, hot ? COL_TEXT : COL_TEXT_SOFT, true, true);
 }
 
-void RenderWelcome(Graphics& g, const Fonts& fonts, float W, float H) {
-    const float cx = W * 0.5f;
-    DrawLogo(g, fonts, cx, 122.0f, 64.0f);
+void RenderWelcome(Graphics& g, const Fonts& fonts, float W, float H, const LayoutRects& layout) {
+    (void)W;
+    const float contentX = layout.back.X;
+    const float CW = layout.next.X + layout.next.Width - contentX;
+    const float cx = contentX + CW * 0.5f;
 
-    RectF nameRect(cx - 200.0f, 164.0f, 400.0f, 42.0f);
+    DrawLogo(g, fonts, cx, 96.0f, 56.0f);
+
+    RectF nameRect(contentX, 138.0f, CW, 40.0f);
     std::wstring nameAndVersion = std::wstring(APP_NAME) + L"  v" + APP_VERSION;
     DrawTextIn(g, nameAndVersion.c_str(), nameRect, fonts.fTitle, COL_TEXT, true, false);
 
-    RectF tagRect(cx - 280.0f, 210.0f, 560.0f, 22.0f);
+    RectF tagRect(contentX, 182.0f, CW, 22.0f);
     DrawTextIn(g, L"Visor de imágenes premium para Windows — rápido, ligero y moderno",
                tagRect, fonts.fSmall, COL_TEXT_SOFT, true, true);
 
-    const float cardY = 250.0f;
-    const float cardH = 190.0f;
-    const RectF card(cx - 270.0f, cardY, 540.0f, cardH);
+    const float cardY = 226.0f;
+    const RectF card(contentX, cardY, CW, 168.0f);
     FillRound(g, card, 14.0f, COL_PANEL);
     StrokeRound(g, card, 14.0f, COL_PANEL_BORDER, 1.0f);
 
@@ -1583,30 +1775,99 @@ void RenderWelcome(Graphics& g, const Fonts& fonts, float W, float H) {
         L"Módulo inteligente de actualización automática integrado",
         L"Interfaz oscura elegante y consumo mínimo de RAM y CPU",
     };
-    float fy = cardY + 24.0f;
+    float fy = cardY + 22.0f;
     for (const wchar_t* text : features) {
         const float dotR = 3.5f;
         const float dotY = fy + 8.0f;
         FillRoundGradient(g, RectF(card.X + 24.0f, dotY - dotR, dotR * 2.0f, dotR * 2.0f), dotR, COL_ACCENT_A, COL_ACCENT_B);
         RectF featureRect(card.X + 40.0f, fy - 2.0f, card.Width - 60.0f, 22.0f);
         DrawTextIn(g, text, featureRect, fonts.fSmall, COL_TEXT_SOFT, false, true);
-        fy += 32.0f;
+        fy += 29.0f;
     }
 
-    RectF hint(cx - 260.0f, H - 78.0f, 520.0f, 18.0f);
+    RectF hint(contentX, H - 92.0f, CW, 18.0f);
     DrawTextIn(g, (g_machineWide
                        ? L"Se instalará para todos los usuarios (requiere administrador)."
                        : L"Se instalará para tu usuario, sin permisos de administrador."),
                hint, fonts.fTiny, COL_TEXT_DIM, true, true);
 }
 
-void RenderLicense(Graphics& g, const Fonts& fonts, float W, float H, const LayoutRects& layout) {
-    const float cx = W * 0.5f;
+// Página NUEVA del rediseño: carpeta de destino con selector nativo, espacio
+// libre real, tamaño del payload y detección de instalaciones previas.
+void RenderDestination(Graphics& g, const Fonts& fonts, float W, float H, const LayoutRects& layout) {
+    (void)W;
+    const float contentX = layout.back.X;
+    const float CW = layout.next.X + layout.next.Width - contentX;
 
-    RectF titleRect(cx - 220.0f, 68.0f, 440.0f, 30.0f);
+    RectF titleRect(contentX, 40.0f, CW, 30.0f);
+    DrawTextIn(g, L"Carpeta de destino", titleRect, fonts.fHeading, COL_TEXT, true, true);
+
+    const RectF panel(contentX, 82.0f, CW, 60.0f);
+    FillRound(g, panel, 10.0f, COL_PANEL_DEEP);
+    StrokeRound(g, panel, 10.0f, COL_PANEL_BORDER, 1.0f);
+    RectF panelLabel(panel.X + 16.0f, panel.Y + 8.0f, panel.Width - 32.0f, 13.0f);
+    DrawTextIn(g, L"CARPETA DE INSTALACIÓN", panelLabel, fonts.fLabel, COL_TEXT_DIM, false, true);
+    RectF panelPath(panel.X + 16.0f, panel.Y + 28.0f, panel.Width - 32.0f, 22.0f);
+    DrawTextIn(g, g_state.installPath.c_str(), panelPath, fonts.fSmall, COL_TEXT, false, true,
+               StringTrimmingEllipsisCharacter, true);
+
+    DrawGhostButton(g, fonts, layout.browse, L"Examinar...", g_state.hoverZone == HOVER_BROWSE);
+
+    const float cardW = (CW - 14.0f) * 0.5f;
+    const float cardsY = 206.0f;
+    const RectF cardFree(contentX, cardsY, cardW, 74.0f);
+    const RectF cardSize(contentX + cardW + 14.0f, cardsY, cardW, 74.0f);
+    auto drawCard = [&](const RectF& rc, const wchar_t* label, const std::wstring& value, const Color& valueColor) {
+        FillRound(g, rc, 10.0f, COL_PANEL);
+        StrokeRound(g, rc, 10.0f, COL_PANEL_BORDER, 1.0f);
+        RectF l(rc.X + 16.0f, rc.Y + 10.0f, rc.Width - 32.0f, 13.0f);
+        DrawTextIn(g, label, l, fonts.fLabel, COL_TEXT_DIM, false, true);
+        RectF v(rc.X + 16.0f, rc.Y + 30.0f, rc.Width - 32.0f, 26.0f);
+        DrawTextIn(g, value.c_str(), v, fonts.fBody, valueColor, false, true,
+                   StringTrimmingEllipsisCharacter, true);
+    };
+    drawCard(cardFree, L"ESPACIO LIBRE EN LA UNIDAD", FormatBytes(g_state.destFreeBytes),
+             g_state.destFreeBytes > 0 ? COL_TEXT : COL_WARN);
+    const std::wstring sizeText = (g_state.payloadBytes > 0)
+        ? FormatBytes(g_state.payloadBytes)
+        : std::wstring(L"No incrustado (compilación de desarrollo)");
+    drawCard(cardSize, L"TAMAÑO DE LA INSTALACIÓN", sizeText, COL_TEXT);
+
+    float infoY = cardsY + 90.0f;
+    if (g_state.existingInstallFound) {
+        const RectF info(contentX, infoY, CW, 52.0f);
+        FillRound(g, info, 10.0f, Color(255, 30, 24, 12));
+        StrokeRound(g, info, 10.0f, Color(255, 120, 92, 30), 1.0f);
+        const float dotR = 4.0f;
+        FillRound(g, RectF(info.X + 16.0f, info.Y + info.Height * 0.5f - dotR, dotR * 2.0f, dotR * 2.0f),
+                  dotR, COL_WARN);
+        RectF infoText(info.X + 32.0f, info.Y, info.Width - 48.0f, info.Height);
+        std::wstring msg = L"Instalación previa detectada (versión " + g_state.existingVersion +
+                           L"). Se actualizará sin perder tu configuración.";
+        DrawTextIn(g, msg.c_str(), infoText, fonts.fSmall, COL_TEXT, false, true,
+                   StringTrimmingEllipsisCharacter, true);
+        infoY += 64.0f;
+    }
+
+    RectF note(contentX, infoY + 8.0f, CW, 18.0f);
+    DrawTextIn(g, L"Recomendado: al menos 100 MB libres. ARTPICST no instala servicios ni procesos en segundo plano.",
+               note, fonts.fTiny, COL_TEXT_DIM, false, true, StringTrimmingEllipsisCharacter, true);
+
+    RectF destRect(contentX, H - 78.0f, CW, 18.0f);
+    std::wstring dest = L"Se instalará en:  " + g_state.installPath;
+    DrawTextIn(g, dest.c_str(), destRect, fonts.fTiny, COL_TEXT_DIM, false, true,
+               StringTrimmingEllipsisCharacter, true);
+}
+
+void RenderLicense(Graphics& g, const Fonts& fonts, float W, float H, const LayoutRects& layout) {
+    (void)W;
+    const float contentX = layout.back.X;
+    const float CW = layout.next.X + layout.next.Width - contentX;
+
+    RectF titleRect(contentX, 40.0f, CW, 30.0f);
     DrawTextIn(g, L"Licencia y opciones", titleRect, fonts.fHeading, COL_TEXT, true, true);
 
-    const RectF box(cx - 290.0f, 106.0f, 580.0f, 148.0f);
+    const RectF box(contentX, 82.0f, CW, 200.0f);
     FillRound(g, box, 12.0f, COL_PANEL_DEEP);
     StrokeRound(g, box, 12.0f, COL_PANEL_BORDER, 1.0f);
 
@@ -1644,7 +1905,7 @@ void RenderLicense(Graphics& g, const Fonts& fonts, float W, float H, const Layo
     SolidBrush licenseBrush(Color(255, 168, 178, 194));
     g.DrawString(licenseText, -1, &licenseFont, textArea, &textFormat, &licenseBrush);
 
-    RectF optTitle(52.0f, 256.0f, W - 104.0f, 14.0f);
+    RectF optTitle(contentX, 294.0f, CW, 14.0f);
     DrawTextIn(g, L"OPCIONES DE INSTALACIÓN", optTitle, fonts.fLabel, COL_TEXT_DIM, false, true);
 
     struct OptionRow { const wchar_t* label; const bool* value; int hover; };
@@ -1658,33 +1919,36 @@ void RenderLicense(Graphics& g, const Fonts& fonts, float W, float H, const Layo
                       g_state.hoverZone == rows[i].hover);
     }
 
-    RectF destRect(52.0f, H - 74.0f, W - 104.0f, 18.0f);
+    RectF destRect(contentX, H - 78.0f, CW, 18.0f);
     std::wstring dest = L"Se instalará en:  " + g_state.installPath;
     DrawTextIn(g, dest.c_str(), destRect, fonts.fTiny, COL_TEXT_DIM, false, true,
                StringTrimmingEllipsisCharacter, true);
 }
 
 void RenderUninstallConfirm(Graphics& g, const Fonts& fonts, float W, float H, const LayoutRects& layout) {
-    const float cx = W * 0.5f;
+    (void)W;
+    (void)H;
+    const float contentX = layout.back.X;
+    const float CW = layout.next.X + layout.next.Width - contentX;
 
-    const float r = 32.0f;
-    const float cy = 122.0f;
-    const RectF ring(cx - r, cy - r, r * 2.0f, r * 2.0f);
+    const float r = 26.0f;
+    const float cy = 96.0f;
+    const RectF ring(contentX + 4.0f, cy - r, r * 2.0f, r * 2.0f);
     GraphicsPath ringPath;
     RoundPath(ringPath, ring, r);
     SolidBrush ringBrush(COL_WARN);
     g.FillPath(&ringBrush, &ringPath);
-    Font bangFont(&fonts.family, 36.0f, FontStyleBold, UnitPixel);
+    Font bangFont(&fonts.family, 30.0f, FontStyleBold, UnitPixel);
     DrawTextIn(g, L"!", ring, bangFont, Color(255, 20, 20, 24), true, true);
 
-    RectF titleRect(cx - 240.0f, 168.0f, 480.0f, 34.0f);
-    DrawTextIn(g, L"Desinstalar ARTPICST", titleRect, fonts.fHeading, COL_TEXT, true, true);
+    RectF titleRect(contentX + 72.0f, 66.0f, CW - 72.0f, 30.0f);
+    DrawTextIn(g, L"Desinstalar ARTPICST", titleRect, fonts.fHeading, COL_TEXT, false, true);
 
-    RectF subRect(cx - 240.0f, 206.0f, 480.0f, 20.0f);
+    RectF subRect(contentX + 72.0f, 100.0f, CW - 72.0f, 20.0f);
     DrawTextIn(g, L"El programa y sus componentes se eliminarán de este equipo.",
-               subRect, fonts.fSmall, COL_TEXT_SOFT, true, true);
+               subRect, fonts.fSmall, COL_TEXT_SOFT, false, true);
 
-    const RectF card(cx - 250.0f, 238.0f, 500.0f, 108.0f);
+    const RectF card(contentX, 146.0f, CW, 104.0f);
     FillRound(g, card, 12.0f, COL_PANEL);
     StrokeRound(g, card, 12.0f, COL_PANEL_BORDER, 1.0f);
 
@@ -1708,65 +1972,68 @@ void RenderUninstallConfirm(Graphics& g, const Fonts& fonts, float W, float H, c
                   L"Conservar configuraciones e historial del usuario",
                   g_state.keepUserConfig, g_state.hoverZone == HOVER_ROW_DESKTOP);
 
-    RectF hint(cx - 260.0f, H - 74.0f, 520.0f, 18.0f);
+    RectF hint(contentX, 336.0f, CW, 18.0f);
     DrawTextIn(g, L"Las imágenes del equipo y sus miniaturas no se verán afectadas.",
-               hint, fonts.fTiny, COL_TEXT_DIM, true, true);
+               hint, fonts.fTiny, COL_TEXT_DIM, false, true);
 }
 
 void RenderWorking(Graphics& g, const Fonts& fonts, float W, float H) {
-    const float cx = W * 0.5f;
-
-    DrawLogo(g, fonts, cx, 118.0f, 46.0f);
+    const float contentX = SIDEBAR_W + CONTENT_PAD;
+    const float contentRight = W - RIGHT_MARGIN;
+    const float CW = contentRight - contentX;
 
     const wchar_t* title =
         g_state.mode == AppMode::Uninstall ? L"Desinstalando ARTPICST" :
         g_state.mode == AppMode::Update    ? L"Actualizando ARTPICST" :
                                              L"Instalando ARTPICST";
-    RectF titleRect(cx - 260.0f, 150.0f, 520.0f, 30.0f);
+    RectF titleRect(contentX, 46.0f, CW, 30.0f);
     DrawTextIn(g, title, titleRect, fonts.fHeading, COL_TEXT, true, true);
 
-    RectF statusRect(cx - 280.0f, 184.0f, 560.0f, 20.0f);
+    RectF statusRect(contentX, 82.0f, CW, 20.0f);
     DrawTextIn(g, g_state.installStatus.c_str(), statusRect, fonts.fSmall, COL_TEXT_SOFT, true, true);
 
-    const RectF track(cx - 260.0f, 212.0f, 520.0f, 10.0f);
+    const RectF track(contentX, 114.0f, CW, 10.0f);
     DrawProgressBar(g, track, g_state.progressShown);
 
     wchar_t percentText[32];
     swprintf(percentText, 32, L"%.0f%%", g_state.progressShown);
-    RectF pctRect(cx - 260.0f, 228.0f, 120.0f, 18.0f);
+    RectF pctRect(contentX, 130.0f, 120.0f, 18.0f);
     DrawTextIn(g, percentText, pctRect, fonts.fLabel, COL_ACCENT_A, false, true, StringTrimmingNone, true);
 
     // Consola de log: se estira con la ventana (ancho/alto fluidos).
-    const RectF console(cx - 300.0f, 254.0f, 600.0f, H - 254.0f - 64.0f);
+    const RectF console(contentX, 158.0f, CW, H - 158.0f - 78.0f);
     DrawLogConsole(g, fonts, console);
 
     std::wstring dest = (g_state.mode == AppMode::Uninstall)
         ? (L"Desinstalando de: " + g_state.uninstallInfoDir)
         : (L"Destino: " + g_state.installPath);
-    RectF destRect(cx - 300.0f, H - 46.0f, 600.0f, 18.0f);
+    RectF destRect(contentX, H - 52.0f, CW, 18.0f);
     DrawTextIn(g, dest.c_str(), destRect, fonts.fTiny, COL_TEXT_DIM, true, true,
                StringTrimmingEllipsisCharacter, true);
 }
 
 void RenderComplete(Graphics& g, const Fonts& fonts, float W) {
-    const float cx = W * 0.5f;
+    const float contentX = SIDEBAR_W + CONTENT_PAD;
+    const float contentRight = W - RIGHT_MARGIN;
+    const float CW = contentRight - contentX;
+    const float cx = contentX + CW * 0.5f;
 
     if (g_state.installSucceeded) {
-        const float r = 36.0f;
-        const float cy = 136.0f;
+        const float r = 34.0f;
+        const float cy = 118.0f;
         const RectF ring(cx - r, cy - r, r * 2.0f, r * 2.0f);
         GraphicsPath ringPath;
         RoundPath(ringPath, ring, r);
         SolidBrush ringBrush(COL_SUCCESS);
         g.FillPath(&ringBrush, &ringPath);
-        DrawCheckMark(g, cx - 15.0f, cy + 1.0f, cx - 4.0f, cy + 12.0f, cx + 16.0f, cy - 12.0f, 4.0f,
+        DrawCheckMark(g, cx - 14.0f, cy + 1.0f, cx - 4.0f, cy + 11.0f, cx + 15.0f, cy - 11.0f, 4.0f,
                       Color(255, 255, 255, 255));
 
         const wchar_t* title =
             g_state.mode == AppMode::Uninstall ? L"Desinstalación completada" :
             g_state.mode == AppMode::Update    ? L"Actualización completada" :
                                                  L"Instalación completada";
-        RectF titleRect(cx - 240.0f, 196.0f, 480.0f, 40.0f);
+        RectF titleRect(contentX, 172.0f, CW, 40.0f);
         DrawTextIn(g, title, titleRect, fonts.fTitle, COL_TEXT, true, true);
 
         std::wstring sub;
@@ -1777,24 +2044,46 @@ void RenderComplete(Graphics& g, const Fonts& fonts, float W) {
         } else {
             sub = L"Gracias por elegir ARTPICST.  " + g_state.installPath;
         }
-        RectF subRect(cx - 280.0f, 242.0f, 560.0f, 22.0f);
+        RectF subRect(contentX, 218.0f, CW, 22.0f);
         DrawTextIn(g, sub.c_str(), subRect, fonts.fSmall, COL_TEXT_SOFT, true, true,
                    StringTrimmingEllipsisCharacter, true);
+
+        // Tarjeta de estadísticas REALES de la operación.
+        if (g_state.mode != AppMode::Uninstall) {
+            const RectF stats(cx - 210.0f, 258.0f, 420.0f, 100.0f);
+            FillRound(g, stats, 12.0f, COL_PANEL);
+            StrokeRound(g, stats, 12.0f, COL_PANEL_BORDER, 1.0f);
+            const wchar_t* labels[] = { L"VERSIÓN INSTALADA", L"TAMAÑO INSTALADO", L"ACCESOS DIRECTOS" };
+            const std::wstring sizes[] = {
+                std::wstring(APP_VERSION),
+                g_bytesDeployed > 0 ? FormatBytes(g_bytesDeployed) : std::wstring(L"—"),
+                std::to_wstring(g_shortcutsCreated),
+            };
+            float iy = stats.Y + 14.0f;
+            for (int i = 0; i < 3; ++i) {
+                RectF labelRect(stats.X + 18.0f, iy, 190.0f, 16.0f);
+                DrawTextIn(g, labels[i], labelRect, fonts.fLabel, COL_TEXT_DIM, false, true);
+                RectF valueRect(stats.X + 212.0f, iy - 1.0f, stats.Width - 230.0f, 18.0f);
+                DrawTextIn(g, sizes[i].c_str(), valueRect, fonts.fSmall, COL_TEXT, false, true,
+                           StringTrimmingEllipsisCharacter, true);
+                iy += 28.0f;
+            }
+        }
     } else {
-        const float r = 36.0f;
-        const float cy = 136.0f;
+        const float r = 34.0f;
+        const float cy = 118.0f;
         const RectF ring(cx - r, cy - r, r * 2.0f, r * 2.0f);
         GraphicsPath ringPath;
         RoundPath(ringPath, ring, r);
         SolidBrush ringBrush(COL_ERROR);
         g.FillPath(&ringBrush, &ringPath);
-        Font bangFont(&fonts.family, 40.0f, FontStyleBold, UnitPixel);
+        Font bangFont(&fonts.family, 38.0f, FontStyleBold, UnitPixel);
         DrawTextIn(g, L"!", ring, bangFont, Color(255, 255, 255, 255), true, true);
 
-        RectF titleRect(cx - 260.0f, 196.0f, 520.0f, 40.0f);
+        RectF titleRect(contentX, 172.0f, CW, 40.0f);
         DrawTextIn(g, L"No se pudo completar la operación", titleRect, fonts.fTitle, COL_TEXT, true, true);
 
-        RectF msgRect(cx - 280.0f, 242.0f, 560.0f, 44.0f);
+        RectF msgRect(contentX, 218.0f, CW, 44.0f);
         DrawTextIn(g, g_state.failureReason.c_str(), msgRect, fonts.fSmall, COL_TEXT_SOFT, true, false);
     }
 }
@@ -1802,17 +2091,6 @@ void RenderComplete(Graphics& g, const Fonts& fonts, float W) {
 // ============================================================================
 // Composición de la ventana
 // ============================================================================
-
-static int StepIndexForHeader() {
-    switch (g_state.currentStep) {
-        case WizardStep::Welcome:          return 0;
-        case WizardStep::License:          return 1;
-        case WizardStep::UninstallConfirm: return 1;
-        case WizardStep::Working:          return 2;
-        case WizardStep::Complete:         return 3;
-    }
-    return 0;
-}
 
 static const wchar_t* SubtitleForHeader() {
     switch (g_state.mode) {
@@ -1829,13 +2107,15 @@ void RenderWindow(Graphics& g, const RECT& client) {
 
     Fonts fonts;
     DrawChrome(g, fonts, W, H);
-    DrawPageHeader(g, fonts, W, SubtitleForHeader(), StepIndexForHeader());
+    DrawSidebar(g, fonts, W, H);
+    DrawPageHeader(g, fonts, W, SubtitleForHeader());
 
     const LayoutRects layout = ComputeLayout(W, H);
 
     switch (g_state.currentStep) {
-        case WizardStep::Welcome:          RenderWelcome(g, fonts, W, H); break;
+        case WizardStep::Welcome:          RenderWelcome(g, fonts, W, H, layout); break;
         case WizardStep::License:          RenderLicense(g, fonts, W, H, layout); break;
+        case WizardStep::Destination:      RenderDestination(g, fonts, W, H, layout); break;
         case WizardStep::UninstallConfirm: RenderUninstallConfirm(g, fonts, W, H, layout); break;
         case WizardStep::Working:          RenderWorking(g, fonts, W, H); break;
         case WizardStep::Complete:         RenderComplete(g, fonts, W); break;
@@ -1850,6 +2130,9 @@ void RenderWindow(Graphics& g, const RECT& client) {
                           g_state.mode == AppMode::Uninstall ? L"Desinstalar  →" : L"Siguiente  →",
                           g_state.hoverZone == HOVER_NEXT);
     } else if (g_state.currentStep == WizardStep::License) {
+        DrawGhostButton(g, fonts, layout.back, L"←  Volver", g_state.hoverZone == HOVER_BACK);
+        DrawPrimaryButton(g, fonts, layout.next, L"Continuar  →", g_state.hoverZone == HOVER_NEXT);
+    } else if (g_state.currentStep == WizardStep::Destination) {
         DrawGhostButton(g, fonts, layout.back, L"←  Volver", g_state.hoverZone == HOVER_BACK);
         DrawPrimaryButton(g, fonts, layout.next, L"Instalar", g_state.hoverZone == HOVER_NEXT);
     } else if (g_state.currentStep == WizardStep::UninstallConfirm) {
@@ -1892,6 +2175,8 @@ void StartWork(AppMode mode) {
     g_state.failureReason.clear();
     g_state.progressShown = 0.0;
     g_state.progressTarget = 0.0;
+    g_bytesDeployed = 0;
+    g_shortcutsCreated = 0;
     g_state.log.clear();
     g_state.logScroll = 0;
     g_state.workTotalSeconds = (mode == AppMode::Uninstall) ? kUninstallDurationSeconds
@@ -1958,6 +2243,12 @@ void InvokePrimaryAction() {
             InvalidateRect(g_state.hwnd, nullptr, FALSE);
             break;
         case WizardStep::License:
+            RefreshDestinationFacts();   // hechos frescos antes de mostrar Destino
+            g_state.currentStep = WizardStep::Destination;
+            g_state.hoverZone = HOVER_NONE;
+            InvalidateRect(g_state.hwnd, nullptr, FALSE);
+            break;
+        case WizardStep::Destination:
             StartWork(AppMode::Install);
             break;
         case WizardStep::UninstallConfirm:
@@ -1989,6 +2280,11 @@ void InvokeBackAction() {
     switch (g_state.currentStep) {
         case WizardStep::License:
             g_state.currentStep = WizardStep::Welcome;
+            g_state.hoverZone = HOVER_NONE;
+            InvalidateRect(g_state.hwnd, nullptr, FALSE);
+            break;
+        case WizardStep::Destination:
+            g_state.currentStep = WizardStep::License;
             g_state.hoverZone = HOVER_NONE;
             InvalidateRect(g_state.hwnd, nullptr, FALSE);
             break;
@@ -2113,7 +2409,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             const int delta = GET_WHEEL_DELTA_WPARAM(wParam);
             RECT client{};
             GetClientRect(hwnd, &client);
-            const float consoleH = static_cast<float>(client.bottom) / g_scale - 254.0f - 64.0f;
+            const float consoleH = static_cast<float>(client.bottom) / g_scale - 158.0f - 78.0f;
             const int visible = static_cast<int>((consoleH - 46.0f) / 17.0f);
             const int maxScroll = static_cast<int>(g_state.log.size()) > visible
                                       ? static_cast<int>(g_state.log.size()) - visible : 0;
@@ -2189,6 +2485,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     if (z == HOVER_BACK) rc = &lr.back;
                     else if (z == HOVER_NEXT) rc = &lr.next;
                     else if (z == HOVER_CANCEL) rc = &lr.cancel;
+                    else if (z == HOVER_BROWSE) rc = &lr.browse;
                     else if (z >= HOVER_ROW_DESKTOP && z < HOVER_ROW_DESKTOP + lr.rowCount)
                         rc = &lr.rows[z - HOVER_ROW_DESKTOP];
                     if (!rc) return;
@@ -2258,6 +2555,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 }
             }
 
+            if (g_state.currentStep == WizardStep::Destination && hit(layout.browse, lx, ly)) {
+                BrowseForDestination();
+                return 0;
+            }
             if (hit(layout.next, lx, ly)) {
                 InvokePrimaryAction();
                 return 0;

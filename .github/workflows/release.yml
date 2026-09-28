@@ -107,13 +107,17 @@ jobs:
       - name: Validar updater (selftest como gate de calidad)
         shell: cmd
         run: |
+          REM Sin bloque ( ... ): los parentesis del mensaje rompian el parseo
+          REM de cmd (". was unexpected at this time.") y el step moria con 255
+          REM aunque el selftest hubiera pasado. Con goto el echo es una linea
+          REM plana y los parentesis son literales.
           build\artpicst_updater.exe --selftest > selftest.log 2>&1
           set GATE_RC=%errorlevel%
           type selftest.log
-          if %GATE_RC% neq 0 (
-            echo ::error::Updater selftest FAILED con exit code %GATE_RC% (salida arriba; vacío = crash antes de escribir).
-            exit /b 1
-          )
+          if %GATE_RC% equ 0 goto gate_ok
+          echo ::error::Updater selftest FAILED con exit code %GATE_RC% (salida arriba; vacío = crash antes de escribir).
+          exit /b 1
+          :gate_ok
           echo Updater selftest OK.
 
       - name: Preparar payload autocontenido del instalador
