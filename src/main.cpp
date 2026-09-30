@@ -176,8 +176,10 @@ Color GLASS_BTN_BORDER_HOT = GLASS_BTN_BORDER_HOT_DARK;
 Color GLASS_BTN_ACTIVE = GLASS_BTN_ACTIVE_DARK;
 
 // Configuración de zoom y renderizado ultraligero (Consumo mínimo de RAM y CPU)
-const float MIN_ZOOM = 0.01f;
-const float MAX_ZOOM = 200.0f;
+// ZOOM SIN LÍMITES PRÁCTICOS: rango extendido 0.5%–51200%. Una foto de 40 MP
+// es manejable al 0.5% y el análisis píxel a píxel llega hasta 512x.
+const float MIN_ZOOM = 0.005f;
+const float MAX_ZOOM = 512.0f;
 const float ZOOM_STEP = 1.25f;
 const size_t CACHE_SIZE = 4;                           // Caché compacta (2 previas + 2 siguientes) para consumo ultra-ligero
 const size_t MAX_CACHE_BYTES = 64ull * 1024ull * 1024ull; // 64 MB límite de caché: evita picos de RAM (~300 MB) con fotos grandes
@@ -214,6 +216,14 @@ const DWORD ZOOM_ANIM_MS = 110;   // Duración de la animación de zoom suave
 // percibía microsaltos. 8 ms duplica la tasa y el coste es nulo (solo
 // invalidación, el frame se rasteriza en WM_PAINT).
 constexpr UINT ZOOM_ANIM_PERIOD_MS = 8;   // ~120 Hz de actualización
+
+// ZOOM ULTRA SUAVE: la animación interpola ln(zoom) (progresión geométrica)
+// en lugar del factor lineal. El tempo perceptual es idéntico a cualquier
+// escala (0.5%→1% se siente igual que 100%→200%) y el encadenado de muescas
+// de rueda compone sobre el estado actual sin acelerones ni "muelles".
+constexpr float ZOOM_ANIM_LOG_FULL_SPAN = 0.6f;  // |Δ ln zoom| con duración máxima
+const DWORD ZOOM_ANIM_MS_MIN = 90;               // salto pequeño (1 muesca ≈ 108 ms)
+const DWORD ZOOM_ANIM_MS_MAX = 140;              // salto grande (encadenado)
 
 template <typename T>
 struct ComPtr {
@@ -396,12 +406,21 @@ struct AppState {
     DWORD gifLastTick = 0;
     bool gifPaused = false;
 
-    // Animación de zoom suave (interpolada por temporizador).
+    // Animación de zoom ultra suave (interpolación LOGARÍTMICA por temporizador):
+    // se anima ln(zoom), es decir, progresión geométrica con tempo perceptual
+    // constante a cualquier escala y pivote anclado bajo el cursor.
     bool zoomAnimActive = false;
     float zoomAnimStart = 0.0f, zoomAnimTarget = 0.0f;
+    float zoomAnimLogStart = 0.0f, zoomAnimLogDelta = 0.0f;
+    DWORD zoomAnimDurationMs = ZOOM_ANIM_MS;
     float zoomAnimImageX = 0.0f, zoomAnimImageY = 0.0f;
     float zoomAnimStartOffsetX = 0.0f, zoomAnimStartOffsetY = 0.0f;
     DWORD zoomAnimStartTime = 0;
+    // Región sucia de la animación: rectángulo de la imagen en el último frame
+    // pintado, para invalidar SOLO la franja donde se movió (no la ventana).
+    RECT zoomAnimLastImageRect{};
+    bool zoomAnimHadEmptyState = true;
+    bool zoomAnimFirstTickDone = false;
 
     // Sistema de caché
     std::unordered_map<std::wstring, std::list<CachedImage>::iterator> cacheIndex;
@@ -439,6 +458,21 @@ struct AppState {
     HudId hudHot = HUD_NONE;
     bool dockAutoHide = true;
     DWORD dockLastActivity = 0;
+
+    // FIX RENDIMIENTO: geometría del dock cacheada. LayoutHud solo recalcula
+    // cuando cambia el tamaño del cliente o el modo pantalla completa; antes se
+    // reconstruía en cada frame Y en cada WM_MOUSEMOVE (via HitTestHud).
+    bool hudLayoutValid = false;
+    int hudLayoutClientWidth = -1, hudLayoutClientHeight = -1;
+    bool hudLayoutFullscreen = false;
+    const wchar_t* hudLayoutFullButton = nullptr;
+
+    // FIX RENDIMIENTO (ruta GDI+): el ImageAttributes de efectos de imagen se
+    // cachea; solo se reconstruye al cambiar el efecto activo (antes se creaba
+    // y destría en CADA frame de RenderImage).
+    ImageAttributes* effectAttr = nullptr;       // prestado (no liberar)
+    ImageAttributes* effectAttrOwner = nullptr;  // propietario (liberar aquí)
+    int effectAttrKey = -1;
 
     GifAnimation gif;
 
@@ -500,6 +534,165 @@ struct UiResources {
 };
 
 UiResources g_ui;
+
+// FIX RENDIMIENTO (RUTA GDI+): el dock redibujado cada frame creaba y destruía
+// ~15 objetos GDI+ (2 GraphicsPath del marco + 11 de botones + pinceles y
+// penes). Ahora la GEOMETRÍA y los RECURSOS se cachean:
+//   · paths del marco (dock + sombra): solo si cambia el tamaño del dock,
+//   · paths de botones: solo si cambia la geometría del layout,
+//   · pinceles/penes (incluido el degradado activo): solo al cambiar de tema,
+//   · ancho del texto del OSD: solo al cambiar el mensaje o la fuente.
+// El estado hot (hover) se resuelve con pinceles ya creados, como hacía el
+// renderizador GPU. Cero cambios visuales: mismos colores, radios y bordes.
+struct DockFrameCache {
+    bool valid = false;
+    int dockLeft = -1, dockTop = -1, dockWidth = -1, dockHeight = -1;
+    bool darkMode = false;
+    std::unique_ptr<GraphicsPath> dockPath;
+    std::unique_ptr<GraphicsPath> shadowPath;
+    std::unique_ptr<SolidBrush> shadowBrush;
+    std::unique_ptr<SolidBrush> dockBgBrush;
+    std::unique_ptr<Pen> dockBorderPen;
+    std::unique_ptr<SolidBrush> hotBrush;
+    std::unique_ptr<Pen> hotBorderPen;
+    std::unique_ptr<SolidBrush> btnNormalBrush;
+    std::unique_ptr<Pen> btnNormalBorderPen;
+    std::unique_ptr<SolidBrush> btnActiveTextBrush;
+    std::unique_ptr<SolidBrush> btnTextBrush;
+    std::unique_ptr<SolidBrush> osdBgBrush;
+    std::unique_ptr<Pen> osdBorderPen;
+    std::unique_ptr<SolidBrush> osdTextBrush;
+    bool activeBrushValid = false;
+    std::unique_ptr<LinearGradientBrush> activeBrush;
+    std::unique_ptr<Pen> activeBorderPen;
+    std::vector<std::unique_ptr<GraphicsPath>> buttonPaths;
+    int hudGeomCount = -1;
+    RECT hudGeom[12]{};
+    bool osdTextValid = false;
+    std::wstring osdTextKey;
+    bool osdFontBold = false;
+    float osdTextWidth = 0.0f;
+
+    static void AddRoundRectPath(GraphicsPath& path, const RectF& rect, float radius) {
+        radius = std::max(0.0f, std::min(radius, std::min(rect.Width, rect.Height) * 0.5f));
+        const float diameter = radius * 2.0f;
+        path.AddArc(rect.X, rect.Y, diameter, diameter, 180, 90);
+        path.AddArc(rect.X + rect.Width - diameter, rect.Y, diameter, diameter, 270, 90);
+        path.AddArc(rect.X + rect.Width - diameter, rect.Y + rect.Height - diameter, diameter, diameter, 0, 90);
+        path.AddArc(rect.X, rect.Y + rect.Height - diameter, diameter, diameter, 90, 90);
+        path.CloseFigure();
+    }
+
+    void EnsureBrushes() {
+        if (dockBgBrush && darkMode == g_state.darkModeDetected) return;
+        darkMode = g_state.darkModeDetected;
+        shadowBrush = std::make_unique<SolidBrush>(GLASS_DOCK_SHADOW);
+        dockBgBrush = std::make_unique<SolidBrush>(GLASS_DOCK_BG);
+        dockBorderPen = std::make_unique<Pen>(GLASS_DOCK_BORDER, 1.0f);
+        hotBrush = std::make_unique<SolidBrush>(GLASS_BTN_HOT);
+        hotBorderPen = std::make_unique<Pen>(Color(255, 0, 210, 255), 1.2f);   // borde cian en hover
+        btnNormalBrush = std::make_unique<SolidBrush>(GLASS_BTN_NORMAL);
+        btnNormalBorderPen = std::make_unique<Pen>(GLASS_BTN_BORDER_NORMAL, 1.0f);
+        btnActiveTextBrush = std::make_unique<SolidBrush>(Color(255, 255, 255));
+        btnTextBrush = std::make_unique<SolidBrush>(
+            darkMode ? Color(255, 230, 235, 242) : Color(255, 30, 32, 38));
+        osdBgBrush = std::make_unique<SolidBrush>(darkMode ? Color(245, 24, 25, 30) : Color(245, 255, 255, 255));
+        osdBorderPen = std::make_unique<Pen>(darkMode ? Color(255, 60, 62, 74) : Color(255, 210, 214, 222), 1.0f);
+        osdTextBrush = std::make_unique<SolidBrush>(darkMode ? Color(245, 248, 252) : Color(255, 30, 32, 38));
+        activeBrushValid = false;   // el degradado activo se reconstruye al primer uso
+    }
+
+    void EnsureDockFrame(const RectF& dockRectF) {
+        const int l = static_cast<int>(dockRectF.X);
+        const int t = static_cast<int>(dockRectF.Y);
+        const int w = static_cast<int>(dockRectF.Width);
+        const int h = static_cast<int>(dockRectF.Height);
+        if (valid && dockPath && dockLeft == l && dockTop == t && dockWidth == w && dockHeight == h) return;
+        dockLeft = l; dockTop = t; dockWidth = w; dockHeight = h;
+        RectF shadowRectF = dockRectF;
+        shadowRectF.Y += 2.0f;
+        shadowPath = std::make_unique<GraphicsPath>();
+        AddRoundRectPath(*shadowPath, shadowRectF, 10.0f);
+        dockPath = std::make_unique<GraphicsPath>();
+        AddRoundRectPath(*dockPath, dockRectF, 10.0f);
+        valid = true;
+    }
+
+    void EnsureButtonGeometries() {
+        if (hudGeomCount == g_state.hudCount && hudGeomCount >= 0 &&
+            hudGeomCount <= 12 &&
+            std::memcmp(hudGeom, g_state.hud, sizeof(RECT) * static_cast<size_t>(hudGeomCount)) == 0) {
+            return;
+        }
+        hudGeomCount = g_state.hudCount;
+        for (int i = 0; i < hudGeomCount; ++i) hudGeom[i] = g_state.hud[i].rc;
+        buttonPaths.clear();
+        buttonPaths.reserve(static_cast<size_t>(hudGeomCount));
+        for (int i = 0; i < hudGeomCount; ++i) {
+            auto p = std::make_unique<GraphicsPath>();
+            const RECT& rc = g_state.hud[i].rc;
+            const RectF itemRect(static_cast<float>(rc.left), static_cast<float>(rc.top),
+                                 static_cast<float>(rc.right - rc.left),
+                                 static_cast<float>(rc.bottom - rc.top));
+            AddRoundRectPath(*p, itemRect, 6.0f);
+            buttonPaths.push_back(std::move(p));
+        }
+        activeBrushValid = false;   // el degradado depende de la geometría del botón
+    }
+
+    void EnsureActiveBrush(const RectF& gradRect) {
+        if (activeBrushValid && activeBrush && activeBorderPen) return;
+        activeBrush = std::make_unique<LinearGradientBrush>(gradRect, Color(255, 0, 190, 235), Color(255, 150, 70, 255), 0.0f);
+        activeBorderPen = std::make_unique<Pen>(Color(255, 140, 235, 255), 1.2f);
+        activeBrushValid = true;
+    }
+
+    void EnsureOsdTextWidth(Graphics& g, const std::wstring& msg) {
+        Font& font = *g_ui.osdFont;
+        StringFormat& format = *g_ui.centerFormat;
+        const bool bold = (static_cast<int>(font.GetStyle()) & static_cast<int>(FontStyleBold)) != 0;
+        if (osdTextValid && osdFontBold == bold && osdTextKey == msg) return;
+        RectF layoutRect(0, 0, 600, 40);
+        RectF boundRect;
+        g.MeasureString(msg.c_str(), -1, &font, layoutRect, &format, &boundRect);
+        osdTextKey = msg;
+        osdFontBold = bold;
+        osdTextWidth = boundRect.Width;
+        osdTextValid = true;
+    }
+
+    void Invalidate() {
+        valid = false;
+        dockPath.reset();
+        shadowPath.reset();
+        hudGeomCount = -1;
+        buttonPaths.clear();
+        activeBrushValid = false;
+    }
+
+    void Shutdown() {
+        Invalidate();
+        shadowBrush.reset();
+        dockBgBrush.reset();
+        dockBorderPen.reset();
+        hotBrush.reset();
+        hotBorderPen.reset();
+        btnNormalBrush.reset();
+        btnNormalBorderPen.reset();
+        btnActiveTextBrush.reset();
+        btnTextBrush.reset();
+        osdBgBrush.reset();
+        osdBorderPen.reset();
+        osdTextBrush.reset();
+        activeBrush.reset();
+        activeBorderPen.reset();
+        activeBrushValid = false;
+        osdTextValid = false;
+        osdTextKey.clear();
+    }
+};
+
+DockFrameCache g_dockCache;
 
 std::wstring GetFileName(const std::wstring& filepath);
 std::wstring GetFileSizeString(const std::wstring& filepath);
@@ -1295,6 +1488,11 @@ void ApplyTheme(ThemeMode theme) {
     
     // El fondo de la clase es nullptr (el pintado cubre la región sucia con el
     // color de tema), así que no hay pincel de clase que refrescar.
+
+    // Los recursos cacheados del dock dependen del tema: forzar su recreación.
+    g_dockCache.Invalidate();
+    // El layout cacheado depende de la etiqueta dinámica de pantalla completa.
+    g_state.hudLayoutValid = false;
 }
 
 void InitializeIntelligentTheme() {
@@ -1496,6 +1694,11 @@ void CleanupGDIPlus() {
     FreeCurrentImage();
     FreeDoubleBuffer();
     FreeCheckerTile();
+    g_dockCache.Shutdown();
+    delete g_state.effectAttrOwner;
+    g_state.effectAttrOwner = nullptr;
+    g_state.effectAttr = nullptr;
+    g_state.effectAttrKey = -1;
     g_ui.Shutdown();
     if (g_state.gdiplusToken) {
         GdiplusShutdown(g_state.gdiplusToken);
@@ -2448,22 +2651,13 @@ void ToggleInvert() {
     InvalidateRect(g_state.hwnd, nullptr, FALSE);
 }
 
+// ZOOM 100% LIBRE: ya no se recentra ni se "encierra" la imagen. El usuario
+// controla la vista con la rueda y el arrastre; si la imagen queda fuera de
+// la ventana, F / doble clic / botón "Ajustar" la recuperan. La función se
+// conserva como no-op seguro: las llamadas existentes (WM_SIZE, rotación,
+// apertura) siguen compilando sin cambiar de comportamiento de forma brusca.
 void EnsureImageVisible() {
-    if (!g_state.imageData || !g_state.hwnd) return;
-    if (g_state.zoomAnimActive) return; // no interfiere con la animación de zoom
-    RECT client{};
-    GetClientRect(g_state.hwnd, &client);
-    const int windowWidth = client.right - client.left;
-    const int windowHeight = client.bottom - client.top;
-    if (windowWidth <= 0 || windowHeight <= 0) return;
-    int imageWidth = 0, imageHeight = 0;
-    DisplaySize(imageWidth, imageHeight);
-    const float drawW = imageWidth * g_state.zoom;
-    const float drawH = imageHeight * g_state.zoom;
-    if (drawW <= windowWidth) g_state.offsetX = (windowWidth - drawW) * 0.5f;
-    else g_state.offsetX = std::min(0.0f, std::max(windowWidth - drawW, g_state.offsetX));
-    if (drawH <= windowHeight) g_state.offsetY = (windowHeight - drawH) * 0.5f;
-    else g_state.offsetY = std::min(0.0f, std::max(windowHeight - drawH, g_state.offsetY));
+    // Zoom libre: sin clamps de centrado ni límites de pan.
 }
 
 void FitImageToWindow(int windowWidth, int windowHeight) {
@@ -2502,27 +2696,125 @@ void CancelZoomAnimation() {
     if (g_state.hwnd) KillTimer(g_state.hwnd, TIMER_ZOOM);
 }
 
+// ----------------------------------------------------------------------------
+// FIX RENDIMIENTO (región sucia del zoom): en cada paso de la animación solo se
+// invalida la UNIÓN del rectángulo de pantalla que ocupa la imagen antes y
+// después de moverse (con margen de 2 px para el antialias), no la ventana
+// completa. Antes se invalidaba todo ~120 veces/s: cada paso re-rasterizaba
+// imagen escalada + OSD + dock de 11 botones, y el BitBlt final también era
+// completo. Con GPU, Direct2D rasteriza solo la franja de movimiento; en la
+// ruta GDI+, solo esa franja del doble buffer y un BitBlt parcial.
+// ----------------------------------------------------------------------------
+
+// Rectángulo de PANTALLA que ocupa la imagen con un estado dado (zoom/offset
+// arbitrarios, rotación y volteos actuales). Matemática idéntica a la usada
+// por el trazador GDI+ y por GpuImageBounds: centro T(offset + 0.5*dest) *
+// R(rotación) * F(flip) * T(-0.5*origen*zoom), envolvente de las 4 esquinas.
+static bool ComputeImageScreenRect(float zoom, float offsetX, float offsetY, RECT& out) {
+    if (!g_state.imageData) return false;
+    int boxW = 0, boxH = 0;
+    DisplaySize(boxW, boxH);
+    if (boxW <= 0 || boxH <= 0) return false;
+    const float halfW = static_cast<float>(g_state.imageWidth) * zoom * 0.5f;
+    const float halfH = static_cast<float>(g_state.imageHeight) * zoom * 0.5f;
+    const float cx = offsetX + static_cast<float>(boxW) * zoom * 0.5f;
+    const float cy = offsetY + static_cast<float>(boxH) * zoom * 0.5f;
+    const float rad = static_cast<float>(g_state.currentRotation) * 3.14159265358979f / 180.0f;
+    const float c = std::cos(rad), s = std::sin(rad);
+    const float xs[2] = { -halfW, halfW };
+    const float ys[2] = { -halfH, halfH };
+    float minX = 3.4e38f, minY = 3.4e38f, maxX = -3.4e38f, maxY = -3.4e38f;
+    for (float x : xs) {
+        for (float y : ys) {
+            const float rx = cx + (x * c - y * s);
+            const float ry = cy + (x * s + y * c);
+            minX = (rx < minX) ? rx : minX;
+            minY = (ry < minY) ? ry : minY;
+            maxX = (rx > maxX) ? rx : maxX;
+            maxY = (ry > maxY) ? ry : maxY;
+        }
+    }
+    out.left = static_cast<LONG>(std::floor(minX)) - 2;
+    out.top = static_cast<LONG>(std::floor(minY)) - 2;
+    out.right = static_cast<LONG>(std::ceil(maxX)) + 2;
+    out.bottom = static_cast<LONG>(std::ceil(maxY)) + 2;
+    return true;
+}
+
+// Repinta la zona donde la imagen estaba ANTES y donde queda DESPUÉS del paso.
+// Si no se puede calcular el rectángulo, invalida todo (comportamiento previo).
+static void InvalidateZoomStep(const RECT& prevImageRect, bool hadImage) {
+    if (!g_state.hwnd) return;
+    RECT nextImageRect{};
+    const bool haveNext = ComputeImageScreenRect(g_state.zoom, g_state.offsetX, g_state.offsetY, nextImageRect);
+    RECT dirty{};
+    if (hadImage && haveNext) {
+        dirty.left = std::min(prevImageRect.left, nextImageRect.left);
+        dirty.top = std::min(prevImageRect.top, nextImageRect.top);
+        dirty.right = std::max(prevImageRect.right, nextImageRect.right);
+        dirty.bottom = std::max(prevImageRect.bottom, nextImageRect.bottom);
+    } else if (haveNext) {
+        dirty = nextImageRect;
+    } else {
+        InvalidateRect(g_state.hwnd, nullptr, FALSE);
+        return;
+    }
+    RECT client{};
+    GetClientRect(g_state.hwnd, &client);
+    dirty.left = std::max(dirty.left, client.left);
+    dirty.top = std::max(dirty.top, client.top);
+    dirty.right = std::min(dirty.right, client.right);
+    dirty.bottom = std::min(dirty.bottom, client.bottom);
+    if (dirty.right <= dirty.left || dirty.bottom <= dirty.top) return;
+    InvalidateRect(g_state.hwnd, &dirty, FALSE);
+}
+
 void ZoomAt(float factor, int pivotX, int pivotY) {
     if (!g_state.imageData || !g_state.hwnd) return;
-    const float oldZoom = g_state.zoom;
-    float newZoom = std::max(MIN_ZOOM, std::min(MAX_ZOOM, oldZoom * factor));
-    // Auto-snap a 100% (1.0) cuando esté muy cerca para garantizar píxel perfecto nativo
-    if (std::fabs(newZoom - 1.0f) < 0.04f) newZoom = 1.0f;
-    if (newZoom == oldZoom) return;
+    if (!(factor > 0.0f) || !std::isfinite(factor)) return;
+
+    // ZOOM SIN LÍMITES PRÁCTICOS NI AUTO-SNAP: el destino se compone sobre el
+    // objetivo de la animación EN CURSO (encadenar muescas de rueda nunca
+    // reinicia la curva ni cambia el tempo); el snap a 100% se eliminó (el
+    // 1:1 exacto sigue en la tecla 1/0, el botón "1:1" y el menú).
+    const float baseZoom = g_state.zoomAnimActive ? g_state.zoomAnimTarget : g_state.zoom;
+    const float newZoom = std::max(MIN_ZOOM, std::min(MAX_ZOOM, baseZoom * factor));
     g_state.fitMode = false;
 
-    // Zoom suave: se anima desde el zoom actual hasta el destino manteniendo
-    // el punto bajo el cursor fijo en pantalla (sin saltos bruscos).
-    g_state.zoomAnimStart = oldZoom;
+    RECT prevImageRect{};
+    const bool hadImage = ComputeImageScreenRect(g_state.zoom, g_state.offsetX, g_state.offsetY, prevImageRect);
+
+    // Interpolación LOGARÍTMICA: se anima ln(zoom) con smoothstep. El tempo
+    // perceptual es idéntico a cualquier escala (0.5%→1% se siente como
+    // 100%→200%) y la curva nunca "acelera" al encadenar muescas.
+    const float startZoom = g_state.zoom;
+    const float startLog = std::log(startZoom);
+    const float endLog = std::log(newZoom);
+    if (std::fabs(endLog - startLog) < 1e-6f) return;   // destino ya alcanzado
+    const float delta = std::fabs(endLog - startLog);
+    const float span = std::max(delta / ZOOM_ANIM_LOG_FULL_SPAN, 1.0f);   // 1.0..∞
+    const DWORD duration = std::max(ZOOM_ANIM_MS_MIN,
+                                    std::min(ZOOM_ANIM_MS_MAX,
+                                             static_cast<DWORD>(ZOOM_ANIM_MS_MIN + (ZOOM_ANIM_MS_MAX - ZOOM_ANIM_MS_MIN) * (span - 1.0f))));
+
+    // Pivote: anclar el píxel actualmente bajo el cursor (zoom interpolado
+    // actual): durante la animación y sus encadenados el punto bajo el cursor
+    // NUNCA se mueve, sin saltos ni deriva al reanclar a mitad de vuelo.
+    g_state.zoomAnimImageX = (static_cast<float>(pivotX) - g_state.offsetX) / startZoom;
+    g_state.zoomAnimImageY = (static_cast<float>(pivotY) - g_state.offsetY) / startZoom;
+    g_state.zoomAnimStart = startZoom;
     g_state.zoomAnimTarget = newZoom;
-    g_state.zoomAnimImageX = (static_cast<float>(pivotX) - g_state.offsetX) / oldZoom;
-    g_state.zoomAnimImageY = (static_cast<float>(pivotY) - g_state.offsetY) / oldZoom;
+    g_state.zoomAnimLogStart = startLog;
+    g_state.zoomAnimLogDelta = endLog - startLog;
+    g_state.zoomAnimDurationMs = (duration > 0) ? duration : ZOOM_ANIM_MS;
     g_state.zoomAnimStartOffsetX = g_state.offsetX;
     g_state.zoomAnimStartOffsetY = g_state.offsetY;
     g_state.zoomAnimStartTime = GetTickCount();
+    g_state.zoomAnimHadEmptyState = !hadImage;
+    g_state.zoomAnimLastImageRect = prevImageRect;
     g_state.zoomAnimActive = true;
     SetTimer(g_state.hwnd, TIMER_ZOOM, ZOOM_ANIM_PERIOD_MS, nullptr);
-    InvalidateRect(g_state.hwnd, nullptr, FALSE);
+    InvalidateZoomStep(prevImageRect, hadImage);
 }
 
 // Utilidades de archivos
@@ -2557,7 +2849,27 @@ void AddRoundedRect(GraphicsPath& path, const RectF& rect, float radius) {
     path.CloseFigure();
 }
 
+// FIX RENDIMIENTO: LayoutHud era llamado en cada frame (RenderHud) y en cada
+// WM_MOUSEMOVE (HitTestHud) reconstruyendo la geometría idéntica. Ahora el
+// cálculo completo SOLO ocurre cuando cambia el tamaño del cliente, el modo
+// pantalla completa o la etiqueta dinámica ("Pantalla"/"Ventana"); el resto
+// de las llamadas reutiliza la geometría cacheada.
 void LayoutHud(const RECT& client) {
+    const int cw = client.right - client.left;
+    const int ch = client.bottom - client.top;
+    const wchar_t* fullButton = g_state.isFullscreen ? L"Ventana" : L"Pantalla";
+    if (g_state.hudLayoutValid &&
+        g_state.hudLayoutClientWidth == cw && g_state.hudLayoutClientHeight == ch &&
+        g_state.hudLayoutFullscreen == g_state.isFullscreen &&
+        g_state.hudLayoutFullButton == fullButton) {
+        return;   // geometría vigente
+    }
+    g_state.hudLayoutValid = true;
+    g_state.hudLayoutClientWidth = cw;
+    g_state.hudLayoutClientHeight = ch;
+    g_state.hudLayoutFullscreen = g_state.isFullscreen;
+    g_state.hudLayoutFullButton = fullButton;
+    g_dockCache.Invalidate();   // los paths cacheados dependen de esta geometría
     g_state.hudCount = 0;
     const bool compact = client.bottom < 560 || client.right < 900;
     const int dockHeight = compact ? 42 : 48;
@@ -2632,15 +2944,18 @@ void RenderHud(Graphics& graphics, const RECT& client) {
     const bool shouldShowDock = DockShouldShow();
 
     // 1. Mensaje OSD / Estado Flotante
+    // FIX RENDIMIENTO: la medición del texto se cachea (solo cambia con el
+    // mensaje) y los pinceles/penes vienen de la caché por tema: por frame
+    // solo queda 1 path reutilizado, 2 fills y 1 DrawString.
     if (g_ui.osdFont && !g_state.statusMessage.empty() &&
         (g_state.osdPinned || GetTickCount() - g_state.osdDisplayTime < OSD_MS)) {
+        DockFrameCache& dc = g_dockCache;
+        dc.EnsureBrushes();
+        dc.EnsureOsdTextWidth(graphics, g_state.statusMessage);
         Font& font = *g_ui.osdFont;
         StringFormat& format = *g_ui.centerFormat;
-        RectF layoutRect(0, 0, 600, 40);
-        RectF boundRect;
-        graphics.MeasureString(g_state.statusMessage.c_str(), -1, &font, layoutRect, &format, &boundRect);
 
-        const float osdW = boundRect.Width + 30.0f;
+        const float osdW = dc.osdTextWidth + 30.0f;
         const float osdH = 32.0f;
         const float osdX = (client.right - osdW) / 2.0f;
         const float osdY = 14.0f;
@@ -2648,83 +2963,61 @@ void RenderHud(Graphics& graphics, const RECT& client) {
         RectF osdRect(osdX, osdY, osdW, osdH);
         GraphicsPath osdPath;
         AddRoundedRect(osdPath, osdRect, 8.0f);
-
-        Color osdBgColor = g_state.darkModeDetected ? Color(245, 24, 25, 30) : Color(245, 255, 255, 255);
-        Color osdBorderColor = g_state.darkModeDetected ? Color(255, 60, 62, 74) : Color(255, 210, 214, 222);
-        Color osdTextColor = g_state.darkModeDetected ? Color(245, 248, 252) : Color(255, 30, 32, 38);
-
-        SolidBrush osdBg(osdBgColor);
-        Pen osdBorder(osdBorderColor, 1.0f);
-        graphics.FillPath(&osdBg, &osdPath);
-        graphics.DrawPath(&osdBorder, &osdPath);
-
-        SolidBrush textBrush(osdTextColor);
-        graphics.DrawString(g_state.statusMessage.c_str(), -1, &font, osdRect, &format, &textBrush);
+        graphics.FillPath(dc.osdBgBrush.get(), &osdPath);
+        graphics.DrawPath(dc.osdBorderPen.get(), &osdPath);
+        graphics.DrawString(g_state.statusMessage.c_str(), -1, &font, osdRect, &format, dc.osdTextBrush.get());
     }
 
     // 2. Dock Flotante Compacto y Ultraligero Inferior
     // (durante el arrastre no se redibuja: se repinta al soltar y ahorra CPU)
+    // FIX RENDIMIENTO: paths, pinceles y penes cacheados (antes ~15 objetos
+    // GDI+ se creaban y destruían POR FRAME). El dibujado por frame son puros
+    // FillPath/DrawPath/DrawString sobre recursos reutilizados; el estado hot
+    // (hover) se resuelve con pinceles ya creados, como el renderizador GPU.
     if (!g_state.isDragging && shouldShowDock && g_ui.hudBtnFont) {
+        DockFrameCache& dc = g_dockCache;
+        dc.EnsureBrushes();
         RectF dockRectF(static_cast<float>(g_state.dockRect.left),
                        static_cast<float>(g_state.dockRect.top),
                        static_cast<float>(g_state.dockRect.right - g_state.dockRect.left),
                        static_cast<float>(g_state.dockRect.bottom - g_state.dockRect.top));
+        dc.EnsureDockFrame(dockRectF);
+        dc.EnsureButtonGeometries();
 
-        GraphicsPath dockPath;
-        AddRoundedRect(dockPath, dockRectF, 10.0f);
-
-        // Sombra suave y ligera
-        RectF shadowRect = dockRectF;
-        shadowRect.Y += 2.0f;
-        GraphicsPath shadowPath;
-        AddRoundedRect(shadowPath, shadowRect, 10.0f);
-        SolidBrush shadowBrush(GLASS_DOCK_SHADOW);
-        graphics.FillPath(&shadowBrush, &shadowPath);
-
-        // Fondo y borde
-        SolidBrush dockBg(GLASS_DOCK_BG);
-        Pen dockBorder(GLASS_DOCK_BORDER, 1.0f);
-        graphics.FillPath(&dockBg, &dockPath);
-        graphics.DrawPath(&dockBorder, &dockPath);
+        // Sombra suave y ligera, luego fondo y borde
+        graphics.FillPath(dc.shadowBrush.get(), dc.shadowPath.get());
+        graphics.FillPath(dc.dockBgBrush.get(), dc.dockPath.get());
+        graphics.DrawPath(dc.dockBorderPen.get(), dc.dockPath.get());
 
         // Botones elegantes estilo Windows 10 / Windows 7 con bordes suaves Windows 11
         Font& btnFont = *g_ui.hudBtnFont;
         StringFormat& btnFormat = *g_ui.centerFormat;
 
         for (int i = 0; i < g_state.hudCount; ++i) {
+            GraphicsPath* itemPath = dc.buttonPaths[static_cast<size_t>(i)].get();
             const bool hot = (g_state.hud[i].id == g_state.hudHot);
             const bool active = (g_state.hud[i].id == HUD_CLARITY && g_state.effectUltraClarity);
-
-            RectF itemRect(static_cast<float>(g_state.hud[i].rc.left),
-                          static_cast<float>(g_state.hud[i].rc.top),
-                          static_cast<float>(g_state.hud[i].rc.right - g_state.hud[i].rc.left),
-                          static_cast<float>(g_state.hud[i].rc.bottom - g_state.hud[i].rc.top));
-
-            GraphicsPath itemPath;
-            AddRoundedRect(itemPath, itemRect, 6.0f);
+            const RECT& rc = g_state.hud[i].rc;
+            const RectF itemRect(static_cast<float>(rc.left), static_cast<float>(rc.top),
+                                 static_cast<float>(rc.right - rc.left),
+                                 static_cast<float>(rc.bottom - rc.top));
 
             if (active) {
                 // Estado activo: relleno cian->violeta (acento neón)
-                RectF gradRect = itemRect;
-                LinearGradientBrush activeBrush(gradRect, Color(255, 0, 190, 235), Color(255, 150, 70, 255), 0.0f);
-                Pen activeBorder(Color(255, 140, 235, 255), 1.2f);
-                graphics.FillPath(&activeBrush, &itemPath);
-                graphics.DrawPath(&activeBorder, &itemPath);
+                dc.EnsureActiveBrush(itemRect);
+                graphics.FillPath(dc.activeBrush.get(), itemPath);
+                graphics.DrawPath(dc.activeBorderPen.get(), itemPath);
             } else if (hot) {
-                SolidBrush hotBrush(GLASS_BTN_HOT);
-                Pen hotBorder(Color(255, 0, 210, 255), 1.2f);   // borde cian en hover
-                graphics.FillPath(&hotBrush, &itemPath);
-                graphics.DrawPath(&hotBorder, &itemPath);
+                graphics.FillPath(dc.hotBrush.get(), itemPath);
+                graphics.DrawPath(dc.hotBorderPen.get(), itemPath);
             } else {
-                SolidBrush normalBrush(GLASS_BTN_NORMAL);
-                Pen normalBorder(GLASS_BTN_BORDER_NORMAL, 1.0f);
-                graphics.FillPath(&normalBrush, &itemPath);
-                graphics.DrawPath(&normalBorder, &itemPath);
+                graphics.FillPath(dc.btnNormalBrush.get(), itemPath);
+                graphics.DrawPath(dc.btnNormalBorderPen.get(), itemPath);
             }
 
-            Color btnNormalTextColor = g_state.darkModeDetected ? Color(255, 230, 235, 242) : Color(255, 30, 32, 38);
-            SolidBrush btnTextBrush((hot || active) ? Color(255, 255, 255) : btnNormalTextColor);
-            graphics.DrawString(g_state.hud[i].label, -1, &btnFont, itemRect, &btnFormat, &btnTextBrush);
+            SolidBrush* btnTextBrush = (hot || active) ? dc.btnActiveTextBrush.get()
+                                                       : dc.btnTextBrush.get();
+            graphics.DrawString(g_state.hud[i].label, -1, &btnFont, itemRect, &btnFormat, btnTextBrush);
         }
     }
 }
@@ -2932,44 +3225,64 @@ void RenderImage(const RECT* clipRect) {
         graphics.Restore(bgState);
     }
 
-    ImageAttributes imgAttr;
+    // FIX RENDIMIENTO: el ImageAttributes de efectos se cachea por efecto
+    // activo (0 = sin efecto, 1 = grises, 2 = negativo, 3 = claridad): antes se
+    // construía y destruía en CADA frame, incluso durante la animación de zoom.
     ImageAttributes* pImgAttr = nullptr;
-
+    int effectKey = 0;
     if (g_state.effectGrayscale) {
-        ColorMatrix grayMatrix = {
-            0.299f, 0.299f, 0.299f, 0.0f, 0.0f,
-            0.587f, 0.587f, 0.587f, 0.0f, 0.0f,
-            0.114f, 0.114f, 0.114f, 0.0f, 0.0f,
-            0.0f,   0.0f,   0.0f,   1.0f, 0.0f,
-            0.0f,   0.0f,   0.0f,   0.0f, 1.0f
-        };
-        imgAttr.SetColorMatrix(&grayMatrix, ColorMatrixFlagsDefault, ColorAdjustTypeBitmap);
-        imgAttr.SetWrapMode(WrapModeClamp);
-        pImgAttr = &imgAttr;
+        effectKey = 1;
     } else if (g_state.effectInvert) {
-        ColorMatrix invMatrix = {
-            -1.0f,  0.0f,  0.0f, 0.0f, 0.0f,
-             0.0f, -1.0f,  0.0f, 0.0f, 0.0f,
-             0.0f,  0.0f, -1.0f, 0.0f, 0.0f,
-             0.0f,  0.0f,  0.0f, 1.0f, 0.0f,
-             1.0f,  1.0f,  1.0f, 0.0f, 1.0f
-        };
-        imgAttr.SetColorMatrix(&invMatrix, ColorMatrixFlagsDefault, ColorAdjustTypeBitmap);
-        imgAttr.SetWrapMode(WrapModeClamp);
-        pImgAttr = &imgAttr;
+        effectKey = 2;
     } else if (g_state.effectUltraClarity) {
-        const float c = 1.12f;
-        const float t = (1.0f - c) / 2.0f;
-        ColorMatrix clarityMatrix = {
-            c,     0.0f,  0.0f,  0.0f, 0.0f,
-            0.0f,  c,     0.0f,  0.0f, 0.0f,
-            0.0f,  0.0f,  c,     0.0f, 0.0f,
-            0.0f,  0.0f,  0.0f,  1.0f, 0.0f,
-            t,     t,     t,     0.0f, 1.0f
-        };
-        imgAttr.SetColorMatrix(&clarityMatrix, ColorMatrixFlagsDefault, ColorAdjustTypeBitmap);
-        imgAttr.SetWrapMode(WrapModeClamp);
-        pImgAttr = &imgAttr;
+        effectKey = 3;
+    }
+    if (effectKey != 0) {
+        if (g_state.effectAttrKey != effectKey || !g_state.effectAttr) {
+            if (!g_state.effectAttrOwner) {
+                g_state.effectAttrOwner = new (std::nothrow) ImageAttributes();
+            }
+            if (g_state.effectAttrOwner) {
+                ColorMatrix m = {};
+                switch (effectKey) {
+                    case 1:  // Escala de grises (Rec. 601)
+                        m = {
+                            0.299f, 0.299f, 0.299f, 0.0f, 0.0f,
+                            0.587f, 0.587f, 0.587f, 0.0f, 0.0f,
+                            0.114f, 0.114f, 0.114f, 0.0f, 0.0f,
+                            0.0f,   0.0f,   0.0f,   1.0f, 0.0f,
+                            0.0f,   0.0f,   0.0f,   0.0f, 1.0f
+                        };
+                        break;
+                    case 2:  // Negativo
+                        m = {
+                            -1.0f,  0.0f,  0.0f, 0.0f, 0.0f,
+                             0.0f, -1.0f,  0.0f, 0.0f, 0.0f,
+                             0.0f,  0.0f, -1.0f, 0.0f, 0.0f,
+                             0.0f,  0.0f,  0.0f, 1.0f, 0.0f,
+                             1.0f,  1.0f,  1.0f, 0.0f, 1.0f
+                        };
+                        break;
+                    default: {  // Ultra-Claridad (realce de micro-contraste)
+                        const float c = 1.12f;
+                        const float t = (1.0f - c) / 2.0f;
+                        m = {
+                            c,     0.0f,  0.0f,  0.0f, 0.0f,
+                            0.0f,  c,     0.0f,  0.0f, 0.0f,
+                            0.0f,  0.0f,  c,     0.0f, 0.0f,
+                            0.0f,  0.0f,  0.0f,  1.0f, 0.0f,
+                            t,     t,     t,     0.0f, 1.0f
+                        };
+                        break;
+                    }
+                }
+                g_state.effectAttrOwner->SetColorMatrix(&m, ColorMatrixFlagsDefault, ColorAdjustTypeBitmap);
+                g_state.effectAttrOwner->SetWrapMode(WrapModeClamp);
+                g_state.effectAttr = g_state.effectAttrOwner;
+                g_state.effectAttrKey = effectKey;
+            }
+        }
+        pImgAttr = g_state.effectAttr;
     }
 
     GraphicsState state = graphics.Save();
@@ -4508,6 +4821,15 @@ void ShowContextMenu(HWND hwnd, int x, int y) {
     }
 }
 
+// Pivote del zoom por teclado / menú: el CENTRO de la ventana. Es un punto
+// fijo de referencia (no un recentrado): la imagen se escala alrededor del
+// centro visible exactamente como en un visor de mapas.
+static void ZoomFromWindowCenter(HWND hwnd, float factor) {
+    RECT client{};
+    GetClientRect(hwnd, &client);
+    ZoomAt(factor, (client.right - client.left) / 2, (client.bottom - client.top) / 2);
+}
+
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     static bool s_trackingMouse = false;
     switch (msg) {
@@ -4594,11 +4916,17 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     CreateDoubleBuffer(width, height);
                 }
             }
-            if (g_state.imageData && width > 0 && height > 0) {
-                if (g_state.fitMode) FitImageToWindow(width, height);
-                else EnsureImageVisible();
-            }
-            InvalidateRect(hwnd, nullptr, FALSE);
+            // FIX RENDIMIENTO: solo invalidar la ventana completa cuando la
+            // geometría/cachea lo necesitan (cambio real de tamaño); con un
+            // WM_SIZE redundante basta repintar la región sucia reportada.
+            // FIX RENDIMIENTO: solo invalidar la ventana completa cuando el
+            // tamaño del cliente cambió de verdad; un WM_SIZE redundante (sin
+            // cambio de tamaño) no necesita repintado completo.
+            static int s_lastClientW = -1, s_lastClientH = -1;
+            const bool clientSizeChanged = (width != s_lastClientW || height != s_lastClientH);
+            s_lastClientW = width;
+            s_lastClientH = height;
+            if (clientSizeChanged) InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
         case WM_DPICHANGED: {
@@ -4661,15 +4989,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     NextImage();
                     break;
                 case VK_UP: {
-                    RECT client{};
-                    GetClientRect(hwnd, &client);
-                    ZoomAt(ZOOM_STEP, (client.right - client.left) / 2, (client.bottom - client.top) / 2);
+                    ZoomFromWindowCenter(hwnd, ZOOM_STEP);
                     break;
                 }
                 case VK_DOWN: {
-                    RECT client{};
-                    GetClientRect(hwnd, &client);
-                    ZoomAt(1.0f / ZOOM_STEP, (client.right - client.left) / 2, (client.bottom - client.top) / 2);
+                    ZoomFromWindowCenter(hwnd, 1.0f / ZOOM_STEP);
                     break;
                 }
                 case VK_BACK:
@@ -4733,16 +5057,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     break;
                 case VK_OEM_PLUS:
                 case VK_ADD: {
-                    RECT client{};
-                    GetClientRect(hwnd, &client);
-                    ZoomAt(ZOOM_STEP, (client.right - client.left) / 2, (client.bottom - client.top) / 2);
+                    ZoomFromWindowCenter(hwnd, ZOOM_STEP);
                     break;
                 }
                 case VK_OEM_MINUS:
                 case VK_SUBTRACT: {
-                    RECT client{};
-                    GetClientRect(hwnd, &client);
-                    ZoomAt(1.0f / ZOOM_STEP, (client.right - client.left) / 2, (client.bottom - client.top) / 2);
+                    ZoomFromWindowCenter(hwnd, 1.0f / ZOOM_STEP);
                     break;
                 }
                 case 'I':
@@ -4950,29 +5270,38 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 if (!g_state.zoomAnimActive) {
                     KillTimer(hwnd, TIMER_ZOOM);
                 } else {
+                    const RECT prevImageRect = g_state.zoomAnimLastImageRect;
+                    const bool hadImage = !g_state.zoomAnimHadEmptyState;
                     const DWORD now = GetTickCount();
-                    float t = static_cast<float>(now - g_state.zoomAnimStartTime) / static_cast<float>(ZOOM_ANIM_MS);
+                    float t = static_cast<float>(now - g_state.zoomAnimStartTime) /
+                              static_cast<float>(g_state.zoomAnimDurationMs);
                     if (t >= 1.0f) t = 1.0f;
                     // smoothstep: arranque y frenado suaves
                     const float eased = t * t * (3.0f - 2.0f * t);
-                    g_state.zoom = g_state.zoomAnimStart + (g_state.zoomAnimTarget - g_state.zoomAnimStart) * eased;
+                    // Interpolación LOGARÍTMICA: progresión geométrica del zoom
+                    // (tempo perceptual constante a cualquier escala); el
+                    // desplazamiento se deriva del zoom interpolado, así el
+                    // pivote bajo el cursor queda clavado en cada paso.
+                    g_state.zoom = std::exp(g_state.zoomAnimLogStart + g_state.zoomAnimLogDelta * eased);
                     g_state.offsetX = g_state.zoomAnimStartOffsetX + g_state.zoomAnimImageX * (g_state.zoomAnimStart - g_state.zoom);
                     g_state.offsetY = g_state.zoomAnimStartOffsetY + g_state.zoomAnimImageY * (g_state.zoomAnimStart - g_state.zoom);
                     if (t >= 1.0f) {
                         g_state.zoom = g_state.zoomAnimTarget;
+                        g_state.offsetX = g_state.zoomAnimStartOffsetX + g_state.zoomAnimImageX * (g_state.zoomAnimStart - g_state.zoom);
+                        g_state.offsetY = g_state.zoomAnimStartOffsetY + g_state.zoomAnimImageY * (g_state.zoomAnimStart - g_state.zoom);
                         g_state.zoomAnimActive = false;
                         KillTimer(hwnd, TIMER_ZOOM);
-                        EnsureImageVisible();
                         wchar_t zoomText[64];
                         swprintf_s(zoomText, L"Zoom: %d%%", static_cast<int>(g_state.zoom * 100.0f + 0.5f));
                         ShowOSD(zoomText);
                     }
-                    // FIX RENDIMIENTO: invalidar la ventana completa en cada
-                    // paso de la animación re-rasterizaba también OSD y dock
-                    // (GDI+ costoso). Con GPU activa GpuRenderFrame rasteriza
-                    // solo la región sucia; sin GPU el doble búfer cubre el
-                    // resto. La imagen cambia siempre; la UI solo si tocó.
-                    InvalidateRect(hwnd, nullptr, FALSE);
+                    // FIX RENDIMIENTO: solo se invalida la UNIÓN de la franja
+                    // que ocupaba la imagen y donde queda ahora (GPU y GDI+),
+                    // no la ventana completa ~120 veces/s. El OSD se actualiza
+                    // dentro de ShowOSD invalidando solo su banda.
+                    InvalidateZoomStep(prevImageRect, hadImage);
+                    ComputeImageScreenRect(g_state.zoom, g_state.offsetX, g_state.offsetY, g_state.zoomAnimLastImageRect);
+                    g_state.zoomAnimHadEmptyState = false;
                 }
             }
             return 0;

@@ -1,5 +1,36 @@
 # Registro de cambios — ARTPICST
 
+## [Sin publicar]
+
+### Zoom ultra suave, libre y optimizado
+- **Motor de zoom logarítmico**: la animación interpola `ln(zoom)` (progresión
+  geométrica) en lugar del factor lineal: el tempo perceptual es idéntico a
+  cualquier escala (0.5%→1% se siente como 100%→200%) y encadenar muescas de
+  rueda compone sobre el objetivo en curso sin acelerones ni "muelles". El
+  pivote queda clavado bajo el cursor en cada paso, con reanclaje sin deriva
+  a mitad de animación. Duración adaptativa 90–140 ms según el salto.
+- **Zoom libre sin centrado ni límites prácticos**: se eliminó el clamp y el
+  recentrado automáticos (`EnsureImageVisible` ya no encierra la imagen; si
+  queda fuera de la ventana, `F` / doble clic / botón "Ajustar" la recuperan)
+  y el auto-snap a 100% durante la rueda (el 1:1 exacto sigue en tecla `1`/`0`,
+  botón "1:1" y menú). Rango ampliado de 0.01x–200x a **0.005x–512x**.
+- **Región sucia del zoom (GPU y GDI+)**: cada paso de la animación invalida
+  solo la unión del rectángulo de pantalla que ocupa la imagen antes y después
+  de moverse (+2 px de margen), no la ventana completa ~120 veces/s; el `BitBlt`
+  final es parcial en la ruta GDI+ y Direct2D rasteriza solo la franja de
+  movimiento. Con fallback seguro a repintado completo.
+- **Caché de recursos del dock/OSD (ruta GDI+)**: los ~15 objetos GDI+ que se
+  creaban y destruían por frame (paths del dock/sombra/11 botones, pinceles,
+  penes, degradado activo) y la medición del texto del OSD ahora se cachean y
+  solo se recrean al cambiar tema, geometría o mensaje. Mismo resultado visual.
+- **Caché de layout del dock**: `LayoutHud` solo recalcula cuando cambia el
+  tamaño del cliente, el modo pantalla completa o la etiqueta dinámica; antes
+  se reconstruía en cada frame y en cada movimiento de ratón (vía `HitTestHud`).
+- **Caché de `ImageAttributes`**: la matriz de color de efectos (grises /
+  negativo / claridad) se construye una vez por efecto activo, no en cada frame.
+- El zoom por teclado (↑/↓, +/−) y menú pivota sobre el **centro de la ventana**
+  (punto fijo de referencia, no un recentrado).
+
 ## [1.2.1] — 2026-09-27
 
 Pase de auditoría completa: corrección de 7 defectos de seguridad/corrección,
