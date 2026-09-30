@@ -67,6 +67,7 @@
 #include <iterator>
 #include <list>
 #include <memory>
+#include <new>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -465,7 +466,6 @@ struct AppState {
     bool hudLayoutValid = false;
     int hudLayoutClientWidth = -1, hudLayoutClientHeight = -1;
     bool hudLayoutFullscreen = false;
-    const wchar_t* hudLayoutFullButton = nullptr;
 
     // FIX RENDIMIENTO (ruta GDI+): el ImageAttributes de efectos de imagen se
     // cachea; solo se reconstruye al cambiar el efecto activo (antes se creaba
@@ -619,11 +619,18 @@ struct DockFrameCache {
     }
 
     void EnsureButtonGeometries() {
-        if (hudGeomCount == g_state.hudCount && hudGeomCount >= 0 &&
-            hudGeomCount <= 12 &&
-            std::memcmp(hudGeom, g_state.hud, sizeof(RECT) * static_cast<size_t>(hudGeomCount)) == 0) {
-            return;
+        // Comparar SOLO el campo rc de cada HudItem (id/label pueden cambiar sin
+        // alterar la geometría, y rc no es el primer miembro del struct).
+        bool same = (hudGeomCount == g_state.hudCount) && hudGeomCount >= 0;
+        if (same) {
+            for (int i = 0; i < hudGeomCount; ++i) {
+                if (std::memcmp(&hudGeom[i], &g_state.hud[i].rc, sizeof(RECT)) != 0) {
+                    same = false;
+                    break;
+                }
+            }
         }
+        if (same) return;
         hudGeomCount = g_state.hudCount;
         for (int i = 0; i < hudGeomCount; ++i) hudGeom[i] = g_state.hud[i].rc;
         buttonPaths.clear();
@@ -2857,18 +2864,15 @@ void AddRoundedRect(GraphicsPath& path, const RectF& rect, float radius) {
 void LayoutHud(const RECT& client) {
     const int cw = client.right - client.left;
     const int ch = client.bottom - client.top;
-    const wchar_t* fullButton = g_state.isFullscreen ? L"Ventana" : L"Pantalla";
     if (g_state.hudLayoutValid &&
         g_state.hudLayoutClientWidth == cw && g_state.hudLayoutClientHeight == ch &&
-        g_state.hudLayoutFullscreen == g_state.isFullscreen &&
-        g_state.hudLayoutFullButton == fullButton) {
-        return;   // geometría vigente
+        g_state.hudLayoutFullscreen == g_state.isFullscreen) {
+        return;   // geometría vigente (la etiqueta dinámica cambia con isFullscreen)
     }
     g_state.hudLayoutValid = true;
     g_state.hudLayoutClientWidth = cw;
     g_state.hudLayoutClientHeight = ch;
     g_state.hudLayoutFullscreen = g_state.isFullscreen;
-    g_state.hudLayoutFullButton = fullButton;
     g_dockCache.Invalidate();   // los paths cacheados dependen de esta geometría
     g_state.hudCount = 0;
     const bool compact = client.bottom < 560 || client.right < 900;
