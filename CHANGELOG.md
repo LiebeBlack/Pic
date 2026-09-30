@@ -30,6 +30,11 @@
   negativo / claridad) se construye una vez por efecto activo, no en cada frame.
 - El zoom por teclado (↑/↓, +/−) y menú pivota sobre el **centro de la ventana**
   (punto fijo de referencia, no un recentrado).
+- Corrección de compilación (MSVC 18, error C2660): `new (std::nothrow)` no
+  compila sobre tipos GDI+ porque `GdiplusBase::operator new` no expone la
+  forma alineada; el `ImageAttributes` cacheado se construye ahora con `::new`
+  de colocación sobre almacenamiento `alignas` propio y se destruye con llamada
+  explícita al destructor (mismo orden seguro respecto a `GdiplusShutdown`).
 
 ## [1.2.1] — 2026-09-27
 

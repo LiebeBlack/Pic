@@ -470,9 +470,20 @@ struct AppState {
     // FIX RENDIMIENTO (ruta GDI+): el ImageAttributes de efectos de imagen se
     // cachea; solo se reconstruye al cambiar el efecto activo (antes se creaba
     // y destría en CADA frame de RenderImage).
+    alignas(ImageAttributes) unsigned char effectAttrStorage[sizeof(ImageAttributes)];
     ImageAttributes* effectAttr = nullptr;       // prestado (no liberar)
-    ImageAttributes* effectAttrOwner = nullptr;  // propietario (liberar aquí)
+    bool effectAttrConstructed = false;
     int effectAttrKey = -1;
+
+    // Construcción/destrucción manual: véase la nota sobre GdiplusBase más arriba.
+    void DestroyEffectAttr() {
+        if (effectAttrConstructed) {
+            effectAttr->~ImageAttributes();
+            effectAttrConstructed = false;
+        }
+        effectAttr = nullptr;
+        effectAttrKey = -1;
+    }
 
     GifAnimation gif;
 
@@ -1702,10 +1713,7 @@ void CleanupGDIPlus() {
     FreeDoubleBuffer();
     FreeCheckerTile();
     g_dockCache.Shutdown();
-    delete g_state.effectAttrOwner;
-    g_state.effectAttrOwner = nullptr;
-    g_state.effectAttr = nullptr;
-    g_state.effectAttrKey = -1;
+    g_state.DestroyEffectAttr();
     g_ui.Shutdown();
     if (g_state.gdiplusToken) {
         GdiplusShutdown(g_state.gdiplusToken);
@@ -3243,10 +3251,11 @@ void RenderImage(const RECT* clipRect) {
     }
     if (effectKey != 0) {
         if (g_state.effectAttrKey != effectKey || !g_state.effectAttr) {
-            if (!g_state.effectAttrOwner) {
-                g_state.effectAttrOwner = new (std::nothrow) ImageAttributes();
+            if (!g_state.effectAttrConstructed) {
+                g_state.effectAttr = ::new (static_cast<void*>(g_state.effectAttrStorage)) ImageAttributes();
+                g_state.effectAttrConstructed = true;
             }
-            if (g_state.effectAttrOwner) {
+            if (g_state.effectAttrConstructed) {
                 ColorMatrix m = {};
                 switch (effectKey) {
                     case 1:  // Escala de grises (Rec. 601)
@@ -3280,9 +3289,8 @@ void RenderImage(const RECT* clipRect) {
                         break;
                     }
                 }
-                g_state.effectAttrOwner->SetColorMatrix(&m, ColorMatrixFlagsDefault, ColorAdjustTypeBitmap);
-                g_state.effectAttrOwner->SetWrapMode(WrapModeClamp);
-                g_state.effectAttr = g_state.effectAttrOwner;
+                g_state.effectAttr->SetColorMatrix(&m, ColorMatrixFlagsDefault, ColorAdjustTypeBitmap);
+                g_state.effectAttr->SetWrapMode(WrapModeClamp);
                 g_state.effectAttrKey = effectKey;
             }
         }
