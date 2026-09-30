@@ -9,7 +9,7 @@ Visor de imágenes premium nativo para Windows (C++ / Win32) con interfaz acríl
 - **Interfaz Glassmorphism/Acrílica**: Diseño moderno con efectos de transparencia, blur premium y colores vibrantes inspirados en Windows 11
 - **Renderizado de Máxima Calidad**: Interpolación bicúbica de alta precisión con modo de envoltura clamp y modo 1:1 pixel-perfect
 - **Ultra-Claridad HDR**: Modo de realce de detalles finos y micro-contraste
-- **Zoom Extendido y Píxel Perfecto**: Auto-snap a 100% y ampliación ultra-nítida
+- **Zoom Extendido Ultra Suave**: Animación logarítmica sin saltos, pivote bajo el cursor, sin recentrado ni límites prácticos (0.5%–51200%), con nitidez píxel-perfecto en escalas enteras
 - **Fondo Ajedrezado Inteligente**: Visualización clara de transparencias en PNG, WebP, ICO y GIF
 - **Orientación EXIF Automática**: Detecta y corrige la orientación de fotos de móviles y cámaras
 - **Navegación Avanzada**: Flechas ↑↓ para zoom, ←→ para imágenes, arrastrar para pan
