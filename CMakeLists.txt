@@ -30,41 +30,55 @@ option(ARTPICST_BUILD_TESTS
 # ---------------------------------------------------------------------------
 # Baseline SIMD: SSE4.2 (NUNCA AVX/AVX2/AVX-512)
 # ---------------------------------------------------------------------------
-# Se fija por dos vías complementarias:
-#   1. el flag del compilador (/arch:SSE4.2 o -msse4.2) permite EMITIR las
-#      instrucciones SSE4.1/SSE4.2;
-#   2. ARTPICST_TARGET_SSE42 hace que image_core.hpp ACTIVE esas rutas (MSVC no
-#      define __SSE4_2__, así que la macro explícita es la fuente de verdad).
+# El baseline NO se escribe aquí: se lee de tools/build-baseline.json, la única
+# fuente de verdad del proyecto (la misma que usan build.ps1, MinGW y los
+# workflows). Cambiar el baseline es un solo edit, no nueve.
+#
+# Se aplica por dos vías complementarias:
+#   1. el flag del compilador permite EMITIR las instrucciones SSE4.1/SSE4.2;
+#   2. la macro de la cabecera (ARTPICST_TARGET_SSE42) hace que image_core.hpp
+#      ACTIVE esas rutas: MSVC no define __SSE4_2__, así que la macro explícita
+#      es la fuente de verdad para el preprocesador.
 # Las dos son necesarias. Si el compilador no soporta el flag se aborta con un
 # mensaje accionable en lugar de producir un binario SSE2 en silencio.
-include(CheckCXXCompilerFlag)
-set(ARTPICST_SIMD_FLAG "")
+set(ARTPICST_BASELINE_JSON "${CMAKE_CURRENT_SOURCE_DIR}/tools/build-baseline.json")
+if(NOT EXISTS "${ARTPICST_BASELINE_JSON}")
+    message(FATAL_ERROR
+        "Falta ${ARTPICST_BASELINE_JSON}: es la única fuente de verdad del baseline SIMD.")
+endif()
+file(READ "${ARTPICST_BASELINE_JSON}" ARTPICST_BASELINE)
+string(JSON ARTPICST_SIMD_MSVC     GET "${ARTPICST_BASELINE}" simd msvc_flag)
+string(JSON ARTPICST_SIMD_GNU      GET "${ARTPICST_BASELINE}" simd gnu_flag)
+string(JSON ARTPICST_SIMD_DEFINE   GET "${ARTPICST_BASELINE}" simd define)
 
 if(MSVC)
-    check_cxx_compiler_flag("/arch:SSE4.2" ARTPICST_HAS_SSE42)
-    if(ARTPICST_HAS_SSE42)
-        set(ARTPICST_SIMD_FLAG "/arch:SSE4.2")
-    endif()
+    set(ARTPICST_SIMD_FLAG "${ARTPICST_SIMD_MSVC}")
 else()
-    check_cxx_compiler_flag("-msse4.2" ARTPICST_HAS_SSE42)
-    if(ARTPICST_HAS_SSE42)
-        set(ARTPICST_SIMD_FLAG "-msse4.2")
-    endif()
+    set(ARTPICST_SIMD_FLAG "${ARTPICST_SIMD_GNU}")
 endif()
 
-if(NOT ARTPICST_SIMD_FLAG)
+# No se degrada en silencio: si el JSON no dice SSE4.2, se aborta.
+if(NOT ARTPICST_SIMD_FLAG MATCHES "SSE4\\.2|msse4\\.2")
     message(FATAL_ERROR
-        "El compilador no acepta el baseline SIMD del proyecto (SSE4.2).\n"
-        "  MSVC: actualiza Visual Studio 2022 a 17.x (/arch:SSE4.2)\n"
-        "  GCC/Clang: usa GCC 4.9+ / Clang 3.4+ (-msse4.2)\n"
+        "tools/build-baseline.json no define el baseline SSE4.2 del proyecto "
+        "(valor leido: '${ARTPICST_SIMD_FLAG}'). AVX/AVX2/AVX-512 estan prohibidos.")
+endif()
+
+include(CheckCXXCompilerFlag)
+check_cxx_compiler_flag("${ARTPICST_SIMD_FLAG}" ARTPICST_HAS_SSE42)
+if(NOT ARTPICST_HAS_SSE42)
+    message(FATAL_ERROR
+        "El compilador no acepta el baseline SIMD del proyecto (SSE4.2: '${ARTPICST_SIMD_FLAG}').\n"
+        "  MSVC: actualiza Visual Studio 2022 a 17.x\n"
+        "  GCC/Clang: usa GCC 4.9+ / Clang 3.4+\n"
         "AVX/AVX2/AVX-512 están prohibidos por diseño; no se degrada a SSE2 en silencio.")
 endif()
-message(STATUS "ARTPICST baseline SIMD: ${ARTPICST_SIMD_FLAG}")
+message(STATUS "ARTPICST baseline SIMD: ${ARTPICST_SIMD_FLAG} + ${ARTPICST_SIMD_DEFINE}")
 
 # Aplica el baseline SIMD a un objetivo (compilador + cabecera).
 function(artpicst_enable_sse42 target)
     target_compile_options(${target} PRIVATE ${ARTPICST_SIMD_FLAG})
-    target_compile_definitions(${target} PRIVATE ARTPICST_TARGET_SSE42=1)
+    target_compile_definitions(${target} PRIVATE ${ARTPICST_SIMD_DEFINE})
 endfunction()
 
 # ---------------------------------------------------------------------------

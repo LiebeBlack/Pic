@@ -32,11 +32,28 @@ jobs:
         with:
           arch: x64
 
+      # El baseline SIMD (SSE4.2, sin AVX) NO se escribe en este workflow: se lee
+      # de tools/build-baseline.json (unica fuente de verdad) y se publica como
+      # variables de entorno para los pasos de compilacion. Si el JSON se degrada,
+      # este paso falla en lugar de compilar con menos cobertura SIMD.
+      - name: Baseline SIMD (fuente unica)
+        shell: pwsh
+        run: |
+          $json = Get-Content tools/build-baseline.json -Raw | ConvertFrom-Json
+          if ($json.simd.msvc_flag -notlike '*SSE4.2*') { throw "El baseline de tools/build-baseline.json no es SSE4.2" }
+          "SIMD_FLAG=$($json.simd.msvc_flag)" >> $env:GITHUB_ENV
+          "SIMD_DEFINE=/D$($json.simd.define)" >> $env:GITHUB_ENV
+          Write-Host "Baseline SIMD: $($json.simd.msvc_flag) /D$($json.simd.define)"
+
+      - name: Gate de consistencia del baseline (todos los pipelines)
+        shell: pwsh
+        run: ./tests/check_build_baseline.ps1 -Quiet
+
       - name: Fuzz del parser JSON (ASan, 200k iteraciones)
         shell: cmd
         run: |
           if not exist build mkdir build
-          cl /nologo /EHsc /std:c++20 /O1 /arch:SSE4.2 /DARTPICST_TARGET_SSE42=1 /utf-8 /W4 /WX- /permissive- ^
+          cl /nologo /EHsc /std:c++20 /O1 %SIMD_FLAG% %SIMD_DEFINE% /utf-8 /W4 /WX- /permissive- ^
              /fsanitize=address /I. ^
              /Fe:"build\release_json_fuzzer_asan.exe" tests\release_json_fuzzer.cpp ^
              /link kernel32.lib || exit /b 1
@@ -45,7 +62,7 @@ jobs:
       - name: Tests EXIF con offsets hostiles (ASan)
         shell: cmd
         run: |
-          cl /nologo /EHsc /std:c++20 /O1 /arch:SSE4.2 /DARTPICST_TARGET_SSE42=1 /utf-8 /W4 /WX- /permissive- ^
+          cl /nologo /EHsc /std:c++20 /O1 %SIMD_FLAG% %SIMD_DEFINE% /utf-8 /W4 /WX- /permissive- ^
              /fsanitize=address /I. ^
              /Fe:"build\jpeg_exif_test_asan.exe" tests\jpeg_exif_test.cpp ^
              /link kernel32.lib shell32.lib || exit /b 1
@@ -54,7 +71,7 @@ jobs:
       - name: Fuzz del allocator alineado (ASan)
         shell: cmd
         run: |
-          cl /nologo /EHsc /std:c++20 /O1 /arch:SSE4.2 /DARTPICST_TARGET_SSE42=1 /utf-8 /W4 /WX- /permissive- ^
+          cl /nologo /EHsc /std:c++20 /O1 %SIMD_FLAG% %SIMD_DEFINE% /utf-8 /W4 /WX- /permissive- ^
              /fsanitize=address /I. ^
              /Fe:"build\image_core_test_asan.exe" tests\image_core_test.cpp ^
              /link kernel32.lib || exit /b 1

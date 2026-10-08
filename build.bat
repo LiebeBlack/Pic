@@ -1,204 +1,43 @@
 @echo off
-setlocal EnableExtensions DisableDelayedExpansion
+:: ============================================================================
+:: build.bat - DELEGADOR del pipeline canónico
+:: ----------------------------------------------------------------------------
+:: Este archivo NO compila y NO conoce ningún flag. El pipeline (orden de pasos,
+:: flags de compilación, backend SIMD) vive SOLO en build.ps1, que a su vez lee
+:: el baseline de tools/build-baseline.json.
+::
+:: Antes esta era una segunda implementación completa del pipeline: mismas
+:: invocaciones de cl.exe y rc.exe con el baseline SIMD escrito otra vez. Cuatro
+:: pipelines que hacían lo mismo y nueve sitios donde se fijaba el baseline son
+:: la vía más rápida a que se desincronicen (y ya había pasado: kernel_bench se
+:: compilaba aquí y no en build.ps1, y el flag /arch:SSE4.2 aparecía escrito a
+:: mano en cada invocación). Ahora solo hay un pipeline.
+::
+:: Uso:  build.bat                 (equivale a build.ps1)
+::       build.bat -DryRun         (imprime la composición, no compila)
+::       build.bat -Bench          (además ejecuta el banco de kernels)
+:: ============================================================================
+setlocal EnableExtensions
 
 cd /d "%~dp0"
 
+if not exist build.ps1 (
+    echo Error: no se encuentra build.ps1 ^(pipeline canonico^) junto a build.bat.
+    exit /b 1
+)
+
 echo ========================================
-echo ARTPICST - Sistema de Compilacion Integrado
-echo Orden: recursos -^> visor -^> updater -^> payload -^> instalador
-echo ========================================
-echo.
-
-:: Configurar entorno de Visual Studio
-call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" >nul 2>&1
-if %ERRORLEVEL% NEQ 0 (
-    echo Error: No se encontro Visual Studio 2022
-    echo Intentando con versiones alternativas...
-    call "C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Auxiliary\Build\vcvars64.bat" >nul 2>&1
-    if %ERRORLEVEL% NEQ 0 (
-        echo Error: No se encontro Visual Studio
-        echo Por favor instala Visual Studio Build Tools con C++
-        exit /b 1
-    )
-)
-
-:: Crear directorios necesarios
-if not exist build mkdir build
-if not exist dist mkdir dist
-if not exist installer\build mkdir installer\build
-if not exist updater\build mkdir updater\build
-
-:: ---------------------------------------------------------------------------
-:: Sonda de toolchain: baseline SIMD SSE4.2 (AVX/AVX2 PROHIBIDOS).
-:: No se degrada a SSE2 en silencio. cl.exe avisa con D9002 si no conoce el flag
-:: y AUN ASI sale con codigo 0, por eso tambien se inspecciona el log.
-:: ---------------------------------------------------------------------------
-echo Comprobando soporte de /arch:SSE4.2...
->build\simd_probe.cpp echo #include ^<smmintrin.h^>
->>build\simd_probe.cpp echo int main(void) { __m128i v = _mm_set1_epi8(1); v = _mm_shuffle_epi8(v, v); return _mm_testz_si128(v, v); }
-cl /nologo /c /EHsc /std:c++latest /arch:SSE4.2 /DARTPICST_TARGET_SSE42=1 /Fo:build\simd_probe.obj build\simd_probe.cpp >build\simd_probe.log 2>&1
-set "PROBE_RC=%ERRORLEVEL%"
-findstr /C:"D9002" /C:"unknown option" build\simd_probe.log >nul 2>&1
-if not errorlevel 1 (
-    type build\simd_probe.log
-    del /q build\simd_probe.cpp build\simd_probe.obj build\simd_probe.log 2>nul
-    echo Error: este cl.exe no soporta /arch:SSE4.2.
-    echo Actualiza Visual Studio 2022 o compila con build_mingw.bat.
-    exit /b 1
-)
-del /q build\simd_probe.cpp build\simd_probe.obj build\simd_probe.log 2>nul
-if not "%PROBE_RC%"=="0" (
-    echo Error: la sonda de SSE4.2 no compilo.
-    exit /b 1
-)
-echo SSE4.2 disponible.
-
-echo [1/5] Compilando recursos (visor y updater)...
-rc /nologo /fo build\artpicst.res artpicst.rc
-if %ERRORLEVEL% NEQ 0 (
-    echo Error al compilar los recursos del visor
-    exit /b 1
-)
-cd updater
-rc /nologo /fo ..\build\artpicst_updater.res artpicst_updater.rc
-if %ERRORLEVEL% NEQ 0 (
-    echo Error al compilar los recursos del updater
-    cd ..
-    exit /b 1
-)
-cd ..
-
-echo [2/5] Compilando visor (artpicst.exe)...
-cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /GL /Gy /guard:cf /arch:SSE4.2 /DARTPICST_TARGET_SSE42=1 /utf-8 /W4 /permissive- /wd4324 /I. /Iinclude /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /DSTBI_WINDOWS_UTF8 /DSTBIR_NO_AVX /DSTBIR_NO_AVX2 /D_WIN32_WINNT=0x0601 /D_CRT_SECURE_NO_WARNINGS /Fe:"build\artpicst.exe" src\main.cpp build\artpicst.res /link gdiplus.lib user32.lib kernel32.lib shell32.lib shlwapi.lib gdi32.lib msimg32.lib ole32.lib oleaut32.lib uuid.lib dwmapi.lib windowscodecs.lib comdlg32.lib d2d1.lib dwrite.lib advapi32.lib /MANIFEST:EMBED /MANIFESTINPUT:artpicst.manifest /SUBSYSTEM:WINDOWS /LTCG /OPT:REF /OPT:ICF /GUARD:CF /DYNAMICBASE /HIGHENTROPYVA /NXCOMPAT
-
-if %ERRORLEVEL% NEQ 0 (
-    echo Error al compilar el visor
-    exit /b 1
-)
-
-echo [3/5] Compilando updater (artpicst_updater.exe)...
-cd updater
-cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /guard:cf /arch:SSE4.2 /DARTPICST_TARGET_SSE42=1 /utf-8 /W4 /permissive- /wd4324 /I. /I..\installer /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0601 /D_CRT_SECURE_NO_WARNINGS /Fe:"..\build\artpicst_updater.exe" artpicst_updater.cpp ..\build\artpicst_updater.res /link winhttp.lib gdiplus.lib shell32.lib shlwapi.lib user32.lib advapi32.lib gdi32.lib ole32.lib uuid.lib dwmapi.lib /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF /GUARD:CF /DYNAMICBASE /HIGHENTROPYVA /NXCOMPAT
-if %ERRORLEVEL% NEQ 0 (
-    echo Error al compilar el updater
-    cd ..
-    exit /b 1
-)
-cd ..
-
-:: Gate de calidad: selftest del updater (JSON, SHA-256, versiones)
-build\artpicst_updater.exe --selftest
-if %ERRORLEVEL% NEQ 0 (
-    echo El selftest del updater ha fallado
-    exit /b 1
-)
-echo Selftest del updater OK
-
-echo [3b/5] Compilando y ejecutando tests y fuzzing...
-cl /nologo /EHsc /std:c++20 /O2 /arch:SSE4.2 /DARTPICST_TARGET_SSE42=1 /utf-8 /W4 /permissive- /I. /Iinclude /Fe:"build\image_core_test.exe" tests\image_core_test.cpp /link kernel32.lib
-if %ERRORLEVEL% NEQ 0 (
-    echo Error compilando tests\image_core_test.cpp
-    exit /b 1
-)
-build\image_core_test.exe
-if %ERRORLEVEL% NEQ 0 (
-    echo Los tests del nucleo de imagen han fallado
-    exit /b 1
-)
-cl /nologo /EHsc /std:c++20 /O2 /utf-8 /W4 /permissive- /I. /Fe:"build\release_json_fuzzer.exe" tests\release_json_fuzzer.cpp /link kernel32.lib
-if %ERRORLEVEL% NEQ 0 (
-    echo Error compilando tests\release_json_fuzzer.cpp
-    exit /b 1
-)
-build\release_json_fuzzer.exe
-if %ERRORLEVEL% NEQ 0 (
-    echo El fuzzer del parser JSON ha fallado
-    exit /b 1
-)
-cl /nologo /EHsc /std:c++20 /O2 /utf-8 /W4 /permissive- /I. /Fe:"build\jpeg_exif_test.exe" tests\jpeg_exif_test.cpp /link kernel32.lib shell32.lib
-if %ERRORLEVEL% NEQ 0 (
-    echo Error compilando tests\jpeg_exif_test.cpp
-    exit /b 1
-)
-build\jpeg_exif_test.exe
-if %ERRORLEVEL% NEQ 0 (
-    echo Los tests EXIF han fallado
-    exit /b 1
-)
-echo Tests y fuzzing OK
-
-:: [3c/5] Banco de kernels y gate de politica SIMD (sin AVX)
-echo [3c/5] Banco de kernels y verificacion de politica SIMD...
-cl /nologo /EHsc /std:c++20 /O2 /arch:SSE4.2 /DARTPICST_TARGET_SSE42=1 /utf-8 /W4 /permissive- /I. /Iinclude /Fe:"build\kernel_bench.exe" tests\kernel_bench.cpp /link kernel32.lib
-if %ERRORLEVEL% NEQ 0 (
-    echo Error compilando tests\kernel_bench.cpp
-    exit /b 1
-)
-python tests\check_simd_policy.py --root .
-if %ERRORLEVEL% NEQ 0 (
-    echo La politica SIMD del proyecto no se cumple ^(ver detalle arriba^
-    exit /b 1
-)
-echo Politica SIMD OK
-
-echo [4/5] Preparando payload autocontenido (resources\app\)...
-python scripts\collect_app_payload.py --root .
-if %ERRORLEVEL% NEQ 0 (
-    echo Error al preparar el payload autocontenido
-    exit /b 1
-)
-
-echo [5/5] Compilando instalador autocontenido (artpicst_installer.exe)...
-cd installer
-:: Recursos DESPUES del payload: el .rc incrusta resources\app\ (payload)
-rc /nologo /fo ..\build\artpicst_installer.res artpicst_installer.rc
-if %ERRORLEVEL% NEQ 0 (
-    echo Error al compilar los recursos del instalador
-    cd ..
-    exit /b 1
-)
-:: INCLUDE con la raiz del repo: el .rc localiza el icono (resources\artpicst.ico)
-set "INCLUDE=%~dp0;%INCLUDE%"
-cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /guard:cf /arch:SSE4.2 /DARTPICST_TARGET_SSE42=1 /utf-8 /W4 /permissive- /wd4324 /I. /I..\include /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0601 /D_CRT_SECURE_NO_WARNINGS /Fe:"build\artpicst_installer.exe" artpicst_installer.cpp ..\build\artpicst_installer.res /link gdiplus.lib shlwapi.lib shell32.lib comctl32.lib dwmapi.lib user32.lib advapi32.lib gdi32.lib ole32.lib uuid.lib /SUBSYSTEM:WINDOWS "/MANIFESTUAC:level='requireAdministrator' uiAccess='false'" /OPT:REF /OPT:ICF /GUARD:CF /DYNAMICBASE /HIGHENTROPYVA /NXCOMPAT
-
-if %ERRORLEVEL% NEQ 0 (
-    echo Error al compilar el instalador
-    cd ..
-    exit /b 1
-)
-
-cd ..
-
-echo Copiando archivos a directorio de distribucion...
-copy /y "build\artpicst.exe" "dist\artpicst.exe" >nul
-copy /y "build\artpicst_updater.exe" "dist\artpicst_updater.exe" >nul
-copy /y "installer\build\artpicst_installer.exe" "dist\artpicst_installer.exe" >nul
-copy /y "resources\artpicst.ico" "dist\artpicst.ico" >nul
-copy /y "version.json" "dist\version.json" >nul
-copy /y "README.md" "dist\README.md" >nul
-
-echo.
-echo ========================================
-echo COMPILACION COMPLETADA EXITOSAMENTE
+echo ARTPICST - Build System ^(delegando en build.ps1^)
 echo ========================================
 echo.
-echo Archivos generados en directorio dist\:
-echo   - artpicst.exe (Programa principal)
-echo   - artpicst_updater.exe (Modulo de actualizacion)
-echo   - artpicst_installer.exe (Instalador autocontenido)
-echo   - artpicst.ico (Icono)
-echo   - version.json (Version info)
-echo   - README.md (Documentacion)
-echo.
 
-:: Mostrar tamano de archivos
-for %%I in (dist\artpicst.exe) do echo Programa principal: %%~zI bytes
-for %%I in (dist\artpicst_updater.exe) do echo Updater: %%~zI bytes
-for %%I in (dist\artpicst_installer.exe) do echo Instalador: %%~zI bytes
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0build.ps1" %*
+set "RC=%ERRORLEVEL%"
 
-echo.
-echo Nota: el asset oficial de release es 'artpicst-installer.exe'
-echo (copia/renombra dist\artpicst_installer.exe al publicar).
-echo.
-echo Sistema listo para distribucion en GitHub sin errores.
+if not "%RC%"=="0" (
+    echo.
+    echo Compilacion FALLIDA ^(build.ps1 devolvio %RC%^).
+    exit /b %RC%
+)
+
 exit /b 0

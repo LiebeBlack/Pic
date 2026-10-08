@@ -26,6 +26,23 @@ jobs:
       with:
         arch: x64
 
+    # El baseline SIMD (SSE4.2, sin AVX) NO se escribe en este workflow: se lee
+    # de tools/build-baseline.json (unica fuente de verdad) y se publica como
+    # variables de entorno para los pasos de compilacion. Si el JSON se degrada,
+    # este paso falla en lugar de compilar con menos cobertura SIMD.
+    - name: Baseline SIMD (fuente unica)
+      shell: pwsh
+      run: |
+        $json = Get-Content tools/build-baseline.json -Raw | ConvertFrom-Json
+        if ($json.simd.msvc_flag -notlike '*SSE4.2*') { throw "El baseline de tools/build-baseline.json no es SSE4.2" }
+        "SIMD_FLAG=$($json.simd.msvc_flag)" >> $env:GITHUB_ENV
+        "SIMD_DEFINE=/D$($json.simd.define)" >> $env:GITHUB_ENV
+        Write-Host "Baseline SIMD: $($json.simd.msvc_flag) /D$($json.simd.define)"
+
+    - name: Gate de consistencia del baseline (todos los pipelines)
+      shell: pwsh
+      run: ./tests/check_build_baseline.ps1 -Quiet
+
     # El .ico versionado ya es multirresolucion (16 a 256 px) y el generador no
     # necesita dependencias externas: esto comprueba que el script sigue
     # reproduciendo el icono en el CI y refresca el recurso antes de empaquetar.
@@ -44,7 +61,7 @@ jobs:
         if not exist build mkdir build
         if not exist dist mkdir dist
         cd src
-        cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /GL /Gy /guard:cf /arch:SSE4.2 /DARTPICST_TARGET_SSE42=1 /utf-8 /W4 /WX- /wd4324 /I. /I..\include ^
+        cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /GL /Gy /guard:cf %SIMD_FLAG% %SIMD_DEFINE% /utf-8 /W4 /WX- /wd4324 /I. /I..\include ^
           /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /DSTBI_WINDOWS_UTF8 /DSTBIR_NO_AVX /DSTBIR_NO_AVX2 /D_WIN32_WINNT=0x0601 /D_CRT_SECURE_NO_WARNINGS ^
           /Fe:"..\build\artpicst.exe" main.cpp ..\build\artpicst.res ^
           /link gdiplus.lib user32.lib kernel32.lib shell32.lib shlwapi.lib gdi32.lib msimg32.lib ^
@@ -77,7 +94,7 @@ jobs:
       shell: cmd
       run: |
         cd installer
-        cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /guard:cf /arch:SSE4.2 /DARTPICST_TARGET_SSE42=1 /utf-8 /W4 /WX- /wd4324 /I. /I..\include ^
+        cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /guard:cf %SIMD_FLAG% %SIMD_DEFINE% /utf-8 /W4 /WX- /wd4324 /I. /I..\include ^
           /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0601 /D_CRT_SECURE_NO_WARNINGS ^
           /Fe:"..\build\artpicst_installer.exe" artpicst_installer.cpp ..\build\artpicst_installer.res ^
           /link gdiplus.lib shlwapi.lib shell32.lib comctl32.lib dwmapi.lib user32.lib advapi32.lib ^
@@ -90,14 +107,14 @@ jobs:
       shell: cmd
       run: |
         if not exist build mkdir build
-        cl /nologo /EHsc /std:c++20 /O2 /arch:SSE4.2 /DARTPICST_TARGET_SSE42=1 /utf-8 /W4 /WX- /permissive- /I. ^
+        cl /nologo /EHsc /std:c++20 /O2 %SIMD_FLAG% %SIMD_DEFINE% /utf-8 /W4 /WX- /permissive- /I. ^
           /Fe:"build\image_core_test.exe" tests\image_core_test.cpp /link kernel32.lib || exit /b 1
         build\image_core_test.exe || exit /b 1
 
     - name: Banco de kernels y gate de politica SIMD
       shell: cmd
       run: |
-        cl /nologo /EHsc /std:c++20 /O2 /arch:SSE4.2 /DARTPICST_TARGET_SSE42=1 /utf-8 /W4 /WX- /permissive- /I. ^
+        cl /nologo /EHsc /std:c++20 /O2 %SIMD_FLAG% %SIMD_DEFINE% /utf-8 /W4 /WX- /permissive- /I. ^
           /Fe:"build\kernel_bench.exe" tests\kernel_bench.cpp /link kernel32.lib || exit /b 1
         python tests\check_simd_policy.py --root . || exit /b 1
 

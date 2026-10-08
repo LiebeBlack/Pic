@@ -1,8 +1,9 @@
 # ============================================================================
-# verify.ps1 — Punto único de entrada para la calidad de ARTPICST
+# verify.ps1 - Punto único de entrada para la calidad de ARTPICST
 # ----------------------------------------------------------------------------
 # Reúne en un solo comando todos los gates del proyecto:
 #
+#   0. Gate de consistencia del baseline SIMD (fuente única, sin compilador)
 #   1. Gate de política SIMD  (sin AVX + identidades enteras + máscaras PSHUFB)
 #   2. Tests del núcleo de imagen    (LUT, allocator, SIMD alineado, transformadas)
 #   3. Tests EXIF con offsets hostiles
@@ -17,9 +18,10 @@
 #
 # Exit: 0 = todo verde · 1 = algún gate ha fallado (se imprime cuál)
 #
-# IMPORTANTE: el baseline SIMD es SSE4.2. Los tests se compilan con
-# /arch:SSE4.2 a propósito: sin ese flag el núcleo cae a la ruta SSE2 y los
-# kernels SSE4.1 del visor quedarían sin cubrir.
+# IMPORTANTE: el baseline SIMD es SSE4.2 y se LEE de tools/build-baseline.json
+# (única fuente de verdad). Los tests se compilan con ese flag a propósito: sin
+# él el núcleo cae a la ruta SSE2 y los kernels SSE4.1 del visor quedarían sin
+# cubrir, pero los tests seguirían pasando.
 # ============================================================================
 
 [CmdletBinding()]
@@ -79,7 +81,17 @@ if (-not $SkipBuild) {
     }
 }
 
-$simdFlags = @("/arch:SSE4.2", "/DARTPICST_TARGET_SSE42=1")
+# Baseline SIMD: leído de la fuente única (nunca escrito aquí).
+$simdFlags = @()
+foreach ($field in @("msvc_flag", "msvc_define")) {
+    $value = (& powershell -NoProfile -ExecutionPolicy Bypass -File "tools\baseline.ps1" $field | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($value)) {
+        Write-Host "[FALLO] Baseline : no se pudo leer '$field' de tools/build-baseline.json" -ForegroundColor Red
+        exit 1
+    }
+    $simdFlags += $value
+}
+Info "Baseline SIMD (de tools/build-baseline.json): $($simdFlags -join ' ')"
 $testCommon = @("/nologo", "/EHsc", "/std:c++20", "/O2", "/utf-8", "/W4", "/permissive-")
 
 function Build-Test($out, $src, $includes, $libs) {
@@ -95,6 +107,13 @@ function Build-Test($out, $src, $includes, $libs) {
     & cl @clArgs
     return ($LASTEXITCODE -eq 0)
 }
+
+# ---------------------------------------------------------------------------
+# 0. Consistencia del baseline SIMD (no necesita compilador ni Python)
+# ---------------------------------------------------------------------------
+Step "0. Consistencia del baseline SIMD (fuente única entre pipelines)"
+& powershell -NoProfile -ExecutionPolicy Bypass -File "tests\check_build_baseline.ps1" -Quiet
+if ($LASTEXITCODE -ne 0) { Fail "Baseline" "check_build_baseline.ps1 devolvió $LASTEXITCODE" }
 
 # ---------------------------------------------------------------------------
 # 1. Gate de política SIMD (no necesita compilador)
@@ -163,7 +182,8 @@ if ($Bench) {
         & build\kernel_bench.exe
         Write-Host ""
         Write-Host "Compara estas cifras con las archivadas en docs\PERFORMANCE.md:" -ForegroundColor Gray
-        Write-Host "compila el mismo banco con /arch:SSE2 (sin ARTPICST_TARGET_SSE42) para obtener la base." -ForegroundColor Gray
+        Write-Host "para obtener la base SSE2, compila el mismo banco cambiando 'msvc_flag' en" -ForegroundColor Gray
+        Write-Host "tools/build-baseline.json y quitando el define (es un edit temporal, no permanente)." -ForegroundColor Gray
     } else {
         Fail "kernel_bench" "no compiló"
     }
@@ -175,7 +195,7 @@ if ($Bench) {
 Write-Host ""
 if ($script:Failed.Count -eq 0) {
     Write-Host "========================================" -ForegroundColor Green
-    Write-Host "VERIFY OK — todos los gates superados" -ForegroundColor Green
+    Write-Host "VERIFY OK - todos los gates superados" -ForegroundColor Green
     Write-Host "========================================" -ForegroundColor Green
     exit 0
 }

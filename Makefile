@@ -27,16 +27,30 @@ WINDRES_PP ?= gcc -E -xc -DRC_INVOKED
 
 # ---------------------------------------------------------------------------
 # Baseline SIMD del proyecto: SSE4.2 (SSE2/SSSE3/SSE4.1 incluidos).
-# No anadas flags de AVX ni de microarquitectura: image_core.hpp y
-# tests/check_simd_policy.py los rechazan.
+# NO se escribe aqui: se LEE de tools/build-baseline.json, la unica fuente de
+# verdad, a traves de su lector tools/baseline.ps1 (el mismo que usan
+# build_mingw.bat y los workflows). No anadas flags de AVX ni de
+# microarquitectura: image_core.hpp y tests/check_simd_policy.py los rechazan.
 # ---------------------------------------------------------------------------
-SIMD := -msse4.2
+BASELINE   := tools/baseline.ps1
+PS_READ    := powershell -NoProfile -ExecutionPolicy Bypass -File $(BASELINE)
+SIMD       := $(shell $(PS_READ) gnu_flag 2>/dev/null)
+SIMDDEF    := $(shell $(PS_READ) gnu_define 2>/dev/null)
+
+# Sin baseline no se compila: mejor fallar aqui que emitir un binario SSE2 en
+# silencio (tendria otra cobertura SIMD y otro rendimiento).
+ifeq ($(strip $(SIMD)),)
+$(error No se pudo leer el baseline SIMD de tools/build-baseline.json. \
+        Revisa que powershell y tools/baseline.ps1 existan (ver BUILD.md))
+endif
+ifneq ($(findstring msse4.2,$(SIMD)),msse4.2)
+$(error El baseline leido no es SSE4.2: '$(SIMD)'. AVX/AVX2/AVX-512 estan prohibidos.)
+endif
 
 WARN       := -Wall -Wextra
 LINKSTATIC := -static -static-libgcc -static-libstdc++
 SYSDEFS    := -DUNICODE -D_UNICODE -DNOMINMAX -DWIN32_LEAN_AND_MEAN -D_WIN32_WINNT=0x0601
 STBDEFS    := -DSTBI_WINDOWS_UTF8 -DSTBIR_NO_AVX -DSTBIR_NO_AVX2
-SIMDDEF    := -DARTPICST_TARGET_SSE42=1
 
 VIEWER_FLAGS   := -std=c++23 -O3 -funroll-loops -fno-math-errno $(SIMD) $(SIMDDEF) $(WARN) $(LINKSTATIC) -municode $(SYSDEFS) $(STBDEFS) -I. -Iinclude
 # OJO con las rutas de inclusión: las reglas 'updater' e 'installer' compilan
@@ -168,4 +182,5 @@ clean:
 
 help:
 	@echo "Objetivos: all · test · bench · policy · package · dist · msvc · clean"
-	@echo "Baseline SIMD: $(SIMD)  (AVX prohibido en todo el proyecto)"
+	@echo "Baseline SIMD: $(SIMD) $(SIMDDEF)  (AVX prohibido en todo el proyecto)"
+	@echo "Origen: tools/build-baseline.json (unica fuente de verdad)"

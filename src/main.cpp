@@ -3574,6 +3574,9 @@ struct GpuState {
     int lastUploadFrame = -1;     // índice de fotograma GIF subido
     int lastUploadEffects = 0;
     bool lastUploadAlpha = false;
+    // Factor de reducción con el que se subió el bitmap (1.0 = tamaño original).
+    // Forma parte de la identidad de lo subido y de la geometría de dibujo.
+    float lastUploadScale = 1.0f;
     DWORD themeKey = 0;
 
     // Formatos de texto DirectWrite (solo dependen de la fábrica)
@@ -3937,6 +3940,43 @@ static unsigned char* GpuBakePixels(unsigned char* src, int w, int h, bool hasAl
     return dst;
 }
 
+// ---------------------------------------------------------------------------
+// Escala de MINIFICACIÓN de la subida (calidad de reducción en la ruta GPU)
+// ---------------------------------------------------------------------------
+// Direct2D sobre ID2D1HwndRenderTarget solo puede interpolar LINEAR (bilineal)
+// o NEAREST_NEIGHBOR: no expone ningún filtro bicúbico. En reducciones —el caso
+// más habitual al ver una foto completa, p. ej. al 80 %— eso deja la imagen más
+// blanda que la ruta GDI+, que sí usa HighQualityBicubic. Es decir, la ruta
+// marcada como "premium" era la de MENOR calidad justo donde más se nota.
+//
+// Solución: cuando la imagen se va a ver REDUCIDA, se reduce ANTES en CPU con
+// stb_image_resize2 (el mismo código y el mismo filtro que ya usa la reducción
+// de carga, sobre los mismos datos BGRA sin premultiplicar) y se sube a la GPU
+// el resultado, que entonces se dibuja prácticamente a 1:1. Un remuestreo
+// multi-tap a la resolución final es de mejor calidad que cualquier filtro de
+// GPU disponible aquí y además elimina el aliasing/shimmer del minificado
+// profundo.
+//
+// Límites, deliberados:
+//   · solo en REPOSO: durante el arrastre o la animación de zoom sigue el camino
+//     rápido de siempre, así que el remuestreo nunca compite con el framerate;
+//   · solo si REDUCE (zoom < 1): al ampliar no hay aliasing que corregir;
+//   · solo si el resultado cabe en el presupuesto de píxeles, para acotar el
+//     coste de CPU de cada cambio de escala y el pico de memoria.
+constexpr size_t kGpuResampleBudgetPixels = 12ull * 1024ull * 1024ull;
+
+float GpuMinificationScale() {
+    if (g_state.isDragging || g_state.zoomAnimActive) return 1.0f;
+    const float zoom = g_state.zoom;
+    if (!(zoom < 0.98f)) return 1.0f;               // sin reducción apreciable
+    if (g_state.imageWidth <= 0 || g_state.imageHeight <= 0) return 1.0f;
+    const double dw = static_cast<double>(g_state.imageWidth) * zoom;
+    const double dh = static_cast<double>(g_state.imageHeight) * zoom;
+    if (dw < 1.0 || dh < 1.0) return 1.0f;
+    if (dw * dh > static_cast<double>(kGpuResampleBudgetPixels)) return 1.0f;
+    return zoom;   // el bitmap se remuestrea exactamente al tamaño de pantalla
+}
+
 // Sube (o actualiza) el bitmap del fotograma actual solo cuando cambia algo
 static bool GpuUpdateImage() {
     if (!g_gpu.target) return false;
@@ -3968,22 +4008,60 @@ static bool GpuUpdateImage() {
     // es la RUTA del archivo (+ índice de fotograma en GIF): dos cargas de la
     // misma ruta producen contenido idéntico, así que saltarse la subida
     // sigue siendo válido; una ruta distinta fuerza la subida siempre.
-    if (g_gpu.image && w == g_gpu.lastUploadW && h == g_gpu.lastUploadH &&
+    // Escala de minificación: se calcula ANTES de la comprobación de caché
+    // porque forma parte de la identidad del bitmap subido.
+    float scale = GpuMinificationScale();
+    int bw = w;
+    int bh = h;
+    if (scale < 1.0f) {
+        bw = (std::max)(1, static_cast<int>(std::lround(static_cast<double>(w) * scale)));
+        bh = (std::max)(1, static_cast<int>(std::lround(static_cast<double>(h) * scale)));
+    } else {
+        scale = 1.0f;
+    }
+
+    // La clave compara dimensiones del BITMAP (bw, bh) más la escala: dado
+    // (bw, bh, scale, ruta, fotograma, efectos, alfa) el contenido subido queda
+    // determinado, así que dos estados con la misma clave son indistinguibles.
+    if (g_gpu.image && bw == g_gpu.lastUploadW && bh == g_gpu.lastUploadH &&
+        scale == g_gpu.lastUploadScale &&
         g_state.currentFilePath == g_gpu.lastUploadPath &&
         g_state.gif.current == g_gpu.lastUploadFrame &&
         effects == g_gpu.lastUploadEffects && alpha == g_gpu.lastUploadAlpha) {
         return true; // nada cambió: el bitmap de vídeo sigue siendo válido
     }
 
+    // Reducción de alta calidad EN CPU antes de subir. Se hace ANTES del
+    // horneado por dos razones: el remuestreo trabaja sobre los mismos datos
+    // (BGRA sin premultiplicar) que ya trata la reducción de carga, y el
+    // horneado posterior cuesta proporcionalmente menos píxeles.
+    unsigned char* resampled = nullptr;
+    if (bw != w || bh != h) {
+        resampled = stbir_resize_uint8_srgb(src, w, h, 0, nullptr, bw, bh, 0, STBIR_BGRA);
+        if (resampled) {
+            src = resampled;
+        } else {
+            // Sin memoria para el remuestreo: se sube el original (la GPU hará
+            // lo que pueda) en lugar de fallar el fotograma.
+            LogWarn(L"Sin memoria para el remuestreo de minificado; se usa la ruta GPU directa");
+            bw = w;
+            bh = h;
+            scale = 1.0f;
+        }
+    }
+
     // ¿Hay que transformar píxeles? Solo si hay efecto o transparencia real.
     unsigned char* uploadSrc = src;
     if (effects != 0 || alpha) {
-        uploadSrc = GpuBakePixels(src, w, h, alpha, effects);
-        if (!uploadSrc) return false;
+        uploadSrc = GpuBakePixels(src, bw, bh, alpha, effects);
+        if (!uploadSrc) {
+            if (resampled) artpicst::AlignedPixelFree(resampled);
+            return false;
+        }
     }
 
-    const UINT stride = static_cast<UINT>(w) * 4u;
-    D2D1_SIZE_U size = D2D1::SizeU(static_cast<UINT>(w), static_cast<UINT>(h));
+    const UINT stride = static_cast<UINT>(bw) * 4u;
+    D2D1_SIZE_U size = D2D1::SizeU(static_cast<UINT>(bw), static_cast<UINT>(bh));
     if (!g_gpu.image) {
         HRESULT hr = g_gpu.target->CreateBitmap(
             size, uploadSrc, stride,
@@ -3994,7 +4072,7 @@ static bool GpuUpdateImage() {
             g_gpu.image = nullptr;
             return false;
         }
-    } else if (w != g_gpu.lastUploadW || h != g_gpu.lastUploadH) {
+    } else if (bw != g_gpu.lastUploadW || bh != g_gpu.lastUploadH) {
         GpuSafeRelease(g_gpu.image);
         HRESULT hr = g_gpu.target->CreateBitmap(
             size, uploadSrc, stride,
@@ -4012,8 +4090,16 @@ static bool GpuUpdateImage() {
         }
     }
 
-    g_gpu.lastUploadW = w;
-    g_gpu.lastUploadH = h;
+    // El buffer remuestreado ya no hace falta: el bitmap de vídeo tiene su
+    // propia copia en memoria de vídeo.
+    if (resampled) {
+        artpicst::AlignedPixelFree(resampled);
+        resampled = nullptr;
+    }
+
+    g_gpu.lastUploadW = bw;
+    g_gpu.lastUploadH = bh;
+    g_gpu.lastUploadScale = scale;
     g_gpu.lastUploadPath = g_state.currentFilePath;
     g_gpu.lastUploadFrame = g_state.gif.current;
     g_gpu.lastUploadEffects = effects;
@@ -4090,11 +4176,25 @@ static void GpuDrawImage(ID2D1RenderTarget* rt) {
     const float destW = static_cast<float>(boxW) * zoom;
     const float destH = static_cast<float>(boxH) * zoom;
 
+    // Escala EFECTIVA del bitmap que hay en la GPU. Si se remuestreó en CPU al
+    // tamaño de pantalla (reducción), vale ~1.0 y el bitmap se dibuja a 1:1, con
+    // lo que el filtro de la GPU deja de intervenir y la calidad la fija el
+    // remuestreo multi-tap de la CPU. Si no hay reducción, vale `zoom` y todo
+    // queda exactamente como antes.
+    //
+    // Nota: bmpW * effScale == imageWidth * zoom (módulo el redondeo a píxel del
+    // remuestreo), así que la GEOMETRÍA en pantalla no cambia: solo cambia de
+    // qué bitmap se muestrea. Es lo que hace que este cambio sea conservador.
+    const float uploadScale = (g_gpu.lastUploadScale > 0.0f) ? g_gpu.lastUploadScale : 1.0f;
+    const float effScale = zoom / uploadScale;
+    const float bmpW = static_cast<float>(g_gpu.lastUploadW);
+    const float bmpH = static_cast<float>(g_gpu.lastUploadH);
+
     // Centro en pantalla (respetando el desplazamiento del pan) y centro local
     const float centerX = g_state.offsetX + destW * 0.5f;
     const float centerY = g_state.offsetY + destH * 0.5f;
-    const float localCx = static_cast<float>(g_state.imageWidth) * zoom * 0.5f;
-    const float localCy = static_cast<float>(g_state.imageHeight) * zoom * 0.5f;
+    const float localCx = bmpW * effScale * 0.5f;
+    const float localCy = bmpH * effScale * 0.5f;
 
     // Misma composición que el trazador GDI+: T(centro) * R * F * T(-centro local)
     const D2D1_MATRIX_3X2_F m =
@@ -4105,25 +4205,27 @@ static void GpuDrawImage(ID2D1RenderTarget* rt) {
         D2D1::Matrix3x2F::Translation(-localCx, -localCy);
     rt->SetTransform(m);
 
-    const D2D1_RECT_F dst = D2D1::RectF(0.0f, 0.0f,
-                                        static_cast<float>(g_state.imageWidth) * zoom,
-                                        static_cast<float>(g_state.imageHeight) * zoom);
+    const D2D1_RECT_F dst = D2D1::RectF(0.0f, 0.0f, bmpW * effScale, bmpH * effScale);
 
     // Tablero de ajedrez detrás de imágenes con transparencia
     if (g_state.hasAlpha && g_gpu.checkerBrush) {
         rt->FillRectangle(dst, g_gpu.checkerBrush);
     }
 
-    // Interpolación: vecino más próximo a 100%/200%/… y en zooms profundos;
-    // bilineal (GPU) para el resto, con bloqueos al mínimo en reposo.
-    const bool pixelPerfect = std::fabs(zoom - std::round(zoom)) < 0.01f && zoom >= 1.0f;
-    // CALIDAD: DrawBitmap solo expone LINEAR (bilineal GPU) y NEAREST_NEIGHBOR.
-    // El filtro fino de reducciones (bicúbica) lo aporta la ruta GDI+ cuando
-    // no hay GPU; por hardware se mantiene LINEAR, que es el máximo disponible
-    // y ejecuta el filtro a resolución nativa del monitor.
+    // Interpolación: vecino más próximo a escalas enteras (100 %, 200 %…) y en
+    // ampliaciones profundas; bilineal para el resto.
+    //
+    // CALIDAD EN REDUCCIÓN: cuando hay minificación, el bitmap ya viene
+    // remuestreado en CPU al tamaño de pantalla, así que effScale vale ~1.0 y
+    // este filtro es una identidad: la nitidez la decide el remuestreo de la
+    // CPU (multi-tap a la resolución final), no el bilineal de la GPU. Es la
+    // corrección al hecho de que DrawBitmap solo exponga LINEAR y
+    // NEAREST_NEIGHBOR: en vez de pedirle a la GPU un filtro que no tiene, se le
+    // entrega el resultado ya filtrado.
+    const bool pixelPerfect = std::fabs(effScale - std::round(effScale)) < 0.01f && effScale >= 1.0f;
     const D2D1_BITMAP_INTERPOLATION_MODE interp =
-        (pixelPerfect || zoom > 3.5f) ? D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR
-                                      : D2D1_BITMAP_INTERPOLATION_MODE_LINEAR;
+        (pixelPerfect || effScale > 3.5f) ? D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR
+                                          : D2D1_BITMAP_INTERPOLATION_MODE_LINEAR;
     // ID2D1RenderTarget::DrawBitmap acepta como máximo 5 parámetros (la
     // transformación de perspectiva es de ID2D1DeviceContext). Se pasa &dst
     // explícito: forma puntero, válida en MSVC y MinGW.

@@ -1,0 +1,26 @@
+{
+  "canonical_entrypoint": "build.ps1",
+  "simd": {
+    "baseline": "SSE4.2",
+    "msvc_flag": "/arch:SSE4.2",
+    "gnu_flag": "-msse4.2",
+    "define": "ARTPICST_TARGET_SSE42=1",
+    "macro": "ARTPICST_TARGET_SSE42",
+    "forbidden_tokens": ["avx", "avx2", "avx512", "avx-512", "avx512f", "f16c"],
+    "policy_gate": "tests/check_simd_policy.py",
+    "consistency_gate": "tests/check_build_baseline.ps1"
+  },
+  "consumers": {
+    "build.ps1": "Get-Content + ConvertFrom-Json (entrada canónica)",
+    "CMakeLists.txt": "file(READ) + string(JSON)",
+    "build_mingw.bat": "tools/baseline.ps1 gnu_flag",
+    "Makefile": "$(shell powershell -File tools/baseline.ps1 gnu_flag)",
+    "installer/build_installer.bat": "tools/baseline.ps1 msvc_flag",
+    ".github/workflows/build.yml": "paso 'Baseline SIMD' -> %SIMD_FLAG% / %SIMD_DEFINE%",
+    ".github/workflows/release.yml": "paso 'Baseline SIMD' -> %SIMD_FLAG% / %SIMD_DEFINE%",
+    ".github/workflows/nightly-fuzz.yml": "paso 'Baseline SIMD' -> %SIMD_FLAG% / %SIMD_DEFINE%",
+    "scripts/verify.ps1": "tools/baseline.ps1 msvc_define_argv",
+    "tests/check_simd_policy.py": "json.load (valores esperados)",
+    "build.bat": "delegado: invoca build.ps1 (no conoce ningún flag)"
+  }
+}
