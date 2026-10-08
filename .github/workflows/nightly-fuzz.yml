@@ -36,7 +36,7 @@ jobs:
         shell: cmd
         run: |
           if not exist build mkdir build
-          cl /nologo /EHsc /std:c++20 /O1 /utf-8 /W4 /WX- /permissive- ^
+          cl /nologo /EHsc /std:c++20 /O1 /arch:SSE4.2 /DARTPICST_TARGET_SSE42=1 /utf-8 /W4 /WX- /permissive- ^
              /fsanitize=address /I. ^
              /Fe:"build\release_json_fuzzer_asan.exe" tests\release_json_fuzzer.cpp ^
              /link kernel32.lib || exit /b 1
@@ -45,7 +45,7 @@ jobs:
       - name: Tests EXIF con offsets hostiles (ASan)
         shell: cmd
         run: |
-          cl /nologo /EHsc /std:c++20 /O1 /utf-8 /W4 /WX- /permissive- ^
+          cl /nologo /EHsc /std:c++20 /O1 /arch:SSE4.2 /DARTPICST_TARGET_SSE42=1 /utf-8 /W4 /WX- /permissive- ^
              /fsanitize=address /I. ^
              /Fe:"build\jpeg_exif_test_asan.exe" tests\jpeg_exif_test.cpp ^
              /link kernel32.lib shell32.lib || exit /b 1
@@ -54,12 +54,16 @@ jobs:
       - name: Fuzz del allocator alineado (ASan)
         shell: cmd
         run: |
-          cl /nologo /EHsc /std:c++20 /O1 /utf-8 /W4 /WX- /permissive- ^
+          cl /nologo /EHsc /std:c++20 /O1 /arch:SSE4.2 /DARTPICST_TARGET_SSE42=1 /utf-8 /W4 /WX- /permissive- ^
              /fsanitize=address /I. ^
              /Fe:"build\image_core_test_asan.exe" tests\image_core_test.cpp ^
              /link kernel32.lib || exit /b 1
           set ARTPICST_TEST_FUZZ_ITERS=50000
           build\image_core_test_asan.exe || exit /b 1
+
+      - name: Gate de politica SIMD
+        shell: cmd
+        run: python tests\check_simd_policy.py --root . || exit /b 1
 
       - name: Resumen
         if: success()

@@ -39,6 +39,7 @@
 
 #include <windows.h>
 #include <windowsx.h>
+#include <intrin.h>    // __cpuid: verificación previa de SSE4.2
 #include <shlwapi.h>
 #include <shellapi.h>
 #include <shlobj.h>
@@ -897,8 +898,91 @@ bool TaskVerifyPayload(PipeUi& ui, const PipeJob&, Pacer& clock, std::wstring& e
     return true;
 }
 
+// Identidad de la aplicación en la barra de tareas (AppUserModelID).
+// Se fija explícitamente para que el asistente, el desinstalador y el modo
+// actualización no se agrupen bajo la identidad del VISOR (que es otro
+// ejecutable) y cada uno muestre su propio icono y su propia ventana.
+void AppUserModelIdForRole(const wchar_t* role) {
+    const std::wstring id = std::wstring(L"LiebeBlack.ARTPICST.") + role;
+    SetCurrentProcessExplicitAppUserModelID(id.c_str());
+}
+
+// ---------------------------------------------------------------------------
+// Verificación de requisitos PREVIOS
+// ---------------------------------------------------------------------------
+// El instalador comprueba lo que de verdad hace falta ANTES de tocar el
+// sistema, para no dejar una instalación que falle al arrancar:
+//   1. CPU con SSE4.2 — es el baseline SIMD con el que se compilan los tres
+//      binarios (ver tests/check_simd_policy.py). Una CPU anterior (pre-Nehalem,
+//      2008) provocaría una instrucción ilegal al abrir el visor.
+//   2. Windows 10 (build 10240) o superior — requisito declarado del producto.
+//   3. Microsoft Visual C++ 2015-2022 x64 Redistributable.
+bool CpuSupportsSse42() {
+#if defined(_MSC_VER)
+    int regs[4] = {};
+    __cpuid(regs, 0);
+    if (regs[0] < 1) return false;     // no hay CPUID hoja 1
+    __cpuid(regs, 1);
+    return (regs[2] & (1 << 20)) != 0; // ECX bit 20 = SSE4.2
+#elif defined(__GNUC__) && (defined(__x86_64__) || defined(__i386__))
+    unsigned int eax = 0, ebx = 0, ecx = 0, edx = 0;
+    if (__get_cpuid_max(0, nullptr) < 1) return false;
+    __cpuid(1, eax, ebx, ecx, edx);
+    return (ecx & (1u << 20)) != 0;
+#else
+    return true;   // no es x86/x64: el baseline SSE4.2 no aplica
+#endif
+}
+
+// Build real del sistema. 0xFFFFFFFF = desconocido. GetVersionEx/VerifyVersionInfo
+// mienten según el manifiesto (supportedOS), así que se usa RtlGetVersion.
+unsigned long WindowsBuildNumber() {
+    struct RtlOsVersionInfoW {
+        unsigned long dwOSVersionInfoSize;
+        unsigned long dwMajorVersion;
+        unsigned long dwMinorVersion;
+        unsigned long dwBuildNumber;
+        unsigned long dwPlatformId;
+        wchar_t       szCSDVersion[128];
+    };
+    using RtlGetVersionFn = LONG(WINAPI*)(RtlOsVersionInfoW*);
+    static unsigned long cached = 0;
+    if (cached != 0) return cached;
+    cached = 0xFFFFFFFFul;
+    if (HMODULE ntdll = GetModuleHandleW(L"ntdll.dll")) {
+        auto fn = reinterpret_cast<RtlGetVersionFn>(
+            reinterpret_cast<void*>(GetProcAddress(ntdll, "RtlGetVersion")));
+        if (fn) {
+            RtlOsVersionInfoW vi{};
+            vi.dwOSVersionInfoSize = sizeof(vi);
+            if (fn(&vi) == 0) cached = vi.dwBuildNumber;
+        }
+    }
+    return cached;
+}
+
 bool TaskSystemDiagnostics(PipeUi& ui, const PipeJob& job, Pacer& clock, std::wstring& error) {
-    ui.Log(LogKind::Info, clock.Elapsed(), L"Diagnóstico del sistema: Windows x64, DPI %u", GetDpiForSystemSafe());
+    const unsigned long build = WindowsBuildNumber();
+    const bool buildKnown = (build != 0xFFFFFFFFul);
+    ui.Log(LogKind::Info, clock.Elapsed(), L"Diagnóstico del sistema: Windows x64 build %lu, DPI %u",
+           buildKnown ? build : 0ul, GetDpiForSystemSafe());
+
+    if (!CpuSupportsSse42()) {
+        error = L"Esta CPU no soporta SSE4.2, que es el baseline de los binarios. "
+                L"Se necesita un procesador Intel Nehalem / AMD Bulldozer o posterior.";
+        return false;
+    }
+    ui.Log(LogKind::Ok, clock.Elapsed(), L"[OK] CPU compatible (SSE4.2 disponible)");
+
+    if (buildKnown && build < 10240ul) {
+        error = L"ARTPICST requiere Windows 10 o superior.";
+        return false;
+    }
+    if (!buildKnown) {
+        ui.Log(LogKind::Warn, clock.Elapsed(),
+               L"[AVISO] No se pudo determinar la versión de Windows; se continúa");
+    }
+
     std::wstring depStatus;
     if (!InstallVCRedistributable(GetModuleFolder(), depStatus)) {
         error = depStatus;
@@ -2818,6 +2902,11 @@ static int RunSilent(AppMode mode) {
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine, int nCmdShow) {
     (void)hPrevInstance;
     (void)pCmdLine;
+
+    // Identidad propia en la barra de tareas: el asistente, el desinstalador y
+    // el modo actualización comparten binario, así que se distinguen por rol
+    // para que Windows no los agrupe con el visor.
+    AppUserModelIdForRole(L"Installer");
 
     // Argumentos: --uninstall, --silent, --elevated, --update <payload.exe>,
     // --dir <carpeta destino de la actualización>.

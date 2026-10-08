@@ -71,10 +71,27 @@ powershell -ExecutionPolicy Bypass -File build.ps1
 build.bat
 ```
 
-### Opción 3: MinGW (Alternativa)
+### Opción 3: Makefile (Git Bash / MSYS2 / MinGW-w64)
+```bash
+make            # pipeline completo
+make test       # tests + gate de política SIMD
+make bench      # banco de kernels (ns/píxel y ancho de banda)
+```
+
+### Opción 4: MinGW (alternativa)
 ```cmd
 build_mingw.bat
 ```
+
+### Verificación de calidad
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\verify.ps1 -Bench
+```
+
+Todos los pipelines fijan el baseline SIMD con `/arch:SSE4.2` (MSVC) o `-msse4.2`
+(MinGW) y ejecutan `tests/check_simd_policy.py`, que **falla el build** si aparece
+cualquier token capaz de activar AVX o si las identidades enteras del núcleo de
+imagen dejan de ser exactas.
 
 Los tres scripts compilan y ejecutan además la suite de **tests y fuzzing**
 (`tests\image_core_test.cpp` para el núcleo SIMD/LUT y
@@ -141,16 +158,30 @@ Sin conexión, con rate-limit de la API o si el servidor falla, el updater perma
 
 ## 🏗️ Arquitectura
 
-- **Main Program**: C++23 nativo con Win32 API, GDI+, WIC, stb_image (ultra-optimizado)
+- **Main Program**: C++23 nativo con Win32 API, GDI+, WIC, stb_image (ultra-optimizado); baseline SIMD SSE4.2 sin AVX
 - **Installer** (`installer/`): wizard GDI+ autocontenido; extrae su payload RCDATA, instala con elevación UAC, rollback y modo silencioso `--update`; la instalación muestra 10 fases técnicas con consola de log en vivo
 - **Updater** (`updater/`): módulo independiente con WinHTTP que consulta `releases/latest` en GitHub, compara versiones, verifica SHA-256 y encadena la instalación
 - **Viewer ↔ Updater** (`src/updater_client.hpp`): chequeo diario en segundo plano y menú "Buscar actualizaciones..."
 
 ## 📋 Requisitos
 
-- Windows 10/11
-- Visual Studio 2019/2022 con C++ (o MinGW)
+- Windows 10/11 (x64)
+- **CPU con SSE4.2** — Intel Nehalem / AMD Bulldozer (2008) o posterior. Los tres
+  binarios se compilan con baseline SSE4.2 y **AVX/AVX2/AVX-512 están prohibidos**
+  por diseño; el instalador verifica esta capacidad antes de instalar. Ver
+  [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
+- Visual Studio 2022 con C++ (o MinGW-w64 con GCC 13+)
 - Git (para clonar el repositorio)
+- Python 3 (solo para el gate de política SIMD y el icono)
+
+## 📚 Documentación técnica
+
+- [BUILD.md](BUILD.md) — compilación detallada, flags y solución de problemas
+- [docs/PERFORMANCE.md](docs/PERFORMANCE.md) — baseline SIMD, kernels, cómo medir y presupuesto de memoria
+- [docs/INSTALL.md](docs/INSTALL.md) — instalador, rutas, accesos directos, modos silenciosos y desinstalación
+- [docs/UPDATER.md](docs/UPDATER.md) — arquitectura del auto-actualizador
+- [docs/REFACTOR_C23.md](docs/REFACTOR_C23.md) — auditoría C23/C++23 y decisiones de diseño
+- [CHANGELOG.md](CHANGELOG.md) — historial de cambios
 
 ## 📄 Licencia
 

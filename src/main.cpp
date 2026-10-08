@@ -63,6 +63,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cwchar>
+#include <exception>
 #include <fstream>
 #include <iterator>
 #include <list>
@@ -184,7 +185,42 @@ const float MAX_ZOOM = 512.0f;
 const float ZOOM_STEP = 1.25f;
 const size_t CACHE_SIZE = 4;                           // Caché compacta (2 previas + 2 siguientes) para consumo ultra-ligero
 const size_t MAX_CACHE_BYTES = 64ull * 1024ull * 1024ull; // 64 MB límite de caché: evita picos de RAM (~300 MB) con fotos grandes
-const int MAX_DIMENSION = 3840;
+
+// Límite de DIMENSIÓN al cargar.
+//
+// Antes era un 3840 fijo, que ESTRANGULABA el detalle de origen: una foto de
+// 6000x4000 se reducía durante la carga, así que el zoom al 100 % ya no mostraba
+// los píxeles reales y el análisis a 512x se hacía sobre una imagen ya
+// interpolada. Ahora el límite se deriva de un presupuesto de memoria para la
+// imagen decodificada (ancho*alto*4 B):
+//
+//     presupuesto 100 MB -> lado máximo 5000 px  (5000² x 4 B = 95,4 MB)
+//     suelo  3840 px     ->  nunca menos que antes
+//     techo 16384 px     ->  16384² x 4 B = 1 GiB (solo si el usuario lo pide)
+//
+// ARTPICST_MAX_DIMENSION (512..16384) lo ajusta en máquinas con mucha memoria.
+// Se lee una sola vez y el valor efectivo se registra en el banner de arranque.
+constexpr int    kMaxDimensionFloor = 3840;
+constexpr int    kMaxDimensionCeil  = 16384;
+constexpr size_t kDecodeBudgetBytes = 100ull * 1024ull * 1024ull;
+
+int MaxDimensionLimit() {
+    static int cached = 0;
+    if (cached != 0) return cached;
+    // Lado máximo cuyo búfer BGRA cabe en el presupuesto de decodificación.
+    size_t side = static_cast<size_t>(std::sqrt(static_cast<double>(kDecodeBudgetBytes) / 4.0));
+    if (side < static_cast<size_t>(kMaxDimensionFloor)) side = static_cast<size_t>(kMaxDimensionFloor);
+    if (side > static_cast<size_t>(kMaxDimensionCeil))  side = static_cast<size_t>(kMaxDimensionCeil);
+    int limit = static_cast<int>(side);
+    wchar_t env[16] = {};
+    const DWORD n = GetEnvironmentVariableW(L"ARTPICST_MAX_DIMENSION", env, 16);
+    if (n > 0 && n < 16) {
+        const int requested = _wtoi(env);   // fuera de rango => se ignora (se avisa en el banner)
+        if (requested >= 512 && requested <= kMaxDimensionCeil) limit = requested;
+    }
+    cached = limit;
+    return cached;
+}
 const LONGLONG MAX_FILE_BYTES = 300LL * 1024LL * 1024LL;
 const int MAX_GIF_FRAMES = 120;
 const size_t MAX_GIF_BYTES = 64ull * 1024ull * 1024ull;
@@ -796,7 +832,8 @@ void GpuShutdown();
 //      comprueba con __builtin_mul_overflow, no con aritmética optimista).
 static bool SafePixelBytes(int width, int height, size_t& outBytes) {
     if (width <= 0 || height <= 0) return false;
-    if (width > MAX_DIMENSION || height > MAX_DIMENSION) return false;
+    const int dimLimit = MaxDimensionLimit();
+    if (width > dimLimit || height > dimLimit) return false;
     return artpicst::CheckedBgraBytes(static_cast<uint32_t>(width),
                                       static_cast<uint32_t>(height), outBytes);
 }
@@ -817,9 +854,10 @@ static void TrimProcessMemory() {
 
 static void DownscaleImageIfTooLarge(unsigned char*& pixels, int& width, int& height) {
     if (!pixels || width <= 0 || height <= 0) return;
-    if (width <= MAX_DIMENSION && height <= MAX_DIMENSION) return;
+    const int dimLimit = MaxDimensionLimit();
+    if (width <= dimLimit && height <= dimLimit) return;
 
-    const float scale = std::min(static_cast<float>(MAX_DIMENSION) / width, static_cast<float>(MAX_DIMENSION) / height);
+    const float scale = std::min(static_cast<float>(dimLimit) / width, static_cast<float>(dimLimit) / height);
     const int newWidth = std::max(1, static_cast<int>(width * scale + 0.5f));
     const int newHeight = std::max(1, static_cast<int>(height * scale + 0.5f));
 
@@ -835,28 +873,163 @@ static void DownscaleImageIfTooLarge(unsigned char*& pixels, int& width, int& he
     height = newHeight;
 }
 
-static std::wstring LogPath() {
+// ---------------------------------------------------------------------------
+// Registro de diagnóstico (logging)
+// ---------------------------------------------------------------------------
+// Antes: todo mensaje iba a %TEMP%\artpicst.log, sin nivel y sin límite de
+// tamaño, y el catch(...) se comía los fallos en silencio. Ahora:
+//   · destino estable: %LOCALAPPDATA%\ARTPICST\artpicst.log (con caída a
+//     %TEMP% si no hubiera perfil, p. ej. en un servicio);
+//   · nivel por línea (INFO/WARN/ERROR) e identificador de hilo, necesario
+//     porque el chequeo de actualizaciones corre en un hilo propio;
+//   · serieize la escritura con un mutex: dos hilos no pueden entrelazar líneas;
+//   · ROTACIÓN: al superar kLogMaxBytes el archivo pasa a artpicst.log.1 y se
+//     empieza uno nuevo, así el log nunca crece sin límite;
+//   · ERROR hace flush inmediato: un fallo seguido de crash debe quedar escrito;
+//   · si el archivo no puede abrirse, el mensaje va a OutputDebugStringW en
+//     lugar de perderse.
+enum class LogLevel { Info, Warn, Error };
+
+constexpr unsigned long long kLogMaxBytes = 1024ull * 1024ull;   // 1 MB
+
+std::wstring LogDirectory() {
+    wchar_t buf[MAX_PATH] = {};
+    const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", buf, MAX_PATH);
+    if (n > 0 && n < MAX_PATH) return std::wstring(buf) + L"\\ARTPICST";
     wchar_t temp[MAX_PATH] = {};
-    DWORD n = GetTempPathW(MAX_PATH, temp);
-    if (n == 0 || n >= MAX_PATH) return L"artpicst.log";
-    return std::wstring(temp) + L"artpicst.log";
+    const DWORD t = GetTempPathW(MAX_PATH, temp);
+    if (t > 0 && t < MAX_PATH) return std::wstring(temp) + L"ARTPICST";
+    return L".";
 }
 
-void LogMessage(const std::wstring& message) {
+std::wstring LogPath() {
+    return LogDirectory() + L"\\artpicst.log";
+}
+
+const wchar_t* LogLevelName(LogLevel level) {
+    switch (level) {
+        case LogLevel::Warn:  return L"WARN ";
+        case LogLevel::Error: return L"ERROR";
+        default:              return L"INFO ";
+    }
+}
+
+// Rota el log al alcanzar el límite. Un fallo de rotación NUNCA impide
+// registrar: se sigue escribiendo en el archivo actual.
+void RotateLogIfNeeded(const std::wstring& path) {
+    WIN32_FILE_ATTRIBUTE_DATA info{};
+    if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &info)) return;
+    const unsigned long long size =
+        (static_cast<unsigned long long>(info.nFileSizeHigh) << 32) | info.nFileSizeLow;
+    if (size < kLogMaxBytes) return;
+    const std::wstring backup = path + L".1";
+    DeleteFileW(backup.c_str());
+    MoveFileW(path.c_str(), backup.c_str());
+}
+
+void LogWrite(LogLevel level, const std::wstring& message) {
     try {
+        // Serializa hilos: el updater registra desde su propio hilo y sin esto
+        // las líneas podrían entrelazarse.
+        static std::mutex logMutex;
+        std::lock_guard<std::mutex> lock(logMutex);
+
+        CreateDirectoryW(LogDirectory().c_str(), nullptr);   // idempotente
+        const std::wstring path = LogPath();
+        RotateLogIfNeeded(path);
+
         // .c_str() explícito: en C++23 el constructor de basic_ofstream con
         // std::wstring ya no es viable (la sobrecarga de std::filesystem::path
         // la oculta) y GCC/Clang lo rechazan. MSVC lo aceptaba por extensión.
-        std::wofstream logFile(LogPath().c_str(), std::ios::app);
-        if (!logFile.is_open()) return;
+        std::wofstream logFile(path.c_str(), std::ios::app);
+        if (!logFile.is_open()) {
+            OutputDebugStringW((L"[ARTPICST] " + std::wstring(LogLevelName(level)) + L" " + message + L"\n").c_str());
+            return;
+        }
         SYSTEMTIME st{};
         GetLocalTime(&st);
         wchar_t stamp[64];
         swprintf_s(stamp, L"%04u-%02u-%02u %02u:%02u:%02u",
                    st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
-        logFile << L"[" << stamp << L"] " << message << L"\n";
+        logFile << L"[" << stamp << L"] [" << LogLevelName(level) << L"] [hilo "
+                << GetCurrentThreadId() << L"] " << message << L"\n";
+        if (level == LogLevel::Error) logFile.flush();
     } catch (...) {
+        // Registrar NUNCA debe tumbar la aplicación: se degrada a la salida de
+        // depuración en vez de propagar la excepción.
+        OutputDebugStringW((L"[ARTPICST] " + message + L"\n").c_str());
     }
+}
+
+void LogMessage(const std::wstring& message) { LogWrite(LogLevel::Info, message); }
+void LogWarn(const std::wstring& message)    { LogWrite(LogLevel::Warn, message); }
+void LogError(const std::wstring& message)   { LogWrite(LogLevel::Error, message); }
+
+// Conversión ASCII/UTF-8 -> wide, para poder registrar nombres que solo existen
+// como const char* (p. ej. artpicst::SimdLevelName()).
+std::wstring Utf8ToWide(const std::string& value) {
+    if (value.empty()) return {};
+    const int needed = MultiByteToWideChar(CP_UTF8, 0, value.c_str(), -1, nullptr, 0);
+    if (needed <= 0) return {};
+    std::wstring out(static_cast<size_t>(needed), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, value.c_str(), -1, out.data(), needed);
+    if (!out.empty() && out.back() == L'\0') out.pop_back();
+    return out;
+}
+
+// ---------------------------------------------------------------------------
+// Guardián de fallos: registrar y diagnosticar en vez de morir en silencio
+// ---------------------------------------------------------------------------
+// Sin esto, un fallo de acceso o una excepción no capturada terminaban en un
+// cierre seco sin rastro alguno en el log, imposible de diagnosticar desde un
+// informe de usuario.
+LONG WINAPI CrashExceptionFilter(EXCEPTION_POINTERS* info) {
+    const DWORD code = (info && info->ExceptionRecord)
+        ? info->ExceptionRecord->ExceptionCode : 0u;
+    const void* address = (info && info->ExceptionRecord)
+        ? info->ExceptionRecord->ExceptionAddress : nullptr;
+    wchar_t msg[256];
+    swprintf_s(msg, L"Excepcion no controlada 0x%08lX en %p",
+               static_cast<unsigned long>(code), address);
+    LogWrite(LogLevel::Error, msg);
+    // Se devuelve CONTINUE_SEARCH a propósito: este hilo no está en condiciones
+    // de bombear mensajes con garantías (el diálogo podría colgarse), así que se
+    // registra y se deja actuar al manejador por defecto, que ya genera su
+    // propio informe de error.
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+void CrashTerminateHandler() {
+    LogWrite(LogLevel::Error, L"std::terminate invocado (excepcion C++ no capturada)");
+    std::abort();
+}
+
+// Número de build REAL del sistema. GetVersionEx/VerifyVersionInfo mienten
+// segun el manifiesto (supportedOS), así que se usa RtlGetVersion de ntdll, que
+// siempre devuelve la verdad. 0xFFFFFFFF = desconocido.
+DWORD WindowsBuildNumber() {
+    struct RtlOsVersionInfoW {
+        ULONG dwOSVersionInfoSize;
+        ULONG dwMajorVersion;
+        ULONG dwMinorVersion;
+        ULONG dwBuildNumber;
+        ULONG dwPlatformId;
+        wchar_t szCSDVersion[128];
+    };
+    using RtlGetVersionFn = LONG(WINAPI*)(RtlOsVersionInfoW*);
+    static DWORD cached = 0;
+    if (cached != 0) return cached;
+    cached = 0xFFFFFFFFu;
+    if (HMODULE ntdll = GetModuleHandleW(L"ntdll.dll")) {
+        auto fn = reinterpret_cast<RtlGetVersionFn>(
+            reinterpret_cast<void*>(GetProcAddress(ntdll, "RtlGetVersion")));
+        if (fn) {
+            RtlOsVersionInfoW vi{};
+            vi.dwOSVersionInfoSize = sizeof(vi);
+            if (fn(&vi) == 0) cached = vi.dwBuildNumber;
+        }
+    }
+    return cached;
 }
 
 // Utilidades de conversión de texto
@@ -914,19 +1087,38 @@ ThemedDialogState* DialogStateFrom(HWND hwnd) {
 // Declaración anticipada: AddRoundedRect se define más abajo pero se usa en ThemedDialogProc
 void AddRoundedRect(GraphicsPath& path, const RectF& rect, float radius);
 
+// Barra de título oscura y colores personalizados.
+//
+// Los atributos DWM que se usan aquí NO existen en todas las versiones:
+//   · DWMWA_USE_IMMERSIVE_DARK_MODE = 20 desde Windows 10 20H1 (build 19041)
+//     y su predecesor no documentado 19 desde 1809 (build 17763).
+//   · 35/36/38 (color de título, color de texto y tipo de fondo) desde
+//     Windows 11 22H2 (build 22621).
+// Llamarlos en versiones anteriores devuelve E_INVALIDARG sin efecto visible,
+// pero se comprueba el build real para no depender de ese comportamiento y
+// dejar constancia clara en el log si el sistema es anterior.
 void EnableDarkTitleBar(HWND hwnd, bool dark) {
     if (!hwnd) return;
+    const DWORD build = WindowsBuildNumber();
     BOOL useDark = dark ? TRUE : FALSE;
-    DwmSetWindowAttribute(hwnd, 20, &useDark, sizeof(useDark));
-    DwmSetWindowAttribute(hwnd, 19, &useDark, sizeof(useDark));
 
-    COLORREF captionColor = dark ? RGB(32, 32, 32) : RGB(243, 243, 243);
-    COLORREF textColor = dark ? RGB(250, 250, 250) : RGB(32, 32, 32);
-    DwmSetWindowAttribute(hwnd, 35, &captionColor, sizeof(captionColor));
-    DwmSetWindowAttribute(hwnd, 36, &textColor, sizeof(textColor));
+    if (build >= 19041u) {
+        DwmSetWindowAttribute(hwnd, 20, &useDark, sizeof(useDark));
+    } else if (build >= 17763u) {
+        DwmSetWindowAttribute(hwnd, 19, &useDark, sizeof(useDark));
+    } else {
+        LogWarn(L"Barra de titulo oscura no soportada en esta version de Windows");
+    }
 
-    DWORD backdropType = 1; // DWMSBT_NONE — sin Mica/Acrílico (ligero)
-    DwmSetWindowAttribute(hwnd, 38, &backdropType, sizeof(backdropType));
+    if (build >= 22621u) {
+        COLORREF captionColor = dark ? RGB(32, 32, 32) : RGB(243, 243, 243);
+        COLORREF textColor = dark ? RGB(250, 250, 250) : RGB(32, 32, 32);
+        DwmSetWindowAttribute(hwnd, 35, &captionColor, sizeof(captionColor));
+        DwmSetWindowAttribute(hwnd, 36, &textColor, sizeof(textColor));
+
+        DWORD backdropType = 1; // DWMSBT_NONE — sin Mica/Acrílico (ligero)
+        DwmSetWindowAttribute(hwnd, 38, &backdropType, sizeof(backdropType));
+    }
 }
 
 void StopGifTimer() {
@@ -1919,7 +2111,9 @@ void ShowOSD(const std::wstring& status) {
 
 void HandleError(const std::wstring& errorMsg, bool showUser) {
     g_state.lastError = errorMsg;
-    LogMessage(errorMsg);
+    // Todos los fallos del visor pasan por aquí (decodificación, E/S, portapapeles,
+    // asociaciones...), así que este es el punto único que los deja por escrito.
+    LogError(errorMsg);
     ShowOSD(errorMsg);
     if (showUser && g_state.hwnd) {
         static DWORD lastErrorTime = 0;
@@ -3419,6 +3613,10 @@ static bool GpuTryInitFactory() {
                                    nullptr, reinterpret_cast<void**>(&g_gpu.factory));
     if (FAILED(hr) || !g_gpu.factory) {
         g_gpu.factory = nullptr;
+        wchar_t msg[128];
+        swprintf_s(msg, L"Direct2D no disponible (D2D1CreateFactory hr=0x%08lX): se usa GDI+",
+                   static_cast<unsigned long>(hr));
+        LogWarn(msg);
         return false;
     }
     // dwrite.h del SDK de MS no declara IID_IDWriteFactory (solo el de MinGW);
@@ -3431,6 +3629,7 @@ static bool GpuTryInitFactory() {
             g_gpu.factory->Release();
             g_gpu.factory = nullptr;
         }
+        LogWarn(L"DirectWrite no disponible: se usa GDI+ para todo el trazado");
         return false;
     }
     return true;
@@ -4061,13 +4260,30 @@ bool GpuRenderFrame(const RECT* clipRect) {
     if (hr == D2DERR_RECREATE_TARGET) {
         GpuReleaseAll();
         g_gpu.attemptFailed = true;
+        // Solo se registran los primeros fallos: si el dispositivo muere de
+        // forma permanente, el reintento periódico inundaría el log.
+        static int deviceLostLogs = 0;
+        if (deviceLostLogs < 3) {
+            ++deviceLostLogs;
+            LogWarn(L"Dispositivo Direct2D perdido (D2DERR_RECREATE_TARGET); reintentando en 1,5 s");
+        }
         // Recuperación automática: si el dispositivo GPU se perdió (cambio de
         // monitor, controlador, TDR...) se reintenta en 1,5 s sin necesidad de
         // redimensionar la ventana; antes quedaba en GDI+ hasta el próximo WM_SIZE.
-        if (g_state.hwnd) SetTimer(g_state.hwnd, TIMER_GPU_RETRY, 1500, nullptr);
+        if (g_state.hwnd && !SetTimer(g_state.hwnd, TIMER_GPU_RETRY, 1500, nullptr)) {
+            LogError(L"SetTimer(TIMER_GPU_RETRY) fallo; la GPU no se reintentara sola");
+        }
         return false;
     }
     if (FAILED(hr)) {
+        static int renderFailLogs = 0;
+        if (renderFailLogs < 3) {
+            ++renderFailLogs;
+            wchar_t msg[128];
+            swprintf_s(msg, L"GpuRenderFrame fallo (hr=0x%08lX): se degrada a GDI+",
+                       static_cast<unsigned long>(hr));
+            LogWarn(msg);
+        }
         GpuReleaseAll();
         return false;
     }
@@ -5529,13 +5745,40 @@ static void EnableDpiAwareness() {
 }
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
+    // Guardias instaladas ANTES de tocar nada: a partir de aquí, una excepción
+    // no capturada o un fallo de acceso quedan registrados en el log en lugar de
+    // cerrar la aplicación sin dejar rastro.
+    SetUnhandledExceptionFilter(CrashExceptionFilter);
+    std::set_terminate(CrashTerminateHandler);
+
+    // Identidad propia en la barra de tareas. Sin esto, la ventana y los
+    // accesos directos pueden agruparse bajo el proceso anfitrión equivocado
+    // (p. ej. junto a otros visores) y la miniatura pierde su icono.
+    SetCurrentProcessExplicitAppUserModelID(L"LiebeBlack.ARTPICST.Viewer");
+
     EnableDpiAwareness();
     g_state.hInstance = hInstance;
 
     HRESULT comHr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     g_state.comHr = comHr;
     g_state.comInitialized = SUCCEEDED(comHr);
-    LogMessage(L"Iniciando ARTPICST");
+    if (FAILED(comHr)) {
+        wchar_t comMsg[160];
+        swprintf_s(comMsg, L"CoInitializeEx fallo (hr=0x%08lX): sin COM no hay WIC ni GDI+",
+                   static_cast<unsigned long>(comHr));
+        LogWarn(comMsg);
+    }
+    // Banner de arranque: versión, baseline SIMD y build del sistema. Es el dato
+    // que hace falta para interpretar cualquier informe de fallo: los kernels
+    // SSE4.1 solo existen si el binario se compiló con /arch:SSE4.2.
+    LogMessage(L"ARTPICST " + std::wstring(artpicst::kAppVersion) +
+               L" arrancando · SIMD " + Utf8ToWide(artpicst::SimdLevelName()) +
+               L" (nivel " + std::to_wstring(artpicst::kSimdLevel) + L")" +
+               L" · Windows build " + std::to_wstring(WindowsBuildNumber()) +
+               L" · limite de carga " + std::to_wstring(MaxDimensionLimit()) + L" px");
+    if (WindowsBuildNumber() < 17763u) {
+        LogWarn(L"Windows anterior a 10 1809: la integracion con el escritorio sera limitada");
+    }
 
     if (!InitGDIPlus()) {
         ShowThemedMessageBox(nullptr, L"ARTPICST", L"Error al inicializar GDI+.", MB_OK, MB_ICONERROR);

@@ -54,6 +54,36 @@ foreach ($line in $envVars) {
 }
 
 # ---------------------------------------------------------------------------
+# Sonda de toolchain: baseline SIMD SSE4.2 (AVX prohibido)
+# ---------------------------------------------------------------------------
+# El baseline del proyecto es SSE4.2. NO se degrada a SSE2 en silencio: si el
+# compilador no entiende /arch:SSE4.2 se aborta con instrucciones, porque un
+# binario SSE2 pasaría los tests pero tendría otro rendimiento y otra cobertura.
+# Ojo: cl.exe emite la advertencia D9002 ("ignoring unknown option") y aun así
+# sale con código 0, así que la sonda también inspecciona el texto de salida.
+Write-Host "Comprobando soporte de /arch:SSE4.2..." -ForegroundColor Gray
+$probeSrc = "build\simd_probe.cpp"
+$probeObj = "build\simd_probe.obj"
+$probeCode = @(
+    "#include <smmintrin.h>",
+    "int main() {",
+    "    __m128i v = _mm_set1_epi8(1);",
+    "    v = _mm_shuffle_epi8(v, v);",
+    "    return _mm_testz_si128(v, v);",
+    "}"
+) -join "`r`n"
+Set-Content -Path $probeSrc -Value $probeCode -Encoding Ascii
+$probeOut = & cl /nologo /c /EHsc /std:c++latest /arch:SSE4.2 /DARTPICST_TARGET_SSE42=1 /Fo:"$probeObj" "$probeSrc" 2>&1
+$probeExit = $LASTEXITCODE
+$probeText = ($probeOut | Out-String)
+Remove-Item -Force -ErrorAction SilentlyContinue $probeSrc, $probeObj
+if ($probeExit -ne 0 -or $probeText -match 'D9002' -or $probeText -match 'unknown option') {
+    Write-Host $probeText -ForegroundColor DarkGray
+    Fail "Error: este cl.exe no soporta /arch:SSE4.2. Actualiza Visual Studio 2022 a 17.x o usa build_mingw.bat (g++ -msse4.2)."
+}
+Write-Host "SSE4.2 disponible" -ForegroundColor Green
+
+# ---------------------------------------------------------------------------
 # [1/5] Recursos (visor, updater e instalador)
 # ---------------------------------------------------------------------------
 Write-Host "[1/5] Compilando recursos (visor y updater)..." -ForegroundColor Yellow
@@ -75,13 +105,14 @@ if ($updaterResExit -ne 0) { Fail "Error compilando los recursos del updater (ar
 # ---------------------------------------------------------------------------
 Write-Host "[2/5] Compilando visor (artpicst.exe)..." -ForegroundColor Yellow
 
-& cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /GL /Gy /utf-8 /W4 /permissive- /wd4324 /I. /Iinclude `
-    /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /DSTBI_WINDOWS_UTF8 /D_WIN32_WINNT=0x0601 /D_CRT_SECURE_NO_WARNINGS `
+& cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /GL /Gy /guard:cf /arch:SSE4.2 /DARTPICST_TARGET_SSE42=1 /utf-8 /W4 /permissive- /wd4324 /I. /Iinclude `
+    /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /DSTBI_WINDOWS_UTF8 /DSTBIR_NO_AVX /DSTBIR_NO_AVX2 /D_WIN32_WINNT=0x0601 /D_CRT_SECURE_NO_WARNINGS `
     /Fe:"build\artpicst.exe" src\main.cpp build\artpicst.res `
     /link gdiplus.lib user32.lib kernel32.lib shell32.lib shlwapi.lib gdi32.lib msimg32.lib `
           ole32.lib oleaut32.lib uuid.lib dwmapi.lib windowscodecs.lib comdlg32.lib d2d1.lib dwrite.lib `
           advapi32.lib `
-    /MANIFEST:EMBED /MANIFESTINPUT:artpicst.manifest /SUBSYSTEM:WINDOWS /LTCG /OPT:REF /OPT:ICF
+    /MANIFEST:EMBED /MANIFESTINPUT:artpicst.manifest /SUBSYSTEM:WINDOWS /LTCG /OPT:REF /OPT:ICF `
+    /GUARD:CF /DYNAMICBASE /HIGHENTROPYVA /NXCOMPAT
 if ($LASTEXITCODE -ne 0) { Fail "Error compilando el visor (artpicst.exe)" }
 
 # ---------------------------------------------------------------------------
@@ -90,12 +121,12 @@ if ($LASTEXITCODE -ne 0) { Fail "Error compilando el visor (artpicst.exe)" }
 Write-Host "[3/5] Compilando updater (artpicst_updater.exe)..." -ForegroundColor Yellow
 
 Push-Location updater
-& cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /utf-8 /W4 /permissive- /wd4324 /I. /I..\installer `
+& cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /guard:cf /arch:SSE4.2 /DARTPICST_TARGET_SSE42=1 /utf-8 /W4 /permissive- /wd4324 /I. /I..\installer `
     /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0601 /D_CRT_SECURE_NO_WARNINGS `
     /Fe:"..\build\artpicst_updater.exe" artpicst_updater.cpp ..\build\artpicst_updater.res `
     /link winhttp.lib gdiplus.lib shell32.lib shlwapi.lib user32.lib advapi32.lib `
           gdi32.lib ole32.lib uuid.lib dwmapi.lib `
-    /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF
+    /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF /GUARD:CF /DYNAMICBASE /HIGHENTROPYVA /NXCOMPAT
 $updaterExit = $LASTEXITCODE
 Pop-Location
 if ($updaterExit -ne 0) { Fail "Error compilando el updater (artpicst_updater.exe)" }
@@ -111,11 +142,16 @@ Write-Host "Selftest del updater OK" -ForegroundColor Green
 # ---------------------------------------------------------------------------
 Write-Host "[3b/5] Compilando y ejecutando tests y fuzzing..." -ForegroundColor Yellow
 
-& cl /nologo /EHsc /std:c++20 /O2 /utf-8 /W4 /permissive- /I. /Iinclude `
+& cl /nologo /EHsc /std:c++20 /O2 /arch:SSE4.2 /DARTPICST_TARGET_SSE42=1 /utf-8 /W4 /permissive- /I. /Iinclude `
     /Fe:"build\image_core_test.exe" tests\image_core_test.cpp /link kernel32.lib
 if ($LASTEXITCODE -ne 0) { Fail "Error compilando tests\image_core_test.cpp" }
 & build\image_core_test.exe
 if ($LASTEXITCODE -ne 0) { Fail "Los tests del núcleo de imagen han fallado" }
+
+& cl /nologo /EHsc /std:c++20 /O2 /arch:SSE4.2 /DARTPICST_TARGET_SSE42=1 /utf-8 /W4 /permissive- /I. /Iinclude `
+    /Fe:"build\kernel_bench.exe" tests\kernel_bench.cpp /link kernel32.lib
+if ($LASTEXITCODE -ne 0) { Fail "Error compilando tests\kernel_bench.cpp" }
+Write-Host "Banco de kernels compilado (build\kernel_bench.exe)" -ForegroundColor Gray
 
 & cl /nologo /EHsc /std:c++20 /O2 /utf-8 /W4 /permissive- /I. `
     /Fe:"build\release_json_fuzzer.exe" tests\release_json_fuzzer.cpp /link kernel32.lib
@@ -129,6 +165,13 @@ if ($LASTEXITCODE -ne 0) { Fail "Error compilando tests\jpeg_exif_test.cpp" }
 & build\jpeg_exif_test.exe
 if ($LASTEXITCODE -ne 0) { Fail "Los tests EXIF han fallado" }
 Write-Host "Tests y fuzzing OK" -ForegroundColor Green
+
+# Gate de política SIMD: prohíbe AVX y verifica como oráculo las identidades
+# enteras y las máscaras PSHUFB del núcleo (independiente del compilador).
+Write-Host "Verificando política SIMD (sin AVX)..." -ForegroundColor Gray
+& python tests\check_simd_policy.py --root .
+if ($LASTEXITCODE -ne 0) { Fail "La política SIMD del proyecto no se cumple (ver detalle arriba)" }
+Write-Host "Política SIMD OK" -ForegroundColor Green
 
 # ---------------------------------------------------------------------------
 # [4/5] Payload autocontenido (resources/app/ para el instalador)
@@ -147,12 +190,13 @@ Push-Location installer
 # Recursos DESPUÉS del payload: el .rc incrusta resources/app/ (payload)
 & rc /nologo /fo ..\build\artpicst_installer.res artpicst_installer.rc
 if ($LASTEXITCODE -ne 0) { Fail "Error compilando los recursos del instalador (artpicst_installer.rc)" }
-& cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /utf-8 /W4 /permissive- /wd4324 /I. /I..\include `
+& cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /guard:cf /arch:SSE4.2 /DARTPICST_TARGET_SSE42=1 /utf-8 /W4 /permissive- /wd4324 /I. /I..\include `
     /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0601 /D_CRT_SECURE_NO_WARNINGS `
     /Fe:"build\artpicst_installer.exe" artpicst_installer.cpp ..\build\artpicst_installer.res `
     /link gdiplus.lib shlwapi.lib shell32.lib comctl32.lib dwmapi.lib user32.lib advapi32.lib `
           gdi32.lib ole32.lib uuid.lib `
-    /SUBSYSTEM:WINDOWS "/MANIFESTUAC:level='requireAdministrator' uiAccess='false'" /OPT:REF /OPT:ICF
+    /SUBSYSTEM:WINDOWS "/MANIFESTUAC:level='requireAdministrator' uiAccess='false'" /OPT:REF /OPT:ICF `
+    /GUARD:CF /DYNAMICBASE /HIGHENTROPYVA /NXCOMPAT
 $installerExit = $LASTEXITCODE
 Pop-Location
 if ($installerExit -ne 0) { Fail "Error compilando el instalador (artpicst_installer.exe)" }

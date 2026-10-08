@@ -56,7 +56,11 @@ popd
 
 :: [2/5] Viewer
 echo [2/5] Building main program with MinGW...
-g++ -std=c++23 -O3 -funroll-loops -fno-math-errno -Wall -Wextra -static -static-libgcc -static-libstdc++ -municode -DUNICODE -D_UNICODE -DNOMINMAX -DWIN32_LEAN_AND_MEAN -DSTBI_WINDOWS_UTF8 -D_WIN32_WINNT=0x0601 -I. -Iinclude -o build\artpicst.exe src\main.cpp %RES_OBJ% -lgdiplus -luser32 -lkernel32 -lshell32 -lshlwapi -lgdi32 -lmsimg32 -lole32 -loleaut32 -luuid -ldwmapi -lwindowscodecs -lcomdlg32 -ld2d1 -ldwrite -mwindows
+:: -msse4.2 fija el baseline SIMD del proyecto (SSE2/SSSE3/SSE4.1/SSE4.2).
+:: No anadas flags de AVX de ningun tipo: el gate tests/check_simd_policy.py
+:: los rechaza y el header image_core.hpp falla con #error si detecta AVX.
+:: STBIR_NO_AVX/STBIR_NO_AVX2 son el cinturon de seguridad para stb_image_resize2.
+g++ -std=c++23 -O3 -funroll-loops -fno-math-errno -msse4.2 -Wall -Wextra -static -static-libgcc -static-libstdc++ -municode -DUNICODE -D_UNICODE -DNOMINMAX -DWIN32_LEAN_AND_MEAN -DSTBI_WINDOWS_UTF8 -DSTBIR_NO_AVX -DSTBIR_NO_AVX2 -D_WIN32_WINNT=0x0601 -I. -Iinclude -o build\artpicst.exe src\main.cpp %RES_OBJ% -lgdiplus -luser32 -lkernel32 -lshell32 -lshlwapi -lgdi32 -lmsimg32 -lole32 -loleaut32 -luuid -ldwmapi -lwindowscodecs -lcomdlg32 -ld2d1 -ldwrite -mwindows
 
 if %ERRORLEVEL% NEQ 0 (
     echo Error building main program
@@ -66,7 +70,7 @@ if %ERRORLEVEL% NEQ 0 (
 :: [3/5] Updater (needs winhttp + installer/version.hpp)
 echo [3/5] Building updater with MinGW...
 pushd updater
-g++ -std=c++23 -O2 -Wall -Wextra -static -static-libgcc -static-libstdc++ -municode -DUNICODE -D_UNICODE -DNOMINMAX -DWIN32_LEAN_AND_MEAN -D_WIN32_WINNT=0x0601 -I. -I..\installer -o ..\build\artpicst_updater.exe artpicst_updater.cpp %UPDATER_RES_OBJ% -lwinhttp -lgdiplus -lshell32 -lshlwapi -luser32 -ladvapi32 -lgdi32 -lole32 -luuid -ldwmapi -mwindows
+g++ -std=c++23 -O2 -msse4.2 -Wall -Wextra -static -static-libgcc -static-libstdc++ -municode -DUNICODE -D_UNICODE -DNOMINMAX -DWIN32_LEAN_AND_MEAN -D_WIN32_WINNT=0x0601 -I. -I..\installer -o ..\build\artpicst_updater.exe artpicst_updater.cpp %UPDATER_RES_OBJ% -lwinhttp -lgdiplus -lshell32 -lshlwapi -luser32 -ladvapi32 -lgdi32 -lole32 -luuid -ldwmapi -mwindows
 if %ERRORLEVEL% NEQ 0 (
     echo Error building updater
     popd
@@ -84,7 +88,7 @@ echo Updater selftest OK
 
 :: [3b/5] Tests and fuzzing (image core + releases JSON parser)
 echo [3b/5] Building and running tests and fuzzing...
-g++ -std=c++20 -O2 -Wall -Wextra -I. -Iinclude -o build\image_core_test.exe tests\image_core_test.cpp
+g++ -std=c++20 -O2 -msse4.2 -Wall -Wextra -I. -Iinclude -o build\image_core_test.exe tests\image_core_test.cpp
 if %ERRORLEVEL% NEQ 0 (
     echo Error compiling tests\image_core_test.cpp
     exit /b 1
@@ -104,6 +108,11 @@ if %ERRORLEVEL% NEQ 0 (
     echo Release JSON fuzzer failed
     exit /b 1
 )
+g++ -std=c++20 -O2 -msse4.2 -Wall -Wextra -I. -Iinclude -o build\kernel_bench.exe tests\kernel_bench.cpp
+if %ERRORLEVEL% NEQ 0 (
+    echo Error compiling tests\kernel_bench.cpp
+    exit /b 1
+)
 g++ -std=c++20 -O2 -Wall -Wextra -I. -o build\jpeg_exif_test.exe tests\jpeg_exif_test.cpp
 if %ERRORLEVEL% NEQ 0 (
     echo Error compiling tests\jpeg_exif_test.cpp
@@ -115,6 +124,15 @@ if %ERRORLEVEL% NEQ 0 (
     exit /b 1
 )
 echo Tests and fuzzing OK
+
+:: [3c/5] SIMD policy gate (no AVX; verifies the integer identities + PSHUFB)
+echo [3c/5] Checking SIMD policy (no AVX)...
+python tests\check_simd_policy.py --root .
+if %ERRORLEVEL% NEQ 0 (
+    echo SIMD policy violation ^(see details above^
+    exit /b 1
+)
+echo SIMD policy OK
 
 :: [4/5] Self-contained payload
 echo [4/5] Preparing self-contained payload (resources\app\)...
@@ -135,7 +153,7 @@ if %ERRORLEVEL% EQU 0 (
 ) else (
     echo Warning: windres failed for installer resources
 )
-g++ -std=c++23 -O2 -Wall -Wextra -static -static-libgcc -static-libstdc++ -municode -DUNICODE -D_UNICODE -DNOMINMAX -DWIN32_LEAN_AND_MEAN -D_WIN32_WINNT=0x0601 -I. -I..\include -o build\artpicst_installer.exe artpicst_installer.cpp %INSTALLER_RES_OBJ% -lgdiplus -lshlwapi -lshell32 -lcomctl32 -ldwmapi -luser32 -ladvapi32 -lgdi32 -lole32 -luuid -mwindows
+g++ -std=c++23 -O2 -msse4.2 -Wall -Wextra -static -static-libgcc -static-libstdc++ -municode -DUNICODE -D_UNICODE -DNOMINMAX -DWIN32_LEAN_AND_MEAN -D_WIN32_WINNT=0x0601 -I. -I..\include -o build\artpicst_installer.exe artpicst_installer.cpp %INSTALLER_RES_OBJ% -lgdiplus -lshlwapi -lshell32 -lcomctl32 -ldwmapi -luser32 -ladvapi32 -lgdi32 -lole32 -luuid -mwindows
 if %ERRORLEVEL% NEQ 0 (
     echo Error building installer
     popd

@@ -365,8 +365,43 @@ El visor y el instalador comparten una sola paleta:
 
 ## 9. Pendientes recomendados
 
-1. **Despacho SIMD en tiempo de ejecución** (SSE2 → SSE4.1/AVX2 con `cpuid`) para cargas de
-   trabajo de 32 B por iteración; hoy el binario se queda en SSE2 por portabilidad.
+1. **RESUELTO — baseline SSE4.2 en lugar de despacho en tiempo de ejecución.**
+   Lo que aquí se pedía (SSE2 → SSE4.1 con `cpuid`) se resolvió de otra forma, más
+   simple y más rápida: **fijar SSE4.2 en compilación** (`/arch:SSE4.2` en MSVC,
+   `-msse4.2` en GCC/Clang, más `ARTPICST_TARGET_SSE42=1` para que la cabecera
+   active las rutas, ya que MSVC no define `__SSE4_2__`). Así el código vectorizado
+   es el *único* código: sin ramas indirectas por llamada, sin tabla de punteros y
+   con una sola ruta que testear. **AVX/AVX2/AVX-512 quedan prohibidos** (el ancho
+   de registro útil sigue en 128 bits: `kSimdAlignment = 16`), porque estos kernels
+   están limitados por ancho de banda de memoria y ensanchar a 256 bits no aumenta
+   el tráfico útil. El coste es el requisito de CPU (Nehalem / Bulldozer, 2008+), que
+   el instalador verifica con `CPUID` antes de instalar.
+
+   Guardianes automáticos: `src/image_core.hpp` aborta en compilación si detecta
+   `__AVX__`/`__AVX2__`/`__AVX512F__`, y `tests/check_simd_policy.py` recorre
+   fuentes, scripts y workflows buscando cualquier token que pueda activar AVX,
+   además de recalcular como oráculo las identidades enteras y emular las máscaras
+   `PSHUFB` escritas a mano. Detalle completo en `docs/PERFORMANCE.md`.
+
+   **Corrección de cobertura:** se detectó que los tests del núcleo usaban
+   `std::vector`, cuyas direcciones solo están garantizadas a 16 B. Con
+   `kPixelAlignment = 64 B` la comprobación `IsAligned(px, 64)` resultaba falsa y
+   solo se ejecutaba la **cola escalar**: las rutas vectorizadas nunca se probaron.
+   El nuevo `TestSimdKernelsAligned` reserva con el asignador real, verifica la
+   alineación y compara byte a byte contra la referencia escalar.
+
+1b. **PENDIENTE — escalado bicúbico de alta calidad en la ruta GPU.** La ruta
+   Direct2D (`ID2D1HwndRenderTarget`) solo puede interpolar `LINEAR`, mientras que el
+   fallback GDI+ sí usa `InterpolationModeHighQualityBicubic`: la ruta marcada como
+   "premium" es hoy la de menor calidad en reducciones. La solución planificada es
+   migrar a `ID2D1DeviceContext` (DXGI/D3D11) y usar
+   `D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC`, con mipmaps para reducciones
+   profundas y la ruta antigua disponible tras un conmutador. **No se implementó en
+   este pase** porque el entorno de auditoría no disponía de compilador y se trata de
+   una reescritura COM/DXGI en el camino más delicado del programa (presentación,
+   DPI, región sucia, pérdida de dispositivo): entregarla sin poder compilarla ni
+   verificarla visualmente habría roto el build para todos. Queda como el siguiente
+   paso de calidad, con el diseño ya detallado.
 
 1b. **CI y empaquetado reescritos.** `.github/workflows/release.yml` compila ahora los
 tres ejecutables con MSVC (`/std:c++latest`, LTCG, UAC del instalador), genera el icono
@@ -375,8 +410,12 @@ payload autocontenido y publica **`artpicst-installer.exe`** (wizard GDI+ autoco
 que ya no necesita NSIS) junto a `artpicst-portable.zip`.
 
 2. **Hornear los fotogramas GIF en el hilo de precarga** (ya se decodifican ahí) para que el hilo de interfaz sólo suba el bitmap.
-3. **`RtlGetVersion`/`IsWindowsVersionOrGreater` antes de usar atributos DWM** recientes
-   (`DwmSetWindowAttribute` 35/36/38) para eliminar cualquier posibilidad de fallo en
-   Windows 7/8.1.
+3. **RESUELTO — `RtlGetVersion` antes de usar atributos DWM recientes.** El visor
+   consulta ahora el build real del sistema (`RtlGetVersion` de `ntdll`, porque
+   `GetVersionEx`/`VerifyVersionInfo` mienten según el manifiesto `supportedOS`) y
+   solo llama a `DWMWA_USE_IMMERSIVE_DARK_MODE` (19/20) desde Windows 10 1809 y a
+   los atributos 35/36/38 (color de título, color de texto y tipo de fondo) desde
+   Windows 11 22H2. En versiones anteriores registra un aviso en lugar de invocar
+   APIs sin efecto. El instalador usa el mismo criterio para exigir Windows 10.
 4. **Firma digital del instalador** y `AppUserModelID` propio para que aparezca agrupado
    correctamente en la barra de tareas.

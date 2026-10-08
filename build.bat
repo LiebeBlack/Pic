@@ -28,6 +28,31 @@ if not exist dist mkdir dist
 if not exist installer\build mkdir installer\build
 if not exist updater\build mkdir updater\build
 
+:: ---------------------------------------------------------------------------
+:: Sonda de toolchain: baseline SIMD SSE4.2 (AVX/AVX2 PROHIBIDOS).
+:: No se degrada a SSE2 en silencio. cl.exe avisa con D9002 si no conoce el flag
+:: y AUN ASI sale con codigo 0, por eso tambien se inspecciona el log.
+:: ---------------------------------------------------------------------------
+echo Comprobando soporte de /arch:SSE4.2...
+>build\simd_probe.cpp echo #include ^<smmintrin.h^>
+>>build\simd_probe.cpp echo int main(void) { __m128i v = _mm_set1_epi8(1); v = _mm_shuffle_epi8(v, v); return _mm_testz_si128(v, v); }
+cl /nologo /c /EHsc /std:c++latest /arch:SSE4.2 /DARTPICST_TARGET_SSE42=1 /Fo:build\simd_probe.obj build\simd_probe.cpp >build\simd_probe.log 2>&1
+set "PROBE_RC=%ERRORLEVEL%"
+findstr /C:"D9002" /C:"unknown option" build\simd_probe.log >nul 2>&1
+if not errorlevel 1 (
+    type build\simd_probe.log
+    del /q build\simd_probe.cpp build\simd_probe.obj build\simd_probe.log 2>nul
+    echo Error: este cl.exe no soporta /arch:SSE4.2.
+    echo Actualiza Visual Studio 2022 o compila con build_mingw.bat.
+    exit /b 1
+)
+del /q build\simd_probe.cpp build\simd_probe.obj build\simd_probe.log 2>nul
+if not "%PROBE_RC%"=="0" (
+    echo Error: la sonda de SSE4.2 no compilo.
+    exit /b 1
+)
+echo SSE4.2 disponible.
+
 echo [1/5] Compilando recursos (visor y updater)...
 rc /nologo /fo build\artpicst.res artpicst.rc
 if %ERRORLEVEL% NEQ 0 (
@@ -44,7 +69,7 @@ if %ERRORLEVEL% NEQ 0 (
 cd ..
 
 echo [2/5] Compilando visor (artpicst.exe)...
-cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /GL /Gy /utf-8 /W4 /permissive- /wd4324 /I. /Iinclude /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /DSTBI_WINDOWS_UTF8 /D_WIN32_WINNT=0x0601 /D_CRT_SECURE_NO_WARNINGS /Fe:"build\artpicst.exe" src\main.cpp build\artpicst.res /link gdiplus.lib user32.lib kernel32.lib shell32.lib shlwapi.lib gdi32.lib msimg32.lib ole32.lib oleaut32.lib uuid.lib dwmapi.lib windowscodecs.lib comdlg32.lib d2d1.lib dwrite.lib advapi32.lib /MANIFEST:EMBED /MANIFESTINPUT:artpicst.manifest /SUBSYSTEM:WINDOWS /LTCG /OPT:REF /OPT:ICF
+cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /GL /Gy /guard:cf /arch:SSE4.2 /DARTPICST_TARGET_SSE42=1 /utf-8 /W4 /permissive- /wd4324 /I. /Iinclude /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /DSTBI_WINDOWS_UTF8 /DSTBIR_NO_AVX /DSTBIR_NO_AVX2 /D_WIN32_WINNT=0x0601 /D_CRT_SECURE_NO_WARNINGS /Fe:"build\artpicst.exe" src\main.cpp build\artpicst.res /link gdiplus.lib user32.lib kernel32.lib shell32.lib shlwapi.lib gdi32.lib msimg32.lib ole32.lib oleaut32.lib uuid.lib dwmapi.lib windowscodecs.lib comdlg32.lib d2d1.lib dwrite.lib advapi32.lib /MANIFEST:EMBED /MANIFESTINPUT:artpicst.manifest /SUBSYSTEM:WINDOWS /LTCG /OPT:REF /OPT:ICF /GUARD:CF /DYNAMICBASE /HIGHENTROPYVA /NXCOMPAT
 
 if %ERRORLEVEL% NEQ 0 (
     echo Error al compilar el visor
@@ -53,7 +78,7 @@ if %ERRORLEVEL% NEQ 0 (
 
 echo [3/5] Compilando updater (artpicst_updater.exe)...
 cd updater
-cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /utf-8 /W4 /permissive- /wd4324 /I. /I..\installer /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0601 /D_CRT_SECURE_NO_WARNINGS /Fe:"..\build\artpicst_updater.exe" artpicst_updater.cpp ..\build\artpicst_updater.res /link winhttp.lib gdiplus.lib shell32.lib shlwapi.lib user32.lib advapi32.lib gdi32.lib ole32.lib uuid.lib dwmapi.lib /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF
+cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /guard:cf /arch:SSE4.2 /DARTPICST_TARGET_SSE42=1 /utf-8 /W4 /permissive- /wd4324 /I. /I..\installer /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0601 /D_CRT_SECURE_NO_WARNINGS /Fe:"..\build\artpicst_updater.exe" artpicst_updater.cpp ..\build\artpicst_updater.res /link winhttp.lib gdiplus.lib shell32.lib shlwapi.lib user32.lib advapi32.lib gdi32.lib ole32.lib uuid.lib dwmapi.lib /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF /GUARD:CF /DYNAMICBASE /HIGHENTROPYVA /NXCOMPAT
 if %ERRORLEVEL% NEQ 0 (
     echo Error al compilar el updater
     cd ..
@@ -70,7 +95,7 @@ if %ERRORLEVEL% NEQ 0 (
 echo Selftest del updater OK
 
 echo [3b/5] Compilando y ejecutando tests y fuzzing...
-cl /nologo /EHsc /std:c++20 /O2 /utf-8 /W4 /permissive- /I. /Iinclude /Fe:"build\image_core_test.exe" tests\image_core_test.cpp /link kernel32.lib
+cl /nologo /EHsc /std:c++20 /O2 /arch:SSE4.2 /DARTPICST_TARGET_SSE42=1 /utf-8 /W4 /permissive- /I. /Iinclude /Fe:"build\image_core_test.exe" tests\image_core_test.cpp /link kernel32.lib
 if %ERRORLEVEL% NEQ 0 (
     echo Error compilando tests\image_core_test.cpp
     exit /b 1
@@ -102,6 +127,20 @@ if %ERRORLEVEL% NEQ 0 (
 )
 echo Tests y fuzzing OK
 
+:: [3c/5] Banco de kernels y gate de politica SIMD (sin AVX)
+echo [3c/5] Banco de kernels y verificacion de politica SIMD...
+cl /nologo /EHsc /std:c++20 /O2 /arch:SSE4.2 /DARTPICST_TARGET_SSE42=1 /utf-8 /W4 /permissive- /I. /Iinclude /Fe:"build\kernel_bench.exe" tests\kernel_bench.cpp /link kernel32.lib
+if %ERRORLEVEL% NEQ 0 (
+    echo Error compilando tests\kernel_bench.cpp
+    exit /b 1
+)
+python tests\check_simd_policy.py --root .
+if %ERRORLEVEL% NEQ 0 (
+    echo La politica SIMD del proyecto no se cumple ^(ver detalle arriba^
+    exit /b 1
+)
+echo Politica SIMD OK
+
 echo [4/5] Preparando payload autocontenido (resources\app\)...
 python scripts\collect_app_payload.py --root .
 if %ERRORLEVEL% NEQ 0 (
@@ -120,7 +159,7 @@ if %ERRORLEVEL% NEQ 0 (
 )
 :: INCLUDE con la raiz del repo: el .rc localiza el icono (resources\artpicst.ico)
 set "INCLUDE=%~dp0;%INCLUDE%"
-cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /utf-8 /W4 /permissive- /wd4324 /I. /I..\include /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0601 /D_CRT_SECURE_NO_WARNINGS /Fe:"build\artpicst_installer.exe" artpicst_installer.cpp ..\build\artpicst_installer.res /link gdiplus.lib shlwapi.lib shell32.lib comctl32.lib dwmapi.lib user32.lib advapi32.lib gdi32.lib ole32.lib uuid.lib /SUBSYSTEM:WINDOWS "/MANIFESTUAC:level='requireAdministrator' uiAccess='false'" /OPT:REF /OPT:ICF
+cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /guard:cf /arch:SSE4.2 /DARTPICST_TARGET_SSE42=1 /utf-8 /W4 /permissive- /wd4324 /I. /I..\include /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0601 /D_CRT_SECURE_NO_WARNINGS /Fe:"build\artpicst_installer.exe" artpicst_installer.cpp ..\build\artpicst_installer.res /link gdiplus.lib shlwapi.lib shell32.lib comctl32.lib dwmapi.lib user32.lib advapi32.lib gdi32.lib ole32.lib uuid.lib /SUBSYSTEM:WINDOWS "/MANIFESTUAC:level='requireAdministrator' uiAccess='false'" /OPT:REF /OPT:ICF /GUARD:CF /DYNAMICBASE /HIGHENTROPYVA /NXCOMPAT
 
 if %ERRORLEVEL% NEQ 0 (
     echo Error al compilar el instalador

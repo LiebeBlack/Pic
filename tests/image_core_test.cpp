@@ -2,15 +2,21 @@
 // image_core_test.cpp — Tests del núcleo de imagen (artpicst::image_core.hpp)
 // ============================================================================
 // Ejecutable de consola autónomo: compila la cabecera TAL CUAL se usa en el
-// visor (sin dependencias de Windows-UI) y valida LUT constexpr, allocator
-// alineado, premultiplicado alfa, horneado de efectos, transformaciones
-// geométricas y baldosa de ajedrez.
+// visor (sin dependencias de Windows-UI) y valida la política SIMD, la LUT
+// constexpr, el allocator alineado, el premultiplicado alfa, el horneado de
+// efectos, las transformaciones geométricas, la baldosa de ajedrez y — con
+// buffers alineados a 64 B — los propios kernels vectorizados.
+//
+// IMPORTANTE: compilar con /arch:SSE4.2 (MSVC) o -msse4.2 (MinGW) y con
+// /DARTPICST_TARGET_SSE42. Sin esos flags el núcleo cae a la ruta SSE2 y los
+// kernels SSE4.1 del visor NO quedan cubiertos por estos tests.
 //
 // Compilación (MSVC, desde la raíz del repo):
-//   cl /nologo /EHsc /std:c++20 /O2 /utf-8 /W4 /I. /Iinclude ^
+//   cl /nologo /EHsc /std:c++20 /O2 /arch:SSE4.2 /DARTPICST_TARGET_SSE42=1 ^
+//      /utf-8 /W4 /permissive- /I. /Iinclude ^
 //      /Fe:build\image_core_test.exe tests\image_core_test.cpp
 // Compilación (MinGW-w64):
-//   g++ -std=c++20 -O2 -Wall -Wextra -I. -Iinclude ^
+//   g++ -std=c++20 -O2 -msse4.2 -Wall -Wextra -I. -Iinclude ^
 //      -o build/image_core_test.exe tests/image_core_test.cpp
 //
 // Ejecución: build\image_core_test.exe  (exit 0 = todos los tests OK)
@@ -379,10 +385,130 @@ void TestAllocatorFuzz() {
     }
 }
 
+// ----------------------------------------------------------------------------
+// 10. Kernels SIMD ALINEADOS: la cobertura que faltaba
+// ----------------------------------------------------------------------------
+// Los tests anteriores usan std::vector, cuyas direcciones solo están
+// garantizadas a 16 B. Con kPixelAlignment = 64 B la comprobación
+// IsAligned(px, kPixelAlignment) resulta FALSA y esos tests ejecutaban
+// ÚNICAMENTE la cola escalar: las rutas vectorizadas no se cubrían.
+//
+// Este test reserva con el asignador REAL del visor (64 B) y verifica
+// explícitamente la alineación antes de comparar contra la referencia escalar,
+// de modo que no puede degradar a escalar en silencio. Es el contrato de bits
+// de los kernels SSE4.1/SSE4.2.
+void TestSimdKernelsAligned() {
+    const size_t kPixels = 1024;               // múltiplo de 8: sin cola escalar
+    const size_t bytes = kPixels * 4;
+
+    unsigned char* src  = static_cast<unsigned char*>(artpicst::AlignedPixelAlloc(bytes));
+    unsigned char* work = static_cast<unsigned char*>(artpicst::AlignedPixelAlloc(bytes));
+    unsigned char* dst  = static_cast<unsigned char*>(artpicst::AlignedPixelAlloc(bytes));
+    CHECK(src != nullptr && work != nullptr && dst != nullptr);
+    if (!src || !work || !dst) {
+        artpicst::AlignedPixelFree(src);
+        artpicst::AlignedPixelFree(work);
+        artpicst::AlignedPixelFree(dst);
+        return;
+    }
+    // Si esto falla, el test dejaría de cubrir SIMD sin avisar.
+    CHECK(artpicst::IsAligned(src, artpicst::kPixelAlignment));
+    CHECK(artpicst::IsAligned(work, artpicst::kPixelAlignment));
+    CHECK(artpicst::IsAligned(dst, artpicst::kPixelAlignment));
+
+    for (size_t i = 0; i < bytes; ++i) src[i] = static_cast<unsigned char>((i * 131 + 7) & 0xFF);
+    // Alfa determinista con 0x00, 0xFF y valores intermedios, en todas las
+    // posiciones relativas de un bloque de 4 píxeles.
+    for (size_t i = 0; i < kPixels; ++i) {
+        const size_t m = i % 23;
+        src[i * 4 + 3] = static_cast<unsigned char>(m == 0 ? 0 : (m == 1 ? 255 : (m * 11) & 0xFF));
+    }
+
+    // --- 10.1 SwapRbDetectAlpha: intercambio B<->R + detección de alfa --------
+    std::memcpy(work, src, bytes);
+    const bool simdAlpha = artpicst::SwapRbDetectAlpha(work, kPixels);
+    bool refAlpha = false;
+    bool swapOk = true;
+    for (size_t i = 0; i < kPixels; ++i) {
+        if (src[i * 4 + 3] < 255u) refAlpha = true;
+        const unsigned char b = src[i * 4 + 0];
+        const unsigned char r = src[i * 4 + 2];
+        if (work[i * 4 + 0] != r || work[i * 4 + 1] != src[i * 4 + 1] ||
+            work[i * 4 + 2] != b || work[i * 4 + 3] != src[i * 4 + 3]) {
+            swapOk = false;
+            std::wprintf(L"[FAIL] SwapRbDetectAlpha(SIMD) píxel %zu\n", i);
+            ++g_failures;
+            break;
+        }
+    }
+    CHECK(swapOk);
+    CHECK(simdAlpha == refAlpha);
+
+    // Todo opaco => false (ejercita el camino "sin transparencia" completo).
+    std::memcpy(work, src, bytes);
+    for (size_t i = 0; i < kPixels; ++i) work[i * 4 + 3] = 255;
+    CHECK(artpicst::SwapRbDetectAlpha(work, kPixels) == false);
+    CHECK(artpicst::DetectAnyNonOpaque(work, kPixels) == false);
+    // Un solo píxel no opaco, en cada posición de un bloque: true.
+    for (size_t off = 0; off < 4; ++off) {
+        work[off * 4 + 3] = 128;
+        CHECK(artpicst::DetectAnyNonOpaque(work, kPixels) == true);
+        work[off * 4 + 3] = 255;
+    }
+
+    // --- 10.2 Premultiplicado contra PremulByte (referencia escalar) ----------
+    std::memcpy(work, src, bytes);
+    artpicst::PremultiplyBgra(work, kPixels);
+    bool premulOk = true;
+    for (size_t i = 0; i < kPixels; ++i) {
+        const unsigned char a = src[i * 4 + 3];
+        if (work[i * 4 + 0] != artpicst::PremulByte(src[i * 4 + 0], a) ||
+            work[i * 4 + 1] != artpicst::PremulByte(src[i * 4 + 1], a) ||
+            work[i * 4 + 2] != artpicst::PremulByte(src[i * 4 + 2], a) ||
+            work[i * 4 + 3] != a) {
+            premulOk = false;
+            std::wprintf(L"[FAIL] PremultiplyBgra(SIMD) píxel %zu\n", i);
+            ++g_failures;
+            break;
+        }
+    }
+    CHECK(premulOk);
+
+    // --- 10.3 Copia premultiplicada fusionada: mismo resultado, origen intacto -
+    std::memset(dst, 0xAB, bytes);
+    artpicst::CopyPremultipliedBgra(dst, src, kPixels);
+    CHECK(std::memcmp(dst, work, bytes) == 0);
+    bool srcIntact = true;
+    for (size_t i = 0; i < bytes; ++i) {
+        if (src[i] != static_cast<unsigned char>((i * 131 + 7) & 0xFF)) { srcIntact = false; break; }
+    }
+    CHECK(srcIntact);
+
+    artpicst::AlignedPixelFree(src);
+    artpicst::AlignedPixelFree(work);
+    artpicst::AlignedPixelFree(dst);
+}
+
+// ----------------------------------------------------------------------------
+// 11. Política SIMD del build (nunca AVX; baseline SSE4.2)
+// ----------------------------------------------------------------------------
+void TestSimdPolicy() {
+    std::printf("[INFO] image_core compilado con SIMD: %s (nivel %d)\n",
+                artpicst::SimdLevelName(), artpicst::kSimdLevel);
+#if defined(_M_X64) || defined(__x86_64__)
+    // x86-64 garantiza SSE2; el baseline del proyecto es SSE4.2.
+    CHECK(artpicst::kSimdLevel >= 2);
+    // El ancho de registro declarado debe corresponder a 128 bits (SSE), no a
+    // los 32 B de AVX2, que el proyecto prohíbe.
+    CHECK(artpicst::kSimdAlignment == 16);
+#endif
+}
+
 } // namespace
 
 int main() {
     std::wprintf(L"== ARTPICST image_core tests ==\n");
+    TestSimdPolicy();
     TestCompileTimeInvariants();
     TestClarityLutMatchesFloat();
     TestAlignedAllocator();
@@ -391,6 +517,7 @@ int main() {
     TestBakeEffects();
     TestTransforms();
     TestCheckerTile();
+    TestSimdKernelsAligned();
     TestAllocatorFuzz();
 
     if (g_failures == 0) {

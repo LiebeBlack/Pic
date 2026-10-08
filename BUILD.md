@@ -2,9 +2,26 @@
 
 ## Requisitos
 
-- Windows 10/11
-- Visual Studio 2019/2022 con C++ (Build Tools o Community/Professional/Enterprise)
+- Windows 10/11 (x64)
+- **CPU con SSE4.2** (Intel Nehalem / AMD Bulldozer, 2008+): es el baseline SIMD
+  del proyecto y **no se degrada a SSE2 en silencio**. El build aborta con un
+  mensaje accionable si el compilador no acepta el flag.
+- Visual Studio 2022 con C++ (Build Tools o Community/Professional/Enterprise),
+  versión 17.x o superior — `/arch:SSE4.2` es obligatorio
 - Git (para clonar el repositorio)
+- Python 3 (gate de política SIMD y generación del icono)
+
+### Baseline SIMD (SSE4.2, sin AVX)
+
+Todos los objetivos se compilan con `/arch:SSE4.2` (MSVC) o `-msse4.2`
+(GCC/Clang) **y** con `/DARTPICST_TARGET_SSE42=1`. El flag permite *emitir* las
+instrucciones y la macro hace que `src/image_core.hpp` *active* las rutas
+SSE4.1/SSE4.2 (MSVC no define `__SSE4_2__`). Hacen falta las dos.
+
+AVX, AVX2 y AVX-512 están **prohibidos**: `src/image_core.hpp` aborta en
+compilación con `#error` si detecta `__AVX__`/`__AVX2__`/`__AVX512F__`, y
+`tests/check_simd_policy.py` recorre fuentes, scripts y workflows buscando
+cualquier token que pueda activarlos. Ver `docs/PERFORMANCE.md` para el porqué.
 
 ## Compilación Rápida
 
@@ -44,8 +61,13 @@ cd ..
 > justificación en un comentario.
 
 ```cmd
-cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /GL /Gy /utf-8 /W4 /permissive- /wd4324 /I. /Iinclude /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /DSTBI_WINDOWS_UTF8 /D_WIN32_WINNT=0x0601 /D_CRT_SECURE_NO_WARNINGS /Fe:"build\artpicst.exe" src\main.cpp build\artpicst.res /link gdiplus.lib user32.lib kernel32.lib shell32.lib shlwapi.lib gdi32.lib msimg32.lib ole32.lib oleaut32.lib uuid.lib dwmapi.lib windowscodecs.lib comdlg32.lib d2d1.lib dwrite.lib advapi32.lib /MANIFEST:EMBED /MANIFESTINPUT:artpicst.manifest /SUBSYSTEM:WINDOWS /LTCG /OPT:REF /OPT:ICF
+cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /GL /Gy /guard:cf /arch:SSE4.2 /DARTPICST_TARGET_SSE42=1 /utf-8 /W4 /permissive- /wd4324 /I. /Iinclude /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /DSTBI_WINDOWS_UTF8 /DSTBIR_NO_AVX /DSTBIR_NO_AVX2 /D_WIN32_WINNT=0x0601 /D_CRT_SECURE_NO_WARNINGS /Fe:"build\artpicst.exe" src\main.cpp build\artpicst.res /link gdiplus.lib user32.lib kernel32.lib shell32.lib shlwapi.lib gdi32.lib msimg32.lib ole32.lib oleaut32.lib uuid.lib dwmapi.lib windowscodecs.lib comdlg32.lib d2d1.lib dwrite.lib advapi32.lib /MANIFEST:EMBED /MANIFESTINPUT:artpicst.manifest /SUBSYSTEM:WINDOWS /LTCG /OPT:REF /OPT:ICF /GUARD:CF /DYNAMICBASE /HIGHENTROPYVA /NXCOMPAT
 ```
+
+Endurecimiento del enlace (los tres objetivos): `/GUARD:CF` (Control Flow Guard),
+`/DYNAMICBASE` y `/HIGHENTROPYVA` (ASLR), y `/NXCOMPAT` (DEP). **No** se usa
+`/fp:fast`: rompería la exactitud de las identidades enteras (LUT de claridad,
+redondeo `/255`, BT.601) que fijan los tests.
 
 #### 3. Updater (auto-actualizador)
 ```cmd
@@ -68,9 +90,37 @@ cadena, cadenas sin cierre, assets corruptos) y una campaña de **fuzzing
 determinista** (4.000 mutaciones por defecto, ampliable con la variable de
 entorno `ARTPICST_FUZZ_ITERS=N`).
 
+## Makefile (Git Bash / MSYS2 / MinGW-w64)
+
+Alternativa portable a los scripts de PowerShell/Batch, con el mismo orden de
+compilación:
+
+```bash
+make            # recursos -> visor -> updater -> selftest -> tests -> payload -> instalador -> dist
+make test       # compila y ejecuta los tests + gate de política SIMD
+make policy     # solo el gate de política SIMD (sin AVX + identidades enteras)
+make bench      # banco de kernels (ns/píxel y ancho de banda)
+make package    # genera resources/app/ y compila el instalador autocontenido
+make msvc       # delega en build.ps1 (Visual Studio 2022)
+make clean
+```
+
+## Verificación de calidad en un solo comando
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\verify.ps1 -Bench
+```
+
+Ejecuta, en orden: gate de política SIMD, tests del núcleo de imagen, tests EXIF,
+fuzzer del parser JSON, selftest del updater y (con `-Bench`) el banco de kernels.
+Sale con 0 solo si todos los gates pasan. Usa `-SkipBuild` para validar artefactos
+ya compilados sin recompilar.
+
 ## Tests y fuzzing (tests\)
 
-Dos ejecutables de consola independientes, sin dependencias de Windows-UI:
+Ejecutables de consola independientes, sin dependencias de Windows-UI. Todos se
+compilan con `/arch:SSE4.2` y `/DARTPICST_TARGET_SSE42=1`: sin esos flags el núcleo
+cae a la ruta SSE2 y los kernels SSE4.1 del visor quedarían sin cubrir.
 
 ### 1. Núcleo de imagen (`tests\image_core_test.cpp`)
 
@@ -118,6 +168,36 @@ fallo devuelve **1** ("normal"), nunca un valor fuera de 1..8.
 ```cmd
 cl /nologo /EHsc /std:c++20 /O2 /utf-8 /W4 /permissive- /I. /Fe:"build\jpeg_exif_test.exe" tests\jpeg_exif_test.cpp /link kernel32.lib shell32.lib
 build\jpeg_exif_test.exe
+```
+
+### 4. Banco de kernels (`tests\kernel_bench.cpp`)
+
+Mide con `QueryPerformanceCounter` el coste real (ns/píxel y GiB/s) de cada
+kernel sobre buffers alineados a 64 B — es decir, la ruta **vectorizada**, no la
+cola escalar. Es informativo (siempre sale con 0) y sirve para comparar el
+baseline SSE4.2 contra SSE2 y para vigilar regresiones.
+
+```cmd
+cl /nologo /EHsc /std:c++20 /O2 /arch:SSE4.2 /DARTPICST_TARGET_SSE42=1 ^
+   /utf-8 /W4 /permissive- /I. /Iinclude ^
+   /Fe:"build\kernel_bench.exe" tests\kernel_bench.cpp /link kernel32.lib
+build\kernel_bench.exe                 :: 2 097 152 px, 30 repeticiones
+build\kernel_bench.exe 4194304 50      :: píxeles y repeticiones explícitos
+```
+
+La metodología completa y la tabla de resultados pendiente de rellenar están en
+`docs\PERFORMANCE.md`.
+
+### 5. Gate de política SIMD (`tests\check_simd_policy.py`)
+
+Sin dependencias externas (solo la biblioteca estándar de Python). Comprueba que
+ninguna fuente, script ni workflow active AVX; que los flags SSE4.2 estén en todos
+los puntos de build; y actúa como **oráculo independiente del compilador** de las
+identidades enteras (LUT de claridad, redondeo `/255`, BT.601) y de las máscaras
+`PSHUFB` escritas a mano, emulando `_mm_shuffle_epi8` sobre el propio fuente.
+
+```cmd
+python tests\check_simd_policy.py --root .
 ```
 
 ### Fuzzing nocturno con AddressSanitizer (CI)

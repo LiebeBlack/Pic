@@ -25,7 +25,14 @@
 //
 //  Objetivo: cero ramas dentro de los bucles de píxeles, cero asignaciones
 //  ocultas, buffers alineados a línea de caché (64 B) y bucles escritos para
-//  auto-vectorización SSE2/AVX2/NEON, con rutas SIMD explícitas en x86-64.
+//  auto-vectorización, con rutas SIMD explícitas en x86-64.
+//
+//  POLÍTICA SIMD DEL PROYECTO: baseline SSE4.2 (con SSE2/SSSE3/SSE4.1
+//  incluidos). AVX, AVX2 y AVX-512 están PROHIBIDOS: el binario debe funcionar
+//  en CPUs sin unidades de 256 bits y el ensanchado por encima de 128 bits no
+//  aporta en kernels limitados por ancho de banda de memoria. Cuando haga falta
+//  más paralelismo se ensancha por NÚMERO DE PÍXELES (varias cargas de 128 bits
+//  en vuelo para llenar el pipeline), nunca por anchura de registro.
 // ============================================================================
 
 #ifndef ARTPICST_IMAGE_CORE_HPP
@@ -142,15 +149,68 @@ static_assert(ARTPICST_CXX_STD >= 202002L,
 #  define ARTPICST_ASSUME_ALIGNED(ptr, align) (ptr)
 #endif
 
-// Ruta SIMD explícita: SSE2 es el mínimo garantizado en todo x86-64.
-#if defined(__SSE2__) || defined(_M_X64) || (defined(_M_IX86_FP) && _M_IX86_FP >= 2)
-#  define ARTPICST_SSE2 1
-#  include <emmintrin.h>
+// ---------------------------------------------------------------------------
+// 1b. Capacidades SIMD: SSE2 → SSSE3 → SSE4.1 → SSE4.2 (nunca AVX)
+// ---------------------------------------------------------------------------
+//  El build compila con /arch:SSE4.2 (MSVC) o -msse4.2 (GCC/Clang) y define
+//  ARTPICST_TARGET_SSE42. Esa macro explícita es la fuente de verdad en MSVC
+//  porque este compilador NO define __SSE4_2__ (solo __AVX__ y superiores).
+//  Con GCC/Clang, -msse4.2 define __SSE4_2__, __SSE4_1__ y __SSSE3__ a la vez,
+//  así que la cascada de abajo los resuelve sin ambigüedad.
+//
+//  ARTPICST_SIMD_LEVEL es un entero comparable en preprocesador:
+//      0 = escalar · 2 = SSE2 · 3 = SSSE3 · 41 = SSE4.1 · 42 = SSE4.2
+#if defined(__SSE4_2__) || defined(ARTPICST_TARGET_SSE42)
+#  define ARTPICST_SIMD_LEVEL 42
+#elif defined(__SSE4_1__) || defined(ARTPICST_TARGET_SSE41)
+#  define ARTPICST_SIMD_LEVEL 41
+#elif defined(__SSSE3__)
+#  define ARTPICST_SIMD_LEVEL 3
+#elif defined(__SSE2__) || defined(_M_X64) || (defined(_M_IX86_FP) && _M_IX86_FP >= 2)
+#  define ARTPICST_SIMD_LEVEL 2
 #else
-#  define ARTPICST_SSE2 0
+#  define ARTPICST_SIMD_LEVEL 0
+#endif
+
+#define ARTPICST_SSE2  (ARTPICST_SIMD_LEVEL >= 2)
+#define ARTPICST_SSSE3 (ARTPICST_SIMD_LEVEL >= 3)
+#define ARTPICST_SSE41 (ARTPICST_SIMD_LEVEL >= 41)
+#define ARTPICST_SSE42 (ARTPICST_SIMD_LEVEL >= 42)
+
+#if ARTPICST_SSE2
+#  include <emmintrin.h>
+#endif
+#if ARTPICST_SSSE3
+#  include <tmmintrin.h>
+#endif
+#if ARTPICST_SSE41
+#  include <smmintrin.h>
+#endif
+#if ARTPICST_SSE42
+#  include <nmmintrin.h>
+#endif
+
+// Guardia de política: si algún día se compila con AVX activado, el header lo
+// denuncia en tiempo de compilación. No se usa AVX en ningún kernel.
+#if defined(__AVX__) || defined(__AVX2__) || defined(__AVX512F__)
+#  error "ARTPICST prohíbe AVX/AVX2/AVX-512: compila con /arch:SSE4.2 o -msse4.2."
 #endif
 
 namespace artpicst {
+
+// Nivel SIMD con el que se ha compilado ESTA unidad de traducción. Se expone
+// como constante para que los tests, el log de arranque y los diagnósticos
+// puedan informar de él sin duplicar la cascada de macros del preprocesador.
+inline constexpr int kSimdLevel = ARTPICST_SIMD_LEVEL;
+
+// Descripción legible del nivel SIMD activo (para logging).
+ARTPICST_NODISCARD constexpr const char* SimdLevelName() noexcept {
+    if constexpr (ARTPICST_SIMD_LEVEL >= 42) return "SSE4.2";
+    else if constexpr (ARTPICST_SIMD_LEVEL >= 41) return "SSE4.1";
+    else if constexpr (ARTPICST_SIMD_LEVEL >= 3)  return "SSSE3";
+    else if constexpr (ARTPICST_SIMD_LEVEL >= 2)  return "SSE2";
+    else                                          return "escalar";
+}
 
 // ---------------------------------------------------------------------------
 // 2. Geometría de memoria: alineación y aritmética segura
@@ -160,7 +220,10 @@ namespace artpicst {
 // Cada fila de píxeles empieza y termina en una frontera de línea de caché, por
 // lo que un recorrido lineal nunca produce "cache line splits".
 inline constexpr size_t kCacheLineBytes = 64;
-inline constexpr size_t kSimdAlignment  = 32;   // AVX2: 32 B
+// Ancho del registro vectorial usado de verdad: 128 bits (SSE). No es 32 B
+// porque el proyecto prohíbe AVX2; la alineación de PÍXEL sigue siendo la línea
+// de caché completa (64 B), que es la que evita los "cache line splits".
+inline constexpr size_t kSimdAlignment  = 16;
 inline constexpr size_t kPixelAlignment = kCacheLineBytes;
 
 static_assert((kPixelAlignment & (kPixelAlignment - 1)) == 0,
@@ -347,7 +410,30 @@ ARTPICST_NODISCARD inline bool SwapRbDetectAlpha(uint8_t* ARTPICST_RESTRICT px,
     bool hasAlpha = false;
     size_t i = 0;
 
-#if ARTPICST_SSE2
+#if ARTPICST_SSE41
+    if (IsAligned(px, kPixelAlignment)) {                              // [[likely]]
+        const size_t simd = pixels & ~static_cast<size_t>(3);
+        uint8_t* p = static_cast<uint8_t*>(ARTPICST_ASSUME_ALIGNED(px, kPixelAlignment));
+        const uint8_t* const end = px + simd * 4u;
+        // PSHUFB: el intercambio B<->R de cada palabra de 32 bits cabe en UNA
+        // instrucción, contra las cinco (2 AND + 2 shift + 2 OR) de la versión
+        // SSE2. Índices por byte dentro del registro; G (1) y A (3) intactos.
+        const __m128i swapMask = _mm_set_epi32(0x0F0C0D0E, 0x0B08090A,
+                                               0x07040506, 0x03000102);
+        const __m128i alphaMsk = _mm_set1_epi32(static_cast<int>(kAlphaMaskWord));
+        // Acumulador: un byte queda a cero si y solo si su alfa era 0xFF.
+        __m128i notOpaque = _mm_setzero_si128();
+        for (; p < end; p += 16) {
+            const __m128i v = _mm_load_si128(reinterpret_cast<const __m128i*>(p));
+            _mm_store_si128(reinterpret_cast<__m128i*>(p), _mm_shuffle_epi8(v, swapMask));
+            notOpaque = _mm_or_si128(notOpaque,
+                                     _mm_xor_si128(_mm_and_si128(v, alphaMsk), alphaMsk));
+        }
+        // PTEST: una sola instrucción decide si algún alfa dejó de ser 0xFF.
+        hasAlpha = _mm_testz_si128(notOpaque, notOpaque) == 0;          // [[unlikely]]
+        i = simd;
+    }
+#elif ARTPICST_SSE2
     if (IsAligned(px, kPixelAlignment)) {                              // [[likely]]
         const size_t simd = pixels & ~static_cast<size_t>(3);
         uint8_t* p = static_cast<uint8_t*>(ARTPICST_ASSUME_ALIGNED(px, kPixelAlignment));
@@ -389,7 +475,22 @@ ARTPICST_NODISCARD inline bool DetectAnyNonOpaque(const uint8_t* ARTPICST_RESTRI
     if (!px || pixels == 0) return false;                              // [[unlikely]]
     const uint8_t* p = static_cast<const uint8_t*>(ARTPICST_ASSUME_ALIGNED(px, 4));
     size_t i = 0;
-#if ARTPICST_SSE2
+#if ARTPICST_SSE41
+    if (IsAligned(px, kPixelAlignment)) {                              // [[likely]]
+        const size_t simd = pixels & ~static_cast<size_t>(3);
+        const uint8_t* const end = px + simd * 4u;
+        const __m128i alphaMsk = _mm_set1_epi32(static_cast<int>(kAlphaMaskWord));
+        __m128i notOpaque = _mm_setzero_si128();
+        for (; p < end; p += 16) {
+            const __m128i v = _mm_load_si128(reinterpret_cast<const __m128i*>(p));
+            notOpaque = _mm_or_si128(notOpaque,
+                                     _mm_xor_si128(_mm_and_si128(v, alphaMsk), alphaMsk));
+        }
+        // Un único PTEST sustituye al movemask + comparación contra 0xFFFF.
+        if (_mm_testz_si128(notOpaque, notOpaque) == 0) return true;   // [[unlikely]]
+        i = simd;
+    }
+#elif ARTPICST_SSE2
     if (IsAligned(px, kPixelAlignment)) {                              // [[likely]]
         const size_t simd = pixels & ~static_cast<size_t>(3);
         const uint8_t* const end = px + simd * 4u;
@@ -414,9 +515,38 @@ ARTPICST_NODISCARD inline bool DetectAnyNonOpaque(const uint8_t* ARTPICST_RESTRI
 // iteración con 2 multiplicaciones de 16 bits + la división exacta por 255
 // (mulhi_epu16 = (x*32897)>>16, luego >>7) — sin ninguna rama y con el mismo
 // redondeo que PremulByte.
-#if ARTPICST_SSE2
+#if ARTPICST_SSE41
 // Núcleo de registros: 4 píxeles BGRA -> 4 píxeles BGRA premultiplicados.
-inline __m128i PremultiplyBlockSse2(__m128i v) noexcept {
+// Optimización SSE4.1 sobre la versión SSE2:
+//   · la replicación del alfa en los carriles de 16 bits pasa de 4 operaciones
+//     (shift + shift-or + shift-or + and) a UNA sola PSHUFB;
+//   · la restitución del canal alfa original usa PBLENDVB en vez de 2 AND + OR.
+// La identidad de redondeo es EXACTAMENTE la misma: (c·a + 127) / 255.
+inline __m128i PremultiplyBlock(__m128i v) noexcept {
+    const __m128i pairMask = _mm_set1_epi32(static_cast<int>(kPairMaskWord));
+    const __m128i alphaMsk = _mm_set1_epi32(static_cast<int>(kAlphaMaskWord));
+    const __m128i k127     = _mm_set1_epi16(127);
+    const __m128i kMagic   = _mm_set1_epi16(static_cast<short>(0x8081));
+    // PSHUFB: toma el alfa (byte 3 de cada píxel) y lo coloca en los bytes B y R
+    // del mismo carril; el índice 0x80 borra el byte (canales G y A del patrón),
+    // de forma que cada carril de 16 bits queda en 0x00AA como en la versión SSE2.
+    const __m128i aRep = _mm_shuffle_epi8(
+        v, _mm_set_epi32(static_cast<int>(0x800F800Fu), static_cast<int>(0x800B800Bu),
+                         static_cast<int>(0x80078007u), static_cast<int>(0x80038003u)));
+    // Bytes pares (B,R) y bytes impares (G,A) alineados en carriles de 16 bits
+    const __m128i lo = _mm_and_si128(v, pairMask);
+    const __m128i hi = _mm_and_si128(_mm_srli_epi16(v, 8), pairMask);
+    const __m128i qLo = _mm_srli_epi16(
+        _mm_mulhi_epu16(_mm_add_epi16(_mm_mullo_epi16(lo, aRep), k127), kMagic), 7);
+    const __m128i qHi = _mm_srli_epi16(
+        _mm_mulhi_epu16(_mm_add_epi16(_mm_mullo_epi16(hi, aRep), k127), kMagic), 7);
+    const __m128i packed = _mm_or_si128(qLo, _mm_slli_epi16(qHi, 8));
+    // El alfa original se restituye entero (el producto A*A se descarta).
+    return _mm_blendv_epi8(packed, v, alphaMsk);
+}
+#elif ARTPICST_SSE2
+// Núcleo de registros: 4 píxeles BGRA -> 4 píxeles BGRA premultiplicados.
+inline __m128i PremultiplyBlock(__m128i v) noexcept {
     const __m128i pairMask = _mm_set1_epi32(static_cast<int>(kPairMaskWord));
     const __m128i notAlpha = _mm_set1_epi32(static_cast<int>(kRgbMaskWord));
     const __m128i alphaMsk = _mm_set1_epi32(static_cast<int>(kAlphaMaskWord));
@@ -453,12 +583,12 @@ inline void PremultiplyBgra(uint8_t* ARTPICST_RESTRICT px, size_t pixels) noexce
         for (; p + 32 <= end; p += 32) {
             const __m128i v0 = _mm_load_si128(reinterpret_cast<const __m128i*>(p));
             const __m128i v1 = _mm_load_si128(reinterpret_cast<const __m128i*>(p + 16));
-            _mm_store_si128(reinterpret_cast<__m128i*>(p), PremultiplyBlockSse2(v0));
-            _mm_store_si128(reinterpret_cast<__m128i*>(p + 16), PremultiplyBlockSse2(v1));
+            _mm_store_si128(reinterpret_cast<__m128i*>(p), PremultiplyBlock(v0));
+            _mm_store_si128(reinterpret_cast<__m128i*>(p + 16), PremultiplyBlock(v1));
         }
         for (; p < end; p += 16) {
             _mm_store_si128(reinterpret_cast<__m128i*>(p),
-                            PremultiplyBlockSse2(_mm_load_si128(reinterpret_cast<const __m128i*>(p))));
+                            PremultiplyBlock(_mm_load_si128(reinterpret_cast<const __m128i*>(p))));
         }
         i = simd;
     }
@@ -490,12 +620,12 @@ inline void CopyPremultipliedBgra(uint8_t* ARTPICST_RESTRICT dst,
         for (; s + 32 <= end; s += 32, d += 32) {   // desenrollado x2 (ver arriba)
             const __m128i v0 = _mm_load_si128(reinterpret_cast<const __m128i*>(s));
             const __m128i v1 = _mm_load_si128(reinterpret_cast<const __m128i*>(s + 16));
-            _mm_store_si128(reinterpret_cast<__m128i*>(d), PremultiplyBlockSse2(v0));
-            _mm_store_si128(reinterpret_cast<__m128i*>(d + 16), PremultiplyBlockSse2(v1));
+            _mm_store_si128(reinterpret_cast<__m128i*>(d), PremultiplyBlock(v0));
+            _mm_store_si128(reinterpret_cast<__m128i*>(d + 16), PremultiplyBlock(v1));
         }
         for (; s < end; s += 16, d += 16) {
             _mm_store_si128(reinterpret_cast<__m128i*>(d),
-                            PremultiplyBlockSse2(_mm_load_si128(reinterpret_cast<const __m128i*>(s))));
+                            PremultiplyBlock(_mm_load_si128(reinterpret_cast<const __m128i*>(s))));
         }
         i = simd;
     }
@@ -541,6 +671,14 @@ ARTPICST_NODISCARD inline bool BakeBgra(const uint8_t* ARTPICST_RESTRICT src,
         return true;
     }
     if ((effects & kEffectGray) != 0u) {
+        // NOTA DE RENDIMIENTO: este bucle se deja escalar A PROPÓSITO. La
+        // división entera por kLumaDivisor (1000) la convierte el compilador en
+        // una multiplicación mágica EXACTA (mismo resultado para todo el rango
+        // de sumas, 0..255000), y el bucle es trivialmente auto-vectorizable por
+        // tener multiplicadores constantes y cero ramas. Escribir la constante
+        // mágica a mano no aporta velocidad y sí riesgo de romper la
+        // bit-exactitud que fija LumaBt601, así que no se hace. Además este
+        // horneado ocurre UNA vez por cambio de efecto, nunca por fotograma.
         for (size_t i = 0; i < pixels; ++i) {                          // [[unlikely]]
             const size_t off = i * 4u;
             const uint8_t lum = LumaBt601(s[off + 2u], s[off + 1u], s[off + 0u]);
