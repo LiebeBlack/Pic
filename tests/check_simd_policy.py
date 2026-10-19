@@ -142,8 +142,9 @@ def load_and_check_baseline(root: Path) -> tuple[dict, list[str]]:
         problems.append(f"msvc_flag='{msvc_flag}' no corresponde a SSE4.2")
     if "msse4.2" not in gnu_flag:
         problems.append(f"gnu_flag='{gnu_flag}' no corresponde a msse4.2")
-    if define != "ARTPICST_TARGET_SSE42=1":
-        problems.append(f"define='{define}' no es ARTPICST_TARGET_SSE42=1")
+    expected_target = f"ARTPICST_TARGET_{baseline_name.replace('.', '')}=1"
+    if define != expected_target:
+        problems.append(f"define='{define}' no activa el target {baseline_name}")
     if not forbidden or len(forbidden) < 4:
         problems.append("simd.forbidden_tokens está vacío o incompleto")
 
