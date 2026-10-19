@@ -11,6 +11,7 @@
 # ============================================================================
 import argparse
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -61,6 +62,20 @@ def main() -> int:
     if still_missing:
         print("ERROR: el payload quedó incompleto: " + ", ".join(still_missing))
         return 1
+
+    # Manifest SHA-256 del payload: el instalador exige estos hashes antes de
+    # extraer nada a disco (scripts/gen_payload_manifest.py).
+    gen = here / "gen_payload_manifest.py"
+    if gen.is_file():
+        result = subprocess.run(
+            [sys.executable, str(gen), "--dir", str(payload),
+             "--out", str(root / "installer" / "payload_manifest.hpp")],
+            check=False)
+        if result.returncode != 0:
+            print("ERROR: no se pudo generar installer/payload_manifest.hpp")
+            return 1
+    else:
+        print("AVISO: falta scripts/gen_payload_manifest.py; el payload no tendrá hashes")
 
     print(f"Payload autocontenido listo en {payload}")
     return 0
