@@ -21,6 +21,8 @@
     ".github/workflows/nightly-fuzz.yml": "paso 'Baseline SIMD' -> %SIMD_FLAG% / %SIMD_DEFINE%",
     "scripts/verify.ps1": "tools/baseline.ps1 msvc_define_argv",
     "tests/check_simd_policy.py": "json.load (valores esperados)",
-    "build.bat": "delegado: invoca build.ps1 (no conoce ningún flag)"
+    "build.bat": "delegado: invoca build.ps1 (no conoce ningún flag)",
+    "tools/baseline.ps1": "lector/oráculo: expone flags y valida que sigan siendo SSE4.2",
+    "tests/check_build_baseline.ps1": "gate: oráculo de consistencia del inventario y flags"
   }
 }

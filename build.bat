@@ -21,6 +21,11 @@ setlocal EnableExtensions
 
 cd /d "%~dp0"
 
+if not exist tools\build-baseline.json (
+    echo Error: no se encuentra tools\build-baseline.json ^(fuente unica del baseline^).
+    exit /b 1
+)
+
 if not exist build.ps1 (
     echo Error: no se encuentra build.ps1 ^(pipeline canonico^) junto a build.bat.
     exit /b 1

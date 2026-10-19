@@ -22,32 +22,33 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
 from fractions import Fraction
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
+# Única fuente de verdad del baseline SIMD
+# ---------------------------------------------------------------------------
+BASELINE_REL = "tools/build-baseline.json"
+
+# ---------------------------------------------------------------------------
 # A. Tokens prohibidos: cualquier cosa que habilite AVX/AVX2/AVX-512
 # ---------------------------------------------------------------------------
 # Se excluye include/ porque los headers de terceros (stb_image*.h) contienen
 # sus propias ramas AVX que nunca se activan: el build define STBIR_NO_AVX y
-# STBIR_NO_AVX2 y compila con /arch:SSE4.2 / -msse4.2.
+# STBIR_NO_AVX2 y compila con el baseline SIMD de tools/build-baseline.json.
 SCAN_DIRS = ("src", "installer", "updater", "tests", "scripts", ".github")
 SCAN_EXTRA_FILES = ("CMakeLists.txt", "build.ps1", "build.bat", "build_mingw.bat", "Makefile")
 SKIP_DIR_NAMES = {".git", "build", "dist", "__pycache__", "app", "node_modules"}
-# Este propio script queda fuera del barrido: sus patrones y sus descripciones
-# CONTIENEN literalmente los tokens prohibidos (es la definición de la política,
-# no una violación de ella).
 SELF_REL = "tests/check_simd_policy.py"
 
-FORBIDDEN = [
+BASE_FORBIDDEN = [
     (re.compile(r"\b__m256[di]?\b"), "__m256* (registro AVX)"),
     (re.compile(r"\b__m512[di]?\b"), "__m512* (registro AVX-512)"),
     (re.compile(r"\b_mm256_\w+"), "_mm256_* (intrínseco AVX)"),
     (re.compile(r"\b_mm512_\w+"), "_mm512_* (intrínseco AVX-512)"),
-    (re.compile(r"/arch:\s*AVX", re.IGNORECASE), "/arch:AVX* (habilita AVX)"),
-    (re.compile(r"-mavx"), "-mavx* (habilita AVX)"),
     (re.compile(r"-march\s*=\s*native"), "-march=native (habilita lo que soporte la CPU)"),
     (re.compile(r"-march\s*=\s*(haswell|skylake|znver\d|broadwell|ivybridge|sandybridge)"),
      "-march=<microarquitectura con AVX>"),
@@ -59,18 +60,14 @@ WARN_ONLY = [
      "immintrin.h agrega TODOS los headers SIMD; preferir nmmintrin.h/smmintrin.h"),
 ]
 
-# ---------------------------------------------------------------------------
-# B. Flags SSE4.2 obligatorios por punto de build
-# ---------------------------------------------------------------------------
-REQUIRED_FLAGS = [
-    ("build.ps1", "/arch:SSE4.2"),
-    ("build.bat", "/arch:SSE4.2"),
-    ("CMakeLists.txt", "/arch:SSE4.2"),
-    ("build_mingw.bat", "-msse4.2"),
-    ("Makefile", "-msse4.2"),
-]
-# Los workflows se revisan aparte (hay varios y todos deben llevarlo).
-WORKFLOW_FLAG = "/arch:SSE4.2"
+
+def build_forbidden_rules(forbidden_tokens: list[str]) -> list[tuple[re.Pattern, str]]:
+    rules = list(BASE_FORBIDDEN)
+    for tok in forbidden_tokens:
+        tok_esc = re.escape(tok)
+        rules.append((re.compile(rf"/arch:\s*{tok_esc}", re.IGNORECASE), f"/arch:{tok} (habilita SIMD no permitido)"))
+        rules.append((re.compile(rf"-m{tok_esc}\b", re.IGNORECASE), f"-m{tok} (habilita SIMD no permitido)"))
+    return rules
 
 
 def iter_scan_files(root: Path):
@@ -93,7 +90,7 @@ def iter_scan_files(root: Path):
             yield p
 
 
-def check_forbidden_tokens(root: Path) -> list[str]:
+def check_forbidden_tokens(root: Path, rules: list[tuple[re.Pattern, str]]) -> list[str]:
     problems: list[str] = []
     warnings: list[str] = []
     for p in iter_scan_files(root):
@@ -105,7 +102,7 @@ def check_forbidden_tokens(root: Path) -> list[str]:
         if rel == SELF_REL:
             continue
         for lineno, line in enumerate(text.splitlines(), 1):
-            for rx, what in FORBIDDEN:
+            for rx, what in rules:
                 if rx.search(line):
                     problems.append(f"{rel}:{lineno}: {what} -> {line.strip()[:110]}")
             for rx, what in WARN_ONLY:
@@ -116,25 +113,66 @@ def check_forbidden_tokens(root: Path) -> list[str]:
     return problems
 
 
-def check_required_flags(root: Path) -> list[str]:
+def load_and_check_baseline(root: Path) -> tuple[dict, list[str]]:
     problems: list[str] = []
-    for name, flag in REQUIRED_FLAGS:
-        p = root / name
-        if not p.is_file():
-            problems.append(f"falta {name}: no se puede verificar el flag {flag}")
+    baseline_path = root / BASELINE_REL
+    if not baseline_path.is_file():
+        return {}, [f"falta {baseline_path}: no hay fuente única del baseline SIMD"]
+
+    try:
+        with baseline_path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        return {}, [f"{baseline_path} no es JSON válido: {e}"]
+
+    simd = data.get("simd", {})
+    if not simd:
+        problems.append(f"{baseline_path} no define el bloque 'simd'")
+        return data, problems
+
+    baseline_name = simd.get("baseline", "")
+    msvc_flag = simd.get("msvc_flag", "")
+    gnu_flag = simd.get("gnu_flag", "")
+    define = simd.get("define", "")
+    forbidden = simd.get("forbidden_tokens", [])
+
+    if baseline_name != "SSE4.2":
+        problems.append(f"baseline='{baseline_name}' no es SSE4.2")
+    if "SSE4.2" not in msvc_flag:
+        problems.append(f"msvc_flag='{msvc_flag}' no corresponde a SSE4.2")
+    if "msse4.2" not in gnu_flag:
+        problems.append(f"gnu_flag='{gnu_flag}' no corresponde a msse4.2")
+    if define != "ARTPICST_TARGET_SSE42=1":
+        problems.append(f"define='{define}' no es ARTPICST_TARGET_SSE42=1")
+    if not forbidden or len(forbidden) < 4:
+        problems.append("simd.forbidden_tokens está vacío o incompleto")
+
+    # Verificación de consumidores: deben existir y referenciar la fuente única
+    consumers = data.get("consumers", {})
+    for rel_path in consumers:
+        target = root / rel_path
+        if not target.is_file():
             continue
-        if flag not in p.read_text(encoding="utf-8", errors="ignore"):
-            problems.append(f"{name}: no contiene '{flag}'")
+        try:
+            content = target.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        if "build-baseline.json" not in content and "baseline.ps1" not in content and "build.ps1" not in content:
+            problems.append(f"{rel_path}: no referencia tools/build-baseline.json ni su lector tools/baseline.ps1")
+
+    # Workflows que compilan con cl deben propagar SIMD_FLAG
     wf_dir = root / ".github" / "workflows"
     if wf_dir.is_dir():
         for wf in sorted(wf_dir.glob("*.yml")):
-            text = wf.read_text(encoding="utf-8", errors="ignore")
-            # Solo los workflows que invocan cl.exe necesitan el flag.
+            try:
+                text = wf.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
             if "cl " in text or "cl.exe" in text:
-                if WORKFLOW_FLAG not in text:
-                    problems.append(
-                        f".github/workflows/{wf.name}: compila con cl pero no usa '{WORKFLOW_FLAG}'")
-    return problems
+                if "SIMD_FLAG" not in text:
+                    problems.append(f".github/workflows/{wf.name}: compila con cl pero no usa 'SIMD_FLAG'")
+
+    return data, problems
 
 
 # ---------------------------------------------------------------------------
@@ -307,8 +345,14 @@ def main() -> int:
     print("== Política SIMD de ARTPICST ==")
     print(f"Raíz: {root}")
 
-    problems += check_forbidden_tokens(root)
-    problems += check_required_flags(root)
+    baseline_data, baseline_problems = load_and_check_baseline(root)
+    problems += baseline_problems
+
+    simd_cfg = baseline_data.get("simd", {})
+    forbidden_tokens = simd_cfg.get("forbidden_tokens", ["avx", "avx2", "avx512", "avx-512", "avx512f", "f16c"])
+    rules = build_forbidden_rules(forbidden_tokens)
+
+    problems += check_forbidden_tokens(root, rules)
     problems += check_integer_identities()
     problems += check_pshufb_masks(root)
 
@@ -319,8 +363,8 @@ def main() -> int:
             print(f"  - {p}")
         return 1
 
+    print("[OK] Baseline SIMD consistente y consumido desde tools/build-baseline.json.")
     print("[OK] Sin AVX en fuentes/scripts/workflows.")
-    print("[OK] Flags SSE4.2 presentes en todos los puntos de build.")
     print("[OK] Identidades enteras exactas (LUT de claridad, /255, BT.601).")
     print("[OK] Máscaras PSHUFB verificadas por emulación.")
     return 0
