@@ -8,6 +8,12 @@
 # El instalador falla con exit code 2 si un hash no coincide: un payload
 # corrupto o manipulado nunca se instala.
 #
+# Emite DOS artefactos:
+#   1. installer/payload_manifest.hpp  (tabla C++ compilada en el instalador)
+#   2. <dir>/payload.manifest          (texto "nombre sha256", incrustado
+#      como RCDATA 206 para que el instalador verifique TAMBIÉN el payload
+#      de OTRO ejecutable: --update <instalador-descargado>).
+#
 # Uso:  python scripts/gen_payload_manifest.py --dir resources/app \
 #           --out installer/payload_manifest.hpp
 #       (los valores por defecto son los del pipeline del proyecto)
@@ -81,6 +87,7 @@ def main() -> int:
 
     payload_dir: Path = args.dir.resolve()
     rows = []
+    digests = []
     missing = []
     for file_name, symbol, res_id in PAYLOAD:
         src = payload_dir / file_name
@@ -91,12 +98,22 @@ def main() -> int:
         else:
             digest = ""
             missing.append(file_name)
+        digests.append(digest)
         rows.append(f'    {{ {res_id:3d}, "{file_name}", "{digest}" }},   // RES_{symbol}')
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(
         HEADER_TEMPLATE.format(entries="\n".join(rows)), encoding="utf-8", newline="\n")
     print(f"  manifest: {args.out} escrito ({len(rows)} entradas)")
+
+    # Segundo artefacto: manifest de texto junto al payload. El .rc lo incrusta
+    # como RCDATA 206; en modo --update el instalador lo lee del ejecutable
+    # descargado para verificar el payload AJENO con sus propios hashes.
+    text_lines = [f"{name} {digest}"
+                  for (name, _sym, _rid), digest in zip(PAYLOAD, digests)]
+    manifest_txt = payload_dir / "payload.manifest"
+    manifest_txt.write_text("\n".join(text_lines) + "\n", encoding="ascii", newline="\n")
+    print(f"  manifest: {manifest_txt} escrito ({len(text_lines)} líneas)")
 
     if missing:
         # No es un error fatal: las compilaciones de desarrollo no tienen
