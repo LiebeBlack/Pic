@@ -478,9 +478,19 @@ void TestSimdKernelsAligned() {
     std::memset(dst, 0xAB, bytes);
     artpicst::CopyPremultipliedBgra(dst, src, kPixels);
     CHECK(std::memcmp(dst, work, bytes) == 0);
+    // El origen debe quedar intacto. Los bytes de alfa se rellenaron con un
+    // patrón distinto al de datos (ver el bucle de preparación), así que la
+    // expectativa se reconstruye por posición.
+    auto expectedSrcByte = [](size_t i) -> unsigned char {
+        if ((i & 3u) == 3u) {
+            const size_t m = (i >> 2) % 23;
+            return static_cast<unsigned char>(m == 0 ? 0 : (m == 1 ? 255 : (m * 11) & 0xFF));
+        }
+        return static_cast<unsigned char>((i * 131u + 7u) & 0xFFu);
+    };
     bool srcIntact = true;
     for (size_t i = 0; i < bytes; ++i) {
-        if (src[i] != static_cast<unsigned char>((i * 131 + 7) & 0xFF)) { srcIntact = false; break; }
+        if (src[i] != expectedSrcByte(i)) { srcIntact = false; break; }
     }
     CHECK(srcIntact);
 

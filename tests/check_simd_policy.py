@@ -44,6 +44,19 @@ SCAN_EXTRA_FILES = ("CMakeLists.txt", "build.ps1", "build.bat", "build_mingw.bat
 SKIP_DIR_NAMES = {".git", "build", "dist", "__pycache__", "app", "node_modules"}
 SELF_REL = "tests/check_simd_policy.py"
 
+# Solo se inspeccionan fuentes y scripts de texto. Los artefactos que deja el
+# propio build en el árbol (*.obj junto al .cpp, *.res, *.exe) son binarios:
+# sus tablas de tipos/debug pueden contener cadenas "__m256i" aunque el código
+# fuente esté limpio, produciendo falsos positivos en el gate.
+SCAN_SUFFIXES = {
+    ".c", ".cc", ".cpp", ".cxx", ".c++", ".cu", ".cuh",
+    ".h", ".hh", ".hpp", ".hxx", ".h++", ".inl", ".ipp", ".tpp", ".ixx",
+    ".asm", ".s", ".S", ".rc",
+    ".py", ".pyi", ".ps1", ".psm1", ".bat", ".cmd", ".sh", ".in",
+    ".yml", ".yaml", ".toml", ".json", ".cfg", ".ini", ".mk", ".cmake", ".txt",
+}
+SCAN_BASENAMES = {"makefile", "gnumakefile", "cmakelists.txt"}
+
 BASE_FORBIDDEN = [
     (re.compile(r"\b__m256[di]?\b"), "__m256* (registro AVX)"),
     (re.compile(r"\b__m512[di]?\b"), "__m512* (registro AVX-512)"),
@@ -80,6 +93,9 @@ def iter_scan_files(root: Path):
             if not p.is_file() or p in seen:
                 continue
             if any(part in SKIP_DIR_NAMES for part in p.parts):
+                continue
+            if (p.suffix.lower() not in SCAN_SUFFIXES
+                    and p.name.lower() not in SCAN_BASENAMES):
                 continue
             seen.add(p)
             yield p
