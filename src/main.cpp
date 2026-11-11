@@ -3850,7 +3850,6 @@ static void GpuReleaseTargetAssets() {
     g_gpu.lastUploadFrame = -1;
     g_gpu.lastUploadEffects = 0;
     g_gpu.lastUploadAlpha = false;
-    g_gpu.lastUploadStride = 0;
     g_gpu.themeKey = 0;
 }
 
@@ -4217,23 +4216,18 @@ static bool GpuUpdateImage() {
             bw = w;
             bh = h;
             scale = 1.0f;
-            size_t fallbackStrideBytes = 0;
-            if (!artpicst::MulOverflow(static_cast<size_t>(bw), size_t{4}, fallbackStrideBytes) ||
-                fallbackStrideBytes > SIZE_MAX - (artpicst::kPixelAlignment - 1)) {
-                freeResampled();
-                return false;
-            }
-            alignedStrideBytes = (fallbackStrideBytes + (artpicst::kPixelAlignment - 1)) &
-                                 ~(artpicst::kPixelAlignment - 1);
-            if (alignedStrideBytes > MAXDWORD) {
-                freeResampled();
-                return false;
-            }
-            sourceStrideBytes = fallbackStrideBytes;
-            stride = static_cast<UINT>(alignedStrideBytes);
         }
     }
 
+    // Todos los búferes de origen son BGRA contiguos (ancho*alto*4, sin
+    // relleno de fila): el stride es simplemente el ancho en bytes.
+    size_t strideBytes = 0;
+    if (!artpicst::MulOverflow(static_cast<size_t>(bw), size_t{4}, strideBytes) ||
+        strideBytes > MAXDWORD) {
+        freeResampled();
+        return false;
+    }
+    const UINT stride = static_cast<UINT>(strideBytes);
 
     // ¿Hay que transformar píxeles? Solo si hay efecto o transparencia real.
     unsigned char* uploadSrc = src;
@@ -4245,7 +4239,6 @@ static bool GpuUpdateImage() {
         }
     }
 
-    const UINT sourceStride = static_cast<UINT>(sourceStrideBytes);
     D2D1_SIZE_U size = D2D1::SizeU(static_cast<UINT>(bw), static_cast<UINT>(bh));
     if (!g_gpu.image) {
         HRESULT hr = g_gpu.target->CreateBitmap(
@@ -4258,8 +4251,7 @@ static bool GpuUpdateImage() {
             freeResampled();
             return false;
         }
-    } else if (bw != g_gpu.lastUploadW || bh != g_gpu.lastUploadH ||
-       ) {
+    } else if (bw != g_gpu.lastUploadW || bh != g_gpu.lastUploadH) {
         GpuSafeRelease(g_gpu.image);
         HRESULT hr = g_gpu.target->CreateBitmap(
             size, uploadSrc, stride,
