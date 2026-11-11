@@ -160,7 +160,29 @@ void DeleteTemp(const std::wstring& path) {
 // Casos
 // ----------------------------------------------------------------------------
 
+void TestOrientationTransforms() {
+    struct ExpectedTransform { int rotation; bool flipH; bool flipV; };
+    constexpr ExpectedTransform expected[] = {
+        {0, false, false}, {0, false, false}, {0, true, false},
+        {180, false, false}, {0, false, true}, {90, true, false},
+        {90, false, false}, {270, true, false}, {270, false, false},
+    };
+    for (int orientation = 1; orientation <= 8; ++orientation) {
+        const auto transform = artpicst::exif::TransformFromOrientation(orientation);
+        const auto& want = expected[orientation];
+        CHECK_MSG(transform.rotation == want.rotation, "rotación EXIF 1..8");
+        CHECK_MSG(transform.flipH == want.flipH, "volteo horizontal EXIF 1..8");
+        CHECK_MSG(transform.flipV == want.flipV, "volteo vertical EXIF 1..8");
+    }
+    for (int invalid : { -1, 0, 9, 255, 65535 }) {
+        const auto transform = artpicst::exif::TransformFromOrientation(invalid);
+        CHECK_MSG(transform.rotation == 0 && !transform.flipH && !transform.flipV,
+                  "orientación EXIF inválida usa transformación normal");
+    }
+}
+
 void TestValidOrientations() {
+    TestOrientationTransforms();
     for (int expected = 1; expected <= 8; ++expected) {
         const auto jpeg = MakeJpegWithExif(8, 1, true, expected, true);
         const std::wstring path = WriteTempJpeg(jpeg, L"valid");

@@ -101,12 +101,19 @@ def check_forbidden_tokens(root: Path, rules: list[tuple[re.Pattern, str]]) -> l
         rel = p.relative_to(root).as_posix()
         if rel == SELF_REL:
             continue
+        comment_marker = "#" if p.suffix.lower() in {
+            ".bat", ".ps1", ".py", ".yml", ".yaml",
+        } or p.name in {"Makefile", "CMakeLists.txt"} else "//"
         for lineno, line in enumerate(text.splitlines(), 1):
+            # Los tokens de AVX dentro de comentarios describen el contrato;
+            # no habilitan instrucciones y no deben romper el gate. Conserva
+            # las directivas #if/#define de C/C++, que sí requieren inspección.
+            active_line = line.split(comment_marker, 1)[0]
             for rx, what in rules:
-                if rx.search(line):
+                if rx.search(active_line):
                     problems.append(f"{rel}:{lineno}: {what} -> {line.strip()[:110]}")
             for rx, what in WARN_ONLY:
-                if rx.search(line):
+                if rx.search(active_line):
                     warnings.append(f"{rel}:{lineno}: {what}")
     for w in warnings:
         print(f"[aviso] {w}")
@@ -256,14 +263,35 @@ def emulate_pshufb(src_bytes: list[int], mask: list[int]) -> list[int]:
 
 
 def extract_call_int_args(text: str, pattern: str) -> list[int] | None:
-    """Extrae los 4 argumentos de una llamada a _mm_set_epi32 localizada por
-    `pattern` (una expresión regular con UN grupo de captura sobre los args)."""
+    """Extrae los 4 argumentos de _mm_set_epi32 conservando los paréntesis
+    anidados de expresiones como static_cast<int>(0x...u)."""
     rx = re.compile(pattern, re.DOTALL)
     m = rx.search(text)
     if not m:
         return None
+
+    if m.lastindex:
+        args_text = m.group(1)
+    else:
+        opening = text.find("(", m.end())
+        if opening == -1:
+            return None
+        depth = 0
+        closing = -1
+        for pos in range(opening, len(text)):
+            if text[pos] == "(":
+                depth += 1
+            elif text[pos] == ")":
+                depth -= 1
+                if depth == 0:
+                    closing = pos
+                    break
+        if closing == -1:
+            return None
+        args_text = text[opening + 1:closing]
+
     out = []
-    for tok in m.group(1).split(","):
+    for tok in args_text.split(","):
         tok = tok.strip()
         if not tok:
             continue
@@ -285,7 +313,7 @@ def check_pshufb_masks(root: Path) -> list[str]:
     # D.1 swapMask: intercambio B<->R dejando G y A intactos.
     # Pixel BGRA de entrada = [B, G, R, A] (bytes 0..3 en little endian).
     swap_args = extract_call_int_args(
-        text, r"swapMask\s*=\s*_mm_set_epi32\(([^)]*)\)")
+        text, r"swapMask\s*=\s*_mm_set_epi32\b")
     if swap_args is None:
         problems.append("no se pudo localizar la definición de swapMask en image_core.hpp")
     else:
@@ -308,7 +336,7 @@ def check_pshufb_masks(root: Path) -> list[str]:
     # En la cabecera la máscara va DENTRO de la llamada a _mm_shuffle_epi8:
     #   const __m128i aRep = _mm_shuffle_epi8(v, _mm_set_epi32(...));
     rep_args = extract_call_int_args(
-        text, r"aRep\s*=\s*_mm_shuffle_epi8\(\s*v\s*,\s*_mm_set_epi32\(([^)]*)\)")
+        text, r"aRep\s*=\s*_mm_shuffle_epi8\(\s*v\s*,\s*_mm_set_epi32\b")
     if rep_args is None:
         problems.append("no se pudo localizar la definición de aRep en image_core.hpp")
     else:

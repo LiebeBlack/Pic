@@ -2,6 +2,37 @@
 
 ## [Sin publicar]
 
+### Mejoras Ultra: EXIF fiable, navegación fluida y calidad
+- Comparte entre JPEG, WIC y las pruebas un único mapeo constexpr y comprobable
+  de las ocho orientaciones EXIF, incluidos los cuatro modos espejo y los
+  valores ausentes o inválidos.
+- Lee la orientación WIC a través de `IWICMetadataQueryReader` —la interfaz
+  correcta de Windows Imaging Component— y comprueba las variantes y el rango
+  de cada valor antes de aplicarlo. Incluye rutas habituales para JPEG EXIF,
+  TIFF y XMP; los formatos sin metadatos de orientación permanecen sin cambios.
+- Valida los metadatos EXIF de GDI+ por tipo, longitud y límites usando
+  aritmética comprobada y `memcpy`, evitando lecturas fuera del búfer y accesos
+  desalineados ante archivos dañados.
+- Amplía la caché LRU a 8 imágenes sin superar su presupuesto estricto de 64 MB
+  y prepara la siguiente y la anterior. Si la carpeta o la navegación cambian
+  durante una decodificación, descarta el trabajo obsoleto.
+- El asignador BGRA, alineado a 64 B, comparte de forma segura imágenes
+  inmutables entre visor y caché con referencias atómicas: se eliminan las
+  copias de frames completos al navegar y se mantiene protegido el desalojo
+  concurrente.
+- Mantiene reutilizable el staging GPU pequeño, pero devuelve al sistema el
+  staging grande que ya se ha copiado a la textura. Al copiar una imagen
+  transformada al portapapeles, solo reserva el buffer temporal adicional cuando
+  hay que combinar rotación y volteo.
+- Asigna una generación a cada carga de imagen y la incluye en la identidad de
+  la caché GPU: volver a abrir la misma ruta nunca reutiliza una textura anterior.
+- Durante el arrastre, invalida únicamente la región de imagen modificada en vez
+  de volver a pintar toda la ventana en cada movimiento.
+- Corrige el validador SIMD: ahora interpreta argumentos `static_cast<int>`
+  anidados, sigue detectando activaciones reales de AVX y acepta los nombres
+  prohibidos mencionados únicamente en comentarios. Añade pruebas del mapeo
+  EXIF completo y actualiza los límites documentados.
+
 ### Baseline SIMD SSE4.2 (sin AVX) y cobertura real de los kernels
 - **El núcleo de imagen pasa de SSE2 a SSE4.2.** El intercambio B↔R se resuelve
   con un solo `PSHUFB` (antes 2 AND + 2 desplazamientos + 2 OR); la réplica del

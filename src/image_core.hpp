@@ -39,10 +39,12 @@
 #define ARTPICST_IMAGE_CORE_HPP
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <new>
 #include <type_traits>
 
 // ---------------------------------------------------------------------------
@@ -276,26 +278,51 @@ inline bool CheckedBgraBytes(uint32_t width, uint32_t height, size_t& outBytes) 
 // bloque alineado. Ventajas:
 //   · asignar y liberar pasan siempre por el MISMO CRT (malloc/free), sin riesgo
 //     de mezclar heaps entre DLLs ni de olvidar el liberador "especial";
-//   · el bloque devuelto es múltiplo exacto de 64 B (línea de caché);
+//   · cada propietario puede compartir el mismo bloque con referencias atómicas:
+//     la caché no duplica decenas de MB ni vuelve a copiar una imagen al abrirla;
+//   · el bloque devuelto está alineado a 64 B (línea de caché);
 //   · el tamaño se redondea a múltiplo de 64 B, así el último píxel tampoco
 //     comparte línea de caché con datos ajenos.
+//
+// Cada puntero de pixels debe corresponder a un bloque de esta pareja alloc/free.
 
 ARTPICST_NODISCARD inline void* AlignedPixelAlloc(size_t bytes) noexcept {
     if (bytes == 0) return nullptr;                                    // [[unlikely]]
-    if (bytes > SIZE_MAX - (kPixelAlignment * 2)) return nullptr;      // sin desbordar
+    if (bytes > SIZE_MAX - (kPixelAlignment - 1)) return nullptr;      // redondeo seguro
     const size_t rounded = (bytes + (kPixelAlignment - 1)) & ~(kPixelAlignment - 1);
-    const size_t total   = rounded + kPixelAlignment + sizeof(void*);
+    constexpr size_t kHeaderBytes = sizeof(void*) * 2;
+    if (rounded > SIZE_MAX - kPixelAlignment - kHeaderBytes) return nullptr;
+    const size_t total = rounded + kPixelAlignment + kHeaderBytes;
     void* raw = std::malloc(total);
     if (!raw) return nullptr;                                          // [[unlikely]]
-    const uintptr_t base    = reinterpret_cast<uintptr_t>(raw) + sizeof(void*);
+    const uintptr_t base = reinterpret_cast<uintptr_t>(raw) + kHeaderBytes;
     const uintptr_t aligned = (base + (kPixelAlignment - 1)) & ~static_cast<uintptr_t>(kPixelAlignment - 1);
-    reinterpret_cast<void**>(aligned)[-1] = raw;                       // base para liberar
+    // El slot [-1] conserva el puntero CRT; la referencia vive en [-2].
+    static_assert(sizeof(std::atomic_size_t) == sizeof(void*));
+    static_assert((2u * sizeof(void*)) % alignof(std::atomic_size_t) == 0,
+                  "La referencia atómica debe quedar correctamente alineada en la cabecera.");
+    auto* refCount = reinterpret_cast<std::atomic_size_t*>(aligned - 2u * sizeof(void*));
+    ::new (static_cast<void*>(refCount)) std::atomic_size_t(1);
+    *reinterpret_cast<void**>(aligned - sizeof(void*)) = raw;          // base para liberar
     return reinterpret_cast<void*>(aligned);
+}
+
+// Añade una referencia a un bloque alineado. La persona que la adquiere es
+// responsable de liberar su referencia exactamente una vez con AlignedPixelFree.
+inline void AlignedPixelRetain(void* p) noexcept {
+    if (!p) return;
+    const uintptr_t address = reinterpret_cast<uintptr_t>(p);
+    auto* refCount = reinterpret_cast<std::atomic_size_t*>(address - 2u * sizeof(void*));
+    refCount->fetch_add(1, std::memory_order_relaxed);
 }
 
 inline void AlignedPixelFree(void* p) noexcept {
     if (!p) return;                                                    // [[unlikely]]
-    std::free(reinterpret_cast<void**>(p)[-1]);
+    const uintptr_t address = reinterpret_cast<uintptr_t>(p);
+    auto* refCount = reinterpret_cast<std::atomic_size_t*>(address - 2u * sizeof(void*));
+    if (refCount->fetch_sub(1, std::memory_order_acq_rel) != 1) return;
+    void* raw = *reinterpret_cast<void**>(address - sizeof(void*));
+    std::free(raw);
 }
 
 // "realloc" alineado: no puede crecer en sitio (la alineación se perdería), así

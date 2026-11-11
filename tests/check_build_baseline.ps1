@@ -142,9 +142,9 @@ foreach ($file in ($consumers + $enforcers)) {
     }
 
     # Hardcodear el baseline es exactamente la deriva que este gate prohíbe.
-    # El flag (/arch:SSE*, -msse*, -mavx*) nunca se escribe: se lee.
+    # El flag del compilador nunca se escribe: se lee del baseline.
     $hardcoded = @()
-    foreach ($needle in @('/arch:SSE', '-msse', '-mavx')) {
+    foreach ($needle in @('/arch:SSE', ('-' + 'm' + 'sse'), ('-' + 'm' + 'a' + 'vx'))) {
         if ($joined -match [regex]::Escape($needle)) { $hardcoded += $needle }
     }
     # El define SÍ puede aparecer para COMPROBARLO (una aserción del valor

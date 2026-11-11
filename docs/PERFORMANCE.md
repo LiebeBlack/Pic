@@ -163,12 +163,18 @@ a 512× se hacía sobre una imagen ya interpolada.
 El valor efectivo se registra en el banner de arranque del log, junto a la versión
 y al baseline SIMD, para poder interpretar cualquier informe de fallo.
 
+La precarga recorre los vecinos siguiente y anterior con prioridad de hilo baja.
+Si llega una nueva navegación o cambia la carpeta mientras se decodifica, el
+resultado obsoleto se descarta en lugar de ocupar espacio de caché. Ocho entradas
+son solo un máximo: el presupuesto estricto de 64 MB desalojará las imágenes
+menos recientes y no aumenta por sí solo el máximo de bytes en caché.
+
 Otros límites que afectan al consumo:
 
 | Constante | Valor | Efecto |
 | --- | --- | --- |
 | `MAX_CACHE_BYTES` | 64 MB | tope de la caché de imágenes vecinas |
-| `CACHE_SIZE` | 4 | 2 previas + 2 siguientes |
+| `CACHE_SIZE` | 8 | hasta 8 entradas LRU para navegación en ambas direcciones; también limitada por `MAX_CACHE_BYTES` |
 | `MAX_FILE_BYTES` | 300 MB | rechaza archivos mayores antes de leerlos |
 | `MAX_GIF_BYTES` | 64 MB | presupuesto del GIF animado |
 | `MAX_GIF_FRAMES` | 120 | fotogramas decodificados como máximo |

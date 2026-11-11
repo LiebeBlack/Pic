@@ -46,6 +46,7 @@
 #include <commdlg.h>
 #include <dwmapi.h>
 #include <wincodec.h>
+#include <propvarutil.h>
 #include <gdiplus.h>
 #include <d2d1.h>
 #include <dwrite.h>
@@ -183,7 +184,7 @@ Color GLASS_BTN_ACTIVE = GLASS_BTN_ACTIVE_DARK;
 const float MIN_ZOOM = 0.005f;
 const float MAX_ZOOM = 512.0f;
 const float ZOOM_STEP = 1.25f;
-const size_t CACHE_SIZE = 4;                           // Caché compacta (2 previas + 2 siguientes) para consumo ultra-ligero
+const size_t CACHE_SIZE = 8;                           // hasta 8 entradas LRU, limitadas también por el presupuesto de bytes
 const size_t MAX_CACHE_BYTES = 64ull * 1024ull * 1024ull; // 64 MB límite de caché: evita picos de RAM (~300 MB) con fotos grandes
 
 // Límite de DIMENSIÓN al cargar.
@@ -349,6 +350,8 @@ struct GifAnimation {
 };
 
 struct CachedImage {
+    // Inmutable y compartido con la imagen actual mediante referencias atómicas.
+    // No se conserva en la caché el búfer del GIF, cuyos fotogramas sí mutan.
     unsigned char* data = nullptr;
     int width = 0, height = 0, channels = 0, rotation = 0;
     bool flipH = false, flipV = false, hasAlpha = false;
@@ -415,6 +418,9 @@ struct AppState {
     SIZE memSize{};   // tamaño para el que se creó el doble búfer (evita reciclarlo con tamaño obsoleto)
 
     unsigned char* imageData = nullptr;
+    // Identidad monotónica de cada contenido cargado; detecta recargas incluso
+    // al reabrir la misma ruta y sin depender de punteros reciclados por el heap.
+    uint64_t imageGeneration = 0;
     int imageWidth = 0;
     int imageHeight = 0;
     int imageChannels = 0;
@@ -464,6 +470,7 @@ struct AppState {
     std::list<CachedImage> imageCache;
     std::mutex cacheMutex;
     size_t cacheMemoryBytes = 0;
+    size_t cachedFileCount = 0;
 
     // Prefetch en segundo plano
     std::thread prefetchThread;
@@ -531,6 +538,7 @@ struct AppState {
     HRESULT comHr = E_FAIL;
 
     AppState() {
+        cacheIndex.reserve(CACHE_SIZE);
         gdiplusStartupInput.GdiplusVersion = 1;
         windowedPlacement.length = sizeof(WINDOWPLACEMENT);
     }
@@ -609,6 +617,11 @@ struct DockFrameCache {
     std::unique_ptr<SolidBrush> osdBgBrush;
     std::unique_ptr<Pen> osdBorderPen;
     std::unique_ptr<SolidBrush> osdTextBrush;
+    std::unique_ptr<SolidBrush> viewBackgroundBrush;
+    COLORREF viewBackgroundColor = static_cast<COLORREF>(~0u);
+    std::unique_ptr<GraphicsPath> osdPath;
+    bool osdPathValid = false;
+    float osdLeft = 0.0f, osdTop = 0.0f, osdWidth = 0.0f, osdHeight = 0.0f;
     bool activeBrushValid = false;
     std::unique_ptr<LinearGradientBrush> activeBrush;
     std::unique_ptr<Pen> activeBorderPen;
@@ -701,6 +714,29 @@ struct DockFrameCache {
         activeBrushValid = true;
     }
 
+    bool EnsureViewBackground() {
+        if (viewBackgroundBrush && viewBackgroundColor == BG_COLOR) return true;
+        auto brush = std::make_unique<SolidBrush>(
+            Color(255, GetRValue(BG_COLOR), GetGValue(BG_COLOR), GetBValue(BG_COLOR)));
+        if (!brush || brush->GetLastStatus() != Ok) return false;
+        viewBackgroundBrush = std::move(brush);
+        viewBackgroundColor = BG_COLOR;
+        return true;
+    }
+
+    void EnsureOsdPath(const RectF& rect) {
+        if (osdPathValid && osdPath && osdLeft == rect.X && osdTop == rect.Y &&
+            osdWidth == rect.Width && osdHeight == rect.Height) return;
+        auto path = std::make_unique<GraphicsPath>();
+        AddRoundRectPath(*path, rect, 8.0f);
+        osdPath = std::move(path);
+        osdLeft = rect.X;
+        osdTop = rect.Y;
+        osdWidth = rect.Width;
+        osdHeight = rect.Height;
+        osdPathValid = true;
+    }
+
     void EnsureOsdTextWidth(Graphics& g, const std::wstring& msg) {
         Font& font = *g_ui.osdFont;
         StringFormat& format = *g_ui.centerFormat;
@@ -717,6 +753,7 @@ struct DockFrameCache {
 
     void Invalidate() {
         valid = false;
+        osdPathValid = false;
         dockPath.reset();
         shadowPath.reset();
         hudGeomCount = -1;
@@ -738,6 +775,10 @@ struct DockFrameCache {
         osdBgBrush.reset();
         osdBorderPen.reset();
         osdTextBrush.reset();
+        viewBackgroundBrush.reset();
+        viewBackgroundColor = static_cast<COLORREF>(~0u);
+        osdPath.reset();
+        osdPathValid = false;
         activeBrush.reset();
         activeBorderPen.reset();
         activeBrushValid = false;
@@ -1900,6 +1941,7 @@ void CleanupGDIPlus() {
         g_state.imageCache.clear();
         g_state.cacheIndex.clear();
         g_state.cacheMemoryBytes = 0;
+        g_state.cachedFileCount = 0;
     }
     FreeCurrentImage();
     FreeDoubleBuffer();
@@ -1913,16 +1955,13 @@ void CleanupGDIPlus() {
     }
 }
 
-// FIX THREAD-SAFETY: antes los píxeles del nodo de caché se leían fuera de
-// cacheMutex mientras el hilo de prefetch podía ejecutar EraseCacheEntry y
-// liberarlos en paralelo (use-after-free intermitente al navegar rápido).
-// Ahora la copia ocurre SIEMPRE con el mutex tomado por la llamada.
-bool CopyCachedPixels(const CachedImage& src, unsigned char*& dest) {
-    size_t bytes = 0;
-    if (!src.data || !SafePixelBytes(src.width, src.height, bytes)) return false;
-    dest = static_cast<unsigned char*>(artpicst::AlignedPixelAlloc(bytes));
-    if (!dest) return false;
-    memcpy(dest, src.data, bytes);
+// FIX THREAD-SAFETY Y MEMORIA: la referencia se adquiere mientras cacheMutex
+// impide el desalojo. El bitmap se comparte sin copiarlo; el último propietario
+// lo libera mediante el contador atómico fuera del mutex de renderizado.
+bool RetainCachedPixels(const CachedImage& src, unsigned char*& dest) {
+    if (!src.data || src.width <= 0 || src.height <= 0) return false;
+    artpicst::AlignedPixelRetain(src.data);
+    dest = src.data;
     return true;
 }
 
@@ -1938,9 +1977,9 @@ bool TryCopyFromCache(const std::wstring& filepath, CachedImage& outCopy) {
     it->second = std::prev(g_state.imageCache.end());
     const CachedImage& src = *it->second;
     unsigned char* pixels = nullptr;
-    // La copia vive DENTRO del lock: sin ella, EraseCacheEntry (prefetch) podía
-    // liberar src.data a mitad del memcpy.
-    if (!CopyCachedPixels(src, pixels)) return false;
+    // Retain vive DENTRO del lock: sin él, EraseCacheEntry podía liberar
+    // src.data entre encontrar el nodo y adquirir su propiedad.
+    if (!RetainCachedPixels(src, pixels)) return false;
     outCopy.data = pixels;
     outCopy.width = src.width;
     outCopy.height = src.height;
@@ -1963,6 +2002,7 @@ static void EraseCacheEntry(std::list<CachedImage>::iterator it) {
         if (g_state.cacheMemoryBytes >= bytes) g_state.cacheMemoryBytes -= bytes;
         else g_state.cacheMemoryBytes = 0;
     }
+    if (g_state.cachedFileCount != 0) --g_state.cachedFileCount;
     g_state.cacheIndex.erase(CacheKey(it->filepath));
     g_state.imageCache.erase(it);
 }
@@ -1975,8 +2015,12 @@ void AddToCache(const std::wstring& filepath, unsigned char* data, int width, in
         FreePixels(data);
         return;
     }
-    std::lock_guard<std::mutex> lock(g_state.cacheMutex);
     const std::wstring key = CacheKey(filepath);
+    if (key.empty()) {
+        FreePixels(data);
+        return;
+    }
+    std::lock_guard<std::mutex> lock(g_state.cacheMutex);
     auto it = g_state.cacheIndex.find(key);
     if (it != g_state.cacheIndex.end()) {
         if (it->second != g_state.imageCache.end()) {
@@ -1986,7 +2030,9 @@ void AddToCache(const std::wstring& filepath, unsigned char* data, int width, in
         }
     }
 
-    while (!g_state.imageCache.empty() && (g_state.imageCache.size() >= CACHE_SIZE || (g_state.cacheMemoryBytes + bytes) > MAX_CACHE_BYTES)) {
+    while (!g_state.imageCache.empty() &&
+           (g_state.imageCache.size() >= CACHE_SIZE ||
+            bytes > MAX_CACHE_BYTES - g_state.cacheMemoryBytes)) {
         EraseCacheEntry(g_state.imageCache.begin());
     }
 
@@ -2003,6 +2049,7 @@ void AddToCache(const std::wstring& filepath, unsigned char* data, int width, in
     cached.decoder = decoder;
     g_state.imageCache.push_back(std::move(cached));
     g_state.cacheMemoryBytes += bytes;
+    ++g_state.cachedFileCount;
     g_state.cacheIndex[key] = std::prev(g_state.imageCache.end());
 }
 
@@ -2012,10 +2059,15 @@ bool IsInCache(const std::wstring& filepath) {
 }
 
 void ClearCache() {
-    std::lock_guard<std::mutex> lock(g_state.cacheMutex);
-    g_state.imageCache.clear();
-    g_state.cacheIndex.clear();
-    g_state.cacheMemoryBytes = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_state.cacheMutex);
+        g_state.imageCache.clear();
+        g_state.cacheIndex.clear();
+        g_state.cacheMemoryBytes = 0;
+        g_state.cachedFileCount = 0;
+    }
+    // Recortar las páginas liberadas fuera del mutex para no bloquear la caché
+    // durante una llamada potencialmente costosa al sistema operativo.
     TrimProcessMemory();
 }
 
@@ -2291,6 +2343,15 @@ int GetExifOrientationFromJpeg(const std::wstring& filepath) {
     return artpicst::exif::ReadJpegOrientation(filepath.c_str());
 }
 
+// Convierte la orientación EXIF a la transformación común de todos los
+// decodificadores; el mapeo testeable vive en jpeg_exif.hpp.
+void ExifOrientationToTransform(int exif, int& outDeg, bool& outFlipH, bool& outFlipV) {
+    const auto transform = artpicst::exif::TransformFromOrientation(exif);
+    outDeg = transform.rotation;
+    outFlipH = transform.flipH;
+    outFlipV = transform.flipV;
+}
+
 // Intercambio R<->B y detección de transparencia en UNA sola pasada SIMD
 // (antes eran dos recorridos completos sobre la imagen de 8 B/px de tráfico).
 void ConvertRGBAtoBGRA(unsigned char* pixels, int width, int height, bool& outHasAlpha) {
@@ -2402,30 +2463,22 @@ unsigned char* DecodeWithStb(const std::wstring& filepath, int& width, int& heig
     ConvertRGBAtoBGRA(pixels, width, height, outHasAlpha);
 
     if (!isGif) {
-        // Orientación EXIF completa (rotación + espejos): el motor de renderizado
-        // aplica rotación y volteos por separado, así que cada orientación se
-        // descompone en su equivalente (rotación, flipH, flipV):
-        // 1=normal, 2=espejo H, 3=180°, 4=espejo V, 5=90°+espejo H,
-        // 6=90°, 7=270°+espejo H, 8=270° (mismo resultado que el mapa GDI+).
-        const int exif = GetExifOrientationFromJpeg(filepath);
-        switch (exif) {
-            case 2: outFlipH = true; break;
-            case 3: autoRotateDeg = 180; break;
-            case 4: outFlipV = true; break;
-            case 5: autoRotateDeg = 90; outFlipH = true; break;
-            case 6: autoRotateDeg = 90; break;
-            case 7: autoRotateDeg = 270; outFlipH = true; break;
-            case 8: autoRotateDeg = 270; break;
-            default: break;
-        }
+        // Orientación EXIF completa (rotación + espejos): ver
+        // ExifOrientationToTransform, fuente única del mapa 1..8.
+        ExifOrientationToTransform(GetExifOrientationFromJpeg(filepath),
+                                   autoRotateDeg, outFlipH, outFlipV);
     }
 
     return pixels;
 }
 
-unsigned char* DecodeWithWic(const std::wstring& filepath, int& width, int& height, int& channels, bool& outHasAlpha) {
+unsigned char* DecodeWithWic(const std::wstring& filepath, int& width, int& height, int& channels, bool& outHasAlpha,
+                             int& autoRotateDeg, bool& outFlipH, bool& outFlipV) {
     width = height = channels = 0;
     outHasAlpha = false;
+    autoRotateDeg = 0;
+    outFlipH = false;
+    outFlipV = false;
     ComPtr<IWICImagingFactory> factory;
     HRESULT hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
                                   IID_PPV_ARGS(&factory.p));
@@ -2448,6 +2501,46 @@ unsigned char* DecodeWithWic(const std::wstring& filepath, int& width, int& heig
     ComPtr<IWICBitmapFrameDecode> frame;
     hr = decoder->GetFrame(0, &frame);
     if (FAILED(hr) || !frame) return nullptr;
+
+    // IWICBitmapFrameDecode no expone GetMetadataByName: la lectura debe
+    // realizarse mediante su IWICMetadataQueryReader. Se prueban los caminos
+    // comunes de EXIF/TIFF y las propiedades System.Photo, limitando cada
+    // PROPVARIANT a tipos enteros y valores de orientación válidos (1..8).
+    {
+        ComPtr<IWICMetadataQueryReader> metadata;
+        if (SUCCEEDED(frame->GetMetadataQueryReader(&metadata))) {
+            constexpr LPCWSTR kOrientationQueries[] = {
+                L"/app1/ifd/{ushort=274}",
+                L"/ifd/{ushort=274}",
+                L"/ifd/exif/{ushort=274}",
+                L"System.Photo.Orientation",
+                L"/xmp/tiff:Orientation",
+            };
+            for (LPCWSTR query : kOrientationQueries) {
+                PROPVARIANT prop;
+                PropVariantInit(&prop);
+                const HRESULT metadataHr = metadata->GetMetadataByName(query, &prop);
+                int orientation = 0;
+                if (SUCCEEDED(metadataHr)) {
+                    switch (prop.vt) {
+                        case VT_UI1: orientation = prop.bVal; break;
+                        case VT_I2: orientation = prop.iVal; break;
+                        case VT_UI2: orientation = prop.uiVal; break;
+                        case VT_I4: orientation = prop.lVal; break;
+                        case VT_UI4:
+                            if (prop.ulVal <= 8u) orientation = static_cast<int>(prop.ulVal);
+                            break;
+                        default: break;
+                    }
+                }
+                PropVariantClear(&prop);
+                if (orientation >= 1 && orientation <= 8) {
+                    ExifOrientationToTransform(orientation, autoRotateDeg, outFlipH, outFlipV);
+                    break;
+                }
+            }
+        }
+    }
 
     ComPtr<IWICBitmapSource> source;
     ComPtr<IWICBitmapFlipRotator> rotator;
@@ -2505,9 +2598,19 @@ unsigned char* DecodeWithGdiplus(const std::wstring& filepath, int& width, int& 
     UINT propSize = bmp.GetPropertyItemSize(PropertyTagOrientation);
     if (propSize > 0) {
         PropertyItem* prop = static_cast<PropertyItem*>(malloc(propSize));
-        if (prop && bmp.GetPropertyItem(PropertyTagOrientation, propSize, prop) == Ok) {
-            short orientation = *reinterpret_cast<short*>(prop->value);
-            switch (orientation) {
+        if (prop && bmp.GetPropertyItem(PropertyTagOrientation, propSize, prop) == Ok &&
+            prop->type == PropertyTagTypeShort && prop->length >= sizeof(short) && prop->value) {
+            // GDI+ puede devolver metadatos dañados: valida los límites como
+            // enteros (sin aritmética de punteros fuera del búfer) y copia con
+            // memcpy para admitir valor desalineado sin comportamiento indefinido.
+            const uintptr_t bufferStart = reinterpret_cast<uintptr_t>(prop);
+            const uintptr_t valueStart = reinterpret_cast<uintptr_t>(prop->value);
+            const bool valueIsInBuffer = valueStart >= bufferStart &&
+                valueStart - bufferStart <= propSize &&
+                propSize - static_cast<size_t>(valueStart - bufferStart) >= sizeof(short);
+            short orientation = 1;
+            if (valueIsInBuffer) memcpy(&orientation, prop->value, sizeof(orientation));
+            switch (valueIsInBuffer ? orientation : 1) {
                 case 2: bmp.RotateFlip(RotateNoneFlipX); break;
                 case 3: bmp.RotateFlip(Rotate180FlipNone); break;
                 case 4: bmp.RotateFlip(Rotate180FlipX); break;
@@ -2562,7 +2665,8 @@ unsigned char* DecodeImageFile(const std::wstring& filepath, int& width, int& he
     if (pixels) {
         decoder = L"stb";
     } else {
-        pixels = DecodeWithWic(filepath, width, height, channels, hasAlpha);
+        pixels = DecodeWithWic(filepath, width, height, channels, hasAlpha,
+                               autoRotateDeg, outFlipH, outFlipV);
         if (pixels) {
             decoder = L"WIC";
         } else if (allowGdiPlus) {
@@ -2589,10 +2693,10 @@ void StoreCurrentInCache() {
     if (!SafePixelBytes(g_state.imageWidth, g_state.imageHeight, bytes) || bytes > MAX_CACHE_BYTES) return;
 
     // Si la imagen ya está en caché (carga desde caché o rotación/volteo),
-    // basta con actualizar sus metadatos EN EL MISMO nodo: no se duplica el
-    // buffer de píxeles (hasta ~59 MB por imagen en 4K), que era el motivo de
-    // que el consumo de RAM se disparase al navegar o transformar fotos.
+    // actualiza los metadatos EN EL MISMO nodo. En cualquier caso el bitmap es
+    // inmutable y se comparte por referencias: nunca se duplica su búfer BGRA.
     const std::wstring key = CacheKey(g_state.currentFilePath);
+    if (key.empty()) return;
     {
         std::lock_guard<std::mutex> lock(g_state.cacheMutex);
         auto it = g_state.cacheIndex.find(key);
@@ -2609,22 +2713,20 @@ void StoreCurrentInCache() {
             it->second = std::prev(g_state.imageCache.end());
             return;
         }
-        // FIX MEMORIA: desalojar entradas LRU ANTES de duplicar el buffer
-        // actual. Antes se hacía memcpy primero y el desalojo después: con una
-        // foto 4K (~59 MB) el pico era buffer actual + copia + caché llena
-        // simultáneos, justo el escenario de "memoria fatal" en navegación
-        // continua de imágenes grandes.
+        // Hacer espacio desalojando LRU antes de compartir el bitmap. Así el
+        // presupuesto de caché siempre representa bytes de imágenes ÚNICAS.
         while (!g_state.imageCache.empty() &&
                (g_state.imageCache.size() >= CACHE_SIZE ||
-                (g_state.cacheMemoryBytes + bytes) > MAX_CACHE_BYTES)) {
+                bytes > MAX_CACHE_BYTES - g_state.cacheMemoryBytes)) {
             EraseCacheEntry(g_state.imageCache.begin());
         }
     }
 
-    unsigned char* copy = static_cast<unsigned char*>(artpicst::AlignedPixelAlloc(bytes));
-    if (!copy) return;
-    memcpy(copy, g_state.imageData, bytes);
-    AddToCache(g_state.currentFilePath, copy, g_state.imageWidth, g_state.imageHeight,
+    // Una imagen cargada y su entrada LRU comparten el mismo búfer BGRA
+    // inmutable. El retain protege su vida después de soltar cacheMutex y evita
+    // copiar/asignar otro bloque de hasta MAX_CACHE_BYTES.
+    artpicst::AlignedPixelRetain(g_state.imageData);
+    AddToCache(g_state.currentFilePath, g_state.imageData, g_state.imageWidth, g_state.imageHeight,
                g_state.imageChannels, g_state.currentRotation, g_state.currentFlipH,
                g_state.currentFlipV, g_state.hasAlpha, g_state.decoderName);
 }
@@ -2649,6 +2751,8 @@ bool ApplyLoadedImage(unsigned char* pixels, int width, int height, int channels
                       bool flipH, bool flipV, bool hasAlpha, const std::wstring& filepath, const std::wstring& decoder) {
     FreeCurrentImage();
     g_state.imageData = pixels;
+    ++g_state.imageGeneration;
+    if (g_state.imageGeneration == 0) ++g_state.imageGeneration;
     g_state.imageWidth = width;
     g_state.imageHeight = height;
     g_state.imageChannels = channels;
@@ -2742,9 +2846,13 @@ void LoadInitialImageSafely() {
 
 void RequestPrefetch(size_t targetIndex) {
     if (!g_state.prefetchRunning) return;
-    std::lock_guard<std::mutex> lock(g_state.prefetchMutex);
-    g_state.prefetchTargetIndex = targetIndex;
-    g_state.prefetchRequested = true;
+    {
+        std::lock_guard<std::mutex> lock(g_state.prefetchMutex);
+        // Una solicitud en vuelo reutiliza el despertar pendiente, pero el hilo
+        // comprueba targetIndex de nuevo al terminar cada decodificación.
+        g_state.prefetchTargetIndex = targetIndex;
+        if (g_state.prefetchRequested.exchange(true, std::memory_order_relaxed)) return;
+    }
     g_state.prefetchCV.notify_one();
 }
 
@@ -2753,7 +2861,7 @@ void PrefetchThreadFunc() {
     const HRESULT comHr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     while (g_state.prefetchRunning) {
         std::unique_lock<std::mutex> lock(g_state.prefetchMutex);
-        g_state.prefetchCV.wait_for(lock, std::chrono::milliseconds(500), [] {
+        g_state.prefetchCV.wait(lock, [] {
             return g_state.prefetchRequested.load() || !g_state.prefetchRunning.load();
         });
         if (!g_state.prefetchRunning) break;
@@ -2765,31 +2873,53 @@ void PrefetchThreadFunc() {
         const uint64_t generation = g_state.folderGeneration.load(std::memory_order_relaxed);
         const size_t count = ImageCount();
         if (count <= 1) continue;
-        
-        // Precargar ÚNICAMENTE 1 imagen siguiente para conservar RAM y 0% CPU
-        const size_t nextIdx = (targetIndex + 1) % count;
+
+        // Precargar siguiente y anterior respetando las peticiones más recientes.
+        // Si cambia la carpeta o la navegación mientras se decodifica, descartar
+        // el resultado en vez de llenar la caché con imágenes que ya no interesan.
+        auto prefetchOne = [&](size_t idx) {
+            if (!g_state.prefetchRunning) return;
+            if (generation != g_state.folderGeneration.load(std::memory_order_relaxed)) return;
+            {
+                std::lock_guard<std::mutex> requestLock(g_state.prefetchMutex);
+                if (g_state.prefetchRequested || g_state.prefetchTargetIndex != targetIndex) return;
+            }
+            const std::wstring filepath = ImagePathAt(idx);
+            if (filepath.empty() || GetExtensionLower(filepath) == L"gif" || IsInCache(filepath)) return;
+            if (!ValidateFileIntegrity(filepath)) return;
+
+            int width = 0, height = 0, channels = 0, autoRotate = 0;
+            bool hasAlpha = false, autoFlipH = false, autoFlipV = false;
+            std::wstring decoder;
+            // allowGdiPlus=false: GDI+ no es seguro entre hilos; el prefetch usa solo
+            // stb/WIC, y los formatos que requieren GDI+ se decodifican al navegar.
+            unsigned char* pixels = DecodeImageFile(filepath, width, height, channels, hasAlpha, autoRotate, autoFlipH, autoFlipV, decoder, nullptr, false, false);
+            if (!pixels) return;
+            bool requestStillCurrent = g_state.prefetchRunning &&
+                generation == g_state.folderGeneration.load(std::memory_order_relaxed);
+            {
+                std::lock_guard<std::mutex> requestLock(g_state.prefetchMutex);
+                requestStillCurrent = requestStillCurrent && !g_state.prefetchRequested &&
+                    g_state.prefetchTargetIndex == targetIndex;
+            }
+            if (!requestStillCurrent) {
+                FreePixels(pixels);
+                return;
+            }
+            AddToCache(filepath, pixels, width, height, channels, autoRotate, autoFlipH, autoFlipV, hasAlpha, decoder);
+
+            // Ceder CPU entre decodificaciones
+            std::this_thread::sleep_for(std::chrono::milliseconds(80));
+        };
+
+        prefetchOne((targetIndex + 1) % count);
         if (!g_state.prefetchRunning) break;
         if (generation != g_state.folderGeneration.load(std::memory_order_relaxed)) continue;
-        
-        const std::wstring filepath = ImagePathAt(nextIdx);
-        if (filepath.empty() || GetExtensionLower(filepath) == L"gif" || IsInCache(filepath)) continue;
-        if (!ValidateFileIntegrity(filepath)) continue;
-        
-        int width = 0, height = 0, channels = 0, autoRotate = 0;
-        bool hasAlpha = false, autoFlipH = false, autoFlipV = false;
-        std::wstring decoder;
-        // allowGdiPlus=false: GDI+ no es seguro entre hilos; el prefetch usa solo
-        // stb/WIC, y los formatos que requieren GDI+ se decodifican al navegar.
-        unsigned char* pixels = DecodeImageFile(filepath, width, height, channels, hasAlpha, autoRotate, autoFlipH, autoFlipV, decoder, nullptr, false, false);
-        if (!pixels) continue;
-        if (generation != g_state.folderGeneration.load(std::memory_order_relaxed)) {
-            FreePixels(pixels);
-            continue;
+        {
+            std::lock_guard<std::mutex> requestLock(g_state.prefetchMutex);
+            if (g_state.prefetchRequested || g_state.prefetchTargetIndex != targetIndex) continue;
         }
-        AddToCache(filepath, pixels, width, height, channels, autoRotate, autoFlipH, autoFlipV, hasAlpha, decoder);
-        
-        // Ceder CPU
-        std::this_thread::sleep_for(std::chrono::milliseconds(80));
+        prefetchOne((targetIndex + count - 1) % count);
     }
     if (SUCCEEDED(comHr)) CoUninitialize();
 }
@@ -3092,7 +3222,7 @@ void LayoutHud(const RECT& client) {
     };
 
     int totalItemsWidth = 0;
-    const int count = sizeof(items) / sizeof(items[0]);
+    const int count = static_cast<int>(sizeof(items) / sizeof(items[0]));
     for (int i = 0; i < count; ++i) totalItemsWidth += items[i].w + (i > 0 ? gap : 0);
 
     const int naturalDockWidth = totalItemsWidth + (paddingX * 2);
@@ -3109,8 +3239,9 @@ void LayoutHud(const RECT& client) {
 
     int curX = dockX + scaledPaddingX;
     const int curY = dockY + paddingY;
+    const int displayedItems = std::min(count, static_cast<int>(std::size(g_state.hud)));
 
-    for (int i = 0; i < count && g_state.hudCount < 12; ++i) {
+    for (int i = 0; i < displayedItems && g_state.hudCount < static_cast<int>(std::size(g_state.hud)); ++i) {
         HudItem& item = g_state.hud[g_state.hudCount++];
         item.id = items[i].id; item.label = items[i].label;
         const int itemWidth = std::max(28, static_cast<int>(items[i].w * scale + 0.5f));
@@ -3167,10 +3298,9 @@ void RenderHud(Graphics& graphics, const RECT& client) {
         const float osdY = 14.0f;
 
         RectF osdRect(osdX, osdY, osdW, osdH);
-        GraphicsPath osdPath;
-        AddRoundedRect(osdPath, osdRect, 8.0f);
-        graphics.FillPath(dc.osdBgBrush.get(), &osdPath);
-        graphics.DrawPath(dc.osdBorderPen.get(), &osdPath);
+        dc.EnsureOsdPath(osdRect);
+        graphics.FillPath(dc.osdBgBrush.get(), dc.osdPath.get());
+        graphics.DrawPath(dc.osdBorderPen.get(), dc.osdPath.get());
         graphics.DrawString(g_state.statusMessage.c_str(), -1, &font, osdRect, &format, dc.osdTextBrush.get());
     }
 
@@ -3401,8 +3531,14 @@ void RenderImage(const RECT* clipRect) {
         return;
     }
 
-    SolidBrush bgBrush(Color(255, GetRValue(BG_COLOR), GetGValue(BG_COLOR), GetBValue(BG_COLOR)));
-    graphics.FillRectangle(&bgBrush, 0, 0, rect.right, rect.bottom);
+    DockFrameCache& renderCache = g_dockCache;
+    if (renderCache.EnsureViewBackground()) {
+        graphics.FillRectangle(renderCache.viewBackgroundBrush.get(),
+                               0, 0, rect.right, rect.bottom);
+    } else {
+        SolidBrush fallback(Color(255, GetRValue(BG_COLOR), GetGValue(BG_COLOR), GetBValue(BG_COLOR)));
+        graphics.FillRectangle(&fallback, 0, 0, rect.right, rect.bottom);
+    }
 
     // Usar frame actual de GIF si está animado
     unsigned char* currentImageData = g_state.imageData;
@@ -3425,6 +3561,10 @@ void RenderImage(const RECT* clipRect) {
         GraphicsState bgState = graphics.Save();
         graphics.TranslateTransform(centerX, centerY);
         graphics.RotateTransform(static_cast<REAL>(g_state.currentRotation));
+        if (g_state.currentFlipH || g_state.currentFlipV) {
+            graphics.ScaleTransform(g_state.currentFlipH ? -1.0f : 1.0f,
+                                    g_state.currentFlipV ? -1.0f : 1.0f);
+        }
         graphics.TranslateTransform(-g_state.imageWidth * g_state.zoom * 0.5f,
                                     -g_state.imageHeight * g_state.zoom * 0.5f);
         DrawCheckerboard(graphics, 0.0f, 0.0f, g_state.imageWidth * g_state.zoom, g_state.imageHeight * g_state.zoom);
@@ -3563,14 +3703,15 @@ struct GpuState {
     ID2D1Bitmap* checkerTile = nullptr;
     ID2D1BitmapBrush* checkerBrush = nullptr;
 
-    // Bitmap de vídeo del fotograma actual + buffer de horneado reutilizable
+    // Bitmap y staging GPU reutilizable, alineado a 64 B para procesar efectos.
     ID2D1Bitmap* image = nullptr;
     unsigned char* staging = nullptr;
     size_t stagingBytes = 0;
 
     int lastUploadW = -1;
     int lastUploadH = -1;
-    std::wstring lastUploadPath;  // identidad del contenido: RUTA del archivo (NO la dirección del buffer)
+    uint64_t lastUploadGeneration = 0;
+    std::wstring lastUploadPath;  // identidad estable de la carga (ruta y generación, no una dirección de heap reutilizable)
     int lastUploadFrame = -1;     // índice de fotograma GIF subido
     int lastUploadEffects = 0;
     bool lastUploadAlpha = false;
@@ -3704,10 +3845,12 @@ static void GpuReleaseTargetAssets() {
     GpuSafeRelease(g_gpu.brushBg);
     g_gpu.lastUploadW = -1;
     g_gpu.lastUploadH = -1;
+    g_gpu.lastUploadGeneration = 0;
     g_gpu.lastUploadPath.clear();
     g_gpu.lastUploadFrame = -1;
     g_gpu.lastUploadEffects = 0;
     g_gpu.lastUploadAlpha = false;
+    g_gpu.lastUploadStride = 0;
     g_gpu.themeKey = 0;
 }
 
@@ -3838,8 +3981,23 @@ static bool GpuEnsureThemeAssets() {
     const DWORD key = GpuThemeKey();
     if (g_gpu.brushBg && g_gpu.themeKey == key) return true;
 
-    GpuReleaseTargetAssets();
-    g_gpu.themeKey = key;
+    // Los pinceles y el tablero dependen del tema, pero la textura de la foto
+    // no: se conserva el bitmap de vídeo y se evita volver a subir hasta 64 MB.
+    GpuSafeRelease(g_gpu.checkerBrush);
+    GpuSafeRelease(g_gpu.checkerTile);
+    GpuSafeRelease(g_gpu.brushOsdBorder);
+    GpuSafeRelease(g_gpu.brushOsdBg);
+    GpuSafeRelease(g_gpu.brushShadow);
+    GpuSafeRelease(g_gpu.brushTextOnAccent);
+    GpuSafeRelease(g_gpu.brushTextSecondary);
+    GpuSafeRelease(g_gpu.brushTextPrimary);
+    GpuSafeRelease(g_gpu.brushBtnActive);
+    GpuSafeRelease(g_gpu.brushBtnHot);
+    GpuSafeRelease(g_gpu.brushBtnNormal);
+    GpuSafeRelease(g_gpu.brushDockBorder);
+    GpuSafeRelease(g_gpu.brushDockBg);
+    GpuSafeRelease(g_gpu.brushBg);
+    g_gpu.themeKey = 0;
 
     const bool dark = g_state.darkModeDetected;
     ID2D1RenderTarget* rt = g_gpu.target;
@@ -3874,9 +4032,9 @@ static bool GpuEnsureThemeAssets() {
     ok = solid(GpuColorOf(osdBg), &g_gpu.brushOsdBg) && ok;
     ok = solid(GpuColorOf(osdBorder), &g_gpu.brushOsdBorder) && ok;
 
-    // Baldosa de ajedrez 32x32 (cuadros de 16) con los colores del tema.
-    // Mismo kernel y misma fase que el trazador GDI+, de modo que el fondo de
-    // transparencias se ve idéntico con GPU y sin ella.
+    // Baldosa 32x32 precalculada. En cambios de tema se actualiza solo el
+    // recurso de tablero; no se vuelve a recrear la textura del fotograma.
+    GpuSafeRelease(g_gpu.checkerTile);
     const int TILE = 32;
     alignas(64) std::array<uint32_t, 32 * 32> tileWords{};
     artpicst::FillCheckerTileBgra(tileWords.data(), static_cast<uint32_t>(TILE), 16u,
@@ -3982,6 +4140,13 @@ static bool GpuUpdateImage() {
     if (!g_gpu.target) return false;
     if (!g_state.imageData) {
         GpuSafeRelease(g_gpu.image);
+        g_gpu.lastUploadW = -1;
+        g_gpu.lastUploadH = -1;
+        g_gpu.lastUploadGeneration = 0;
+        g_gpu.lastUploadPath.clear();
+        g_gpu.lastUploadFrame = -1;
+        g_gpu.lastUploadEffects = 0;
+        g_gpu.lastUploadAlpha = false;
         return true;
     }
 
@@ -4020,11 +4185,10 @@ static bool GpuUpdateImage() {
         scale = 1.0f;
     }
 
-    // La clave compara dimensiones del BITMAP (bw, bh) más la escala: dado
-    // (bw, bh, scale, ruta, fotograma, efectos, alfa) el contenido subido queda
-    // determinado, así que dos estados con la misma clave son indistinguibles.
+    // Reutilizar la textura GPU si no cambió ningún componente del contenido.
     if (g_gpu.image && bw == g_gpu.lastUploadW && bh == g_gpu.lastUploadH &&
         scale == g_gpu.lastUploadScale &&
+        g_state.imageGeneration == g_gpu.lastUploadGeneration &&
         g_state.currentFilePath == g_gpu.lastUploadPath &&
         g_state.gif.current == g_gpu.lastUploadFrame &&
         effects == g_gpu.lastUploadEffects && alpha == g_gpu.lastUploadAlpha) {
@@ -4036,6 +4200,12 @@ static bool GpuUpdateImage() {
     // (BGRA sin premultiplicar) que ya trata la reducción de carga, y el
     // horneado posterior cuesta proporcionalmente menos píxeles.
     unsigned char* resampled = nullptr;
+    auto freeResampled = [&]() {
+        if (resampled) {
+            artpicst::AlignedPixelFree(resampled);
+            resampled = nullptr;
+        }
+    };
     if (bw != w || bh != h) {
         resampled = stbir_resize_uint8_srgb(src, w, h, 0, nullptr, bw, bh, 0, STBIR_BGRA);
         if (resampled) {
@@ -4047,8 +4217,23 @@ static bool GpuUpdateImage() {
             bw = w;
             bh = h;
             scale = 1.0f;
+            size_t fallbackStrideBytes = 0;
+            if (!artpicst::MulOverflow(static_cast<size_t>(bw), size_t{4}, fallbackStrideBytes) ||
+                fallbackStrideBytes > SIZE_MAX - (artpicst::kPixelAlignment - 1)) {
+                freeResampled();
+                return false;
+            }
+            alignedStrideBytes = (fallbackStrideBytes + (artpicst::kPixelAlignment - 1)) &
+                                 ~(artpicst::kPixelAlignment - 1);
+            if (alignedStrideBytes > MAXDWORD) {
+                freeResampled();
+                return false;
+            }
+            sourceStrideBytes = fallbackStrideBytes;
+            stride = static_cast<UINT>(alignedStrideBytes);
         }
     }
+
 
     // ¿Hay que transformar píxeles? Solo si hay efecto o transparencia real.
     unsigned char* uploadSrc = src;
@@ -4060,7 +4245,7 @@ static bool GpuUpdateImage() {
         }
     }
 
-    const UINT stride = static_cast<UINT>(bw) * 4u;
+    const UINT sourceStride = static_cast<UINT>(sourceStrideBytes);
     D2D1_SIZE_U size = D2D1::SizeU(static_cast<UINT>(bw), static_cast<UINT>(bh));
     if (!g_gpu.image) {
         HRESULT hr = g_gpu.target->CreateBitmap(
@@ -4070,9 +4255,11 @@ static bool GpuUpdateImage() {
             &g_gpu.image);
         if (FAILED(hr) || !g_gpu.image) {
             g_gpu.image = nullptr;
+            freeResampled();
             return false;
         }
-    } else if (bw != g_gpu.lastUploadW || bh != g_gpu.lastUploadH) {
+    } else if (bw != g_gpu.lastUploadW || bh != g_gpu.lastUploadH ||
+       ) {
         GpuSafeRelease(g_gpu.image);
         HRESULT hr = g_gpu.target->CreateBitmap(
             size, uploadSrc, stride,
@@ -4081,33 +4268,36 @@ static bool GpuUpdateImage() {
             &g_gpu.image);
         if (FAILED(hr) || !g_gpu.image) {
             g_gpu.image = nullptr;
+            freeResampled();
             return false;
         }
     } else {
         // Mismo tamaño: actualizar el contenido (fotogramas GIF, efectos)
         if (FAILED(g_gpu.image->CopyFromMemory(nullptr, uploadSrc, stride))) {
+            freeResampled();
             return false;
         }
     }
 
     // El buffer remuestreado ya no hace falta: el bitmap de vídeo tiene su
     // propia copia en memoria de vídeo.
-    if (resampled) {
-        artpicst::AlignedPixelFree(resampled);
-        resampled = nullptr;
-    }
+    freeResampled();
 
     g_gpu.lastUploadW = bw;
     g_gpu.lastUploadH = bh;
+    g_gpu.lastUploadGeneration = g_state.imageGeneration;
     g_gpu.lastUploadScale = scale;
     g_gpu.lastUploadPath = g_state.currentFilePath;
     g_gpu.lastUploadFrame = g_state.gif.current;
     g_gpu.lastUploadEffects = effects;
     g_gpu.lastUploadAlpha = alpha;
 
-    // El buffer de horneado solo hace falta mientras haya GIF animado (se sube
-    // un fotograma cada vez); en el resto, liberarlo para no retener RAM.
-    if (!g_state.gif.animated() && g_gpu.staging) {
+    // Mantener el buffer pequeño entre imágenes evita asignaciones en los
+    // efectos habituales; no inmovilizar decenas de MB cuando el renderizado de
+    // una foto grande ya terminó. La animación GIF sí reutiliza siempre el
+    // staging; GpuShutdown libera cualquier bloque retenido.
+    constexpr size_t kReusableStagingBudget = 8ull * 1024ull * 1024ull;
+    if (!g_state.gif.animated() && g_gpu.stagingBytes > kReusableStagingBudget) {
         artpicst::AlignedPixelFree(g_gpu.staging);
         g_gpu.staging = nullptr;
         g_gpu.stagingBytes = 0;
@@ -4621,8 +4811,14 @@ bool CopyImageToClipboard() {
 
     if (transformed) {
         transformedPixels = static_cast<unsigned char*>(artpicst::AlignedPixelAlloc(srcBytes));
-        scratch = static_cast<unsigned char*>(artpicst::AlignedPixelAlloc(srcBytes));
-        if (!transformedPixels || !scratch) {
+        // Una transformación aislada escribe directamente al resultado; solo se
+        // necesita un segundo frame completo al combinar giro con espejo.
+        const bool needsScratch = g_state.currentRotation != 0 &&
+                                  (g_state.currentFlipH || g_state.currentFlipV);
+        if (needsScratch) {
+            scratch = static_cast<unsigned char*>(artpicst::AlignedPixelAlloc(srcBytes));
+        }
+        if (!transformedPixels || (needsScratch && !scratch)) {
             artpicst::AlignedPixelFree(transformedPixels);
             artpicst::AlignedPixelFree(scratch);
             return false;
@@ -5531,11 +5727,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 InvalidateDockRegion();
             }
             if (g_state.isDragging) {
+                // FIX RENDIMIENTO: el arrastre invalidaba la ventana COMPLETA en
+                // cada WM_MOUSEMOVE (decenas por segundo): cada paso re-escalaba
+                // la foto 4K entera. Ahora se invalida solo la UNIÓN del rectángulo
+                // de pantalla que ocupaba la imagen antes y después del desplazamiento
+                // — la misma maquinaria de región sucia que ya usa la animación de zoom.
+                RECT prevImageRect{};
+                const bool hadImage = ComputeImageScreenRect(g_state.zoom, g_state.offsetX, g_state.offsetY, prevImageRect);
                 g_state.offsetX = g_state.dragStartOffsetX + static_cast<float>(x - g_state.dragStartX);
                 g_state.offsetY = g_state.dragStartOffsetY + static_cast<float>(y - g_state.dragStartY);
                 g_state.fitMode = false;
                 EnsureImageVisible();
-                InvalidateRect(hwnd, nullptr, FALSE);
+                InvalidateZoomStep(prevImageRect, hadImage);
             }
             return 0;
         }

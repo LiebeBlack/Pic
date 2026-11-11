@@ -32,6 +32,29 @@
 namespace artpicst {
 namespace exif {
 
+// Representación independiente de la API del renderizador para las ocho
+// orientaciones EXIF. Compartida por JPEG (stb), WIC y los tests.
+struct ImageTransform {
+    int rotation = 0;
+    bool flipH = false;
+    bool flipV = false;
+};
+
+// Descompone las orientaciones 1..8 en una rotación horaria y espejos.
+// Los valores ausentes, negativos o fuera del rango se tratan como normal.
+inline constexpr ImageTransform TransformFromOrientation(int orientation) noexcept {
+    switch (orientation) {
+        case 2: return {0, true, false};
+        case 3: return {180, false, false};
+        case 4: return {0, false, true};
+        case 5: return {90, true, false};
+        case 6: return {90, false, false};
+        case 7: return {270, true, false};
+        case 8: return {270, false, false};
+        default: return {};
+    }
+}
+
 // Lee la orientación EXIF (1..8) de un fichero JPEG. Siempre devuelve un
 // valor seguro: 1 ante cualquier duda.
 inline int ReadJpegOrientation(const wchar_t* filepath) {
