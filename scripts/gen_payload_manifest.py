@@ -118,7 +118,7 @@ def main() -> int:
     if missing:
         # No es un error fatal: las compilaciones de desarrollo no tienen
         # payload poblado. El instalador marcará esas entradas como no
-        // verificables y lo registrará en su log.
+        # verificables y lo registrará en su log.
         print(f"  AVISO: sin payload para: {', '.join(missing)} (hashes vacíos)")
     return 0
 
