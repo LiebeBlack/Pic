@@ -48,8 +48,8 @@ HEADER_TEMPLATE = """\
 
 #include <cstddef>
 
-namespace artpicst {
-namespace manifest {
+namespace artpicst {{
+namespace manifest {{
 
 struct PayloadEntry {{
     unsigned    resourceId;      // id RCDATA en artpicst_installer.rc
