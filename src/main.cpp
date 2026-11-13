@@ -3108,6 +3108,27 @@ static void InvalidateZoomStep(const RECT& prevImageRect, bool hadImage) {
     InvalidateRect(g_state.hwnd, &dirty, FALSE);
 }
 
+// Repinta solo la zona que ocupa la imagen cuando cambia su CONTENIDO pero no
+// su geometría (avance de fotogramas GIF). Antes se invalidaba la ventana
+// entera por cada frame: se re-rasterizaban HUD, OSD y bandas que no cambiaron.
+// Si no se puede calcular el rectángulo se invalida todo (comportamiento previo).
+static void InvalidateImageRegion() {
+    if (!g_state.hwnd) return;
+    RECT imageRect{};
+    if (!ComputeImageScreenRect(g_state.zoom, g_state.offsetX, g_state.offsetY, imageRect)) {
+        InvalidateRect(g_state.hwnd, nullptr, FALSE);
+        return;
+    }
+    RECT client{};
+    GetClientRect(g_state.hwnd, &client);
+    imageRect.left = std::max(imageRect.left, client.left);
+    imageRect.top = std::max(imageRect.top, client.top);
+    imageRect.right = std::min(imageRect.right, client.right);
+    imageRect.bottom = std::min(imageRect.bottom, client.bottom);
+    if (imageRect.right <= imageRect.left || imageRect.bottom <= imageRect.top) return;
+    InvalidateRect(g_state.hwnd, &imageRect, FALSE);
+}
+
 void ZoomAt(float factor, int pivotX, int pivotY) {
     if (!g_state.imageData || !g_state.hwnd) return;
     if (!(factor > 0.0f) || !std::isfinite(factor)) return;
@@ -5786,7 +5807,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     if (advance > frameCount) advance = frameCount;
                     g_state.gif.current = (g_state.gif.current + advance) % frameCount;
                     g_state.gifLastTick = now;
-                    InvalidateRect(hwnd, nullptr, FALSE);
+                    InvalidateImageRegion();
                     SetTimer(hwnd, TIMER_GIF, static_cast<UINT>(g_state.gif.delayAt(g_state.gif.current)), nullptr);
                 } else {
                     KillTimer(hwnd, TIMER_GIF);
