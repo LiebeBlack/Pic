@@ -1,9 +1,10 @@
 // ============================================================================
 // ARTPICST — Instalador / Desinstalador / Actualizador premium
 // ----------------------------------------------------------------------------
-// · Asistente GDI+ "pitch-black" (#000000 / #0A0A0A) con acentos neón
-//   (#00F0FF / #7000FF), ventana ampliada (880x620) con BARRA LATERAL de
-//   pasos (5 etapas), centrada y REDIMENSIONABLE.
+// · Asistente GDI+ con tema "Aurora Carbon" (grafito #0B0E11 + degradado
+//   menta->cielo #20E3B2->#2E9BFF, ver installer/ui_theme.hpp): ventana
+//   ampliada (880x620), centrada, REDIMENSIONABLE y SIN barra lateral — un
+//   stepper horizontal de etapas con progreso integrado ocupa la cabecera.
 // · Página "Destino": selector de carpeta nativo, espacio libre en disco,
 //   tamaño del payload y detección de instalaciones previas.
 // · Página "Completado": estadísticas reales (bytes instalados y accesos).
@@ -57,6 +58,7 @@
 #include <thread>
 
 #include "version.hpp"
+#include "ui_theme.hpp"
 
 #ifdef _MSC_VER
 #pragma comment(lib, "gdiplus.lib")
@@ -72,6 +74,7 @@
 #endif
 
 using namespace Gdiplus;
+using namespace artpicst::ui;
 using artpicst::CompareVersionTags;
 
 // ============================================================================
@@ -98,25 +101,9 @@ const wchar_t UNINSTALL_REG_KEY[] = L"Software\\Microsoft\\Windows\\CurrentVersi
 const wchar_t APP_URL[]        = L"https://github.com/LiebeBlack/Pic";
 
 // ============================================================================
-// Paleta "Midnight Sapphire" (azul noche profundo + zafiro -> violeta)
+// Paleta y primitivas de dibujo: installer/ui_theme.hpp (tema "Aurora Carbon",
+// compartido con el actualizador para que ambos binarios luzcan idénticos).
 // ============================================================================
-const Color COL_BG(255, 7, 11, 22);                    // #070B16 fondo principal
-const Color COL_PANEL(255, 12, 18, 34);                // #0C1222 paneles / encabezado
-const Color COL_PANEL_DEEP(255, 9, 14, 26);            // paneles hundidos (log, caja licencia)
-const Color COL_PANEL_BORDER(255, 27, 36, 58);
-const Color COL_ACCENT_A(255, 86, 160, 255);           // #56A0FF azul zafiro
-const Color COL_ACCENT_B(255, 165, 92, 255);           // #A55CFF violeta
-const Color COL_TEXT(255, 232, 238, 251);
-const Color COL_TEXT_SOFT(255, 158, 174, 205);
-const Color COL_TEXT_DIM(255, 106, 120, 150);
-const Color COL_BTN_GHOST(255, 20, 27, 44);
-const Color COL_BTN_GHOST_HOT(255, 31, 42, 66);
-const Color COL_BTN_GHOST_BORDER(255, 45, 58, 88);
-const Color COL_BTN_GHOST_BORDER_HOT(255, 86, 160, 255);
-const Color COL_SUCCESS(255, 64, 214, 156);
-const Color COL_ERROR(255, 255, 107, 107);
-const Color COL_WARN(255, 250, 190, 80);
-const Color COL_DISABLED_TEXT(255, 92, 100, 116);
 
 // Tamaño de diseño (unidades lógicas 96 DPI); la ventana se escala por g_scale
 // y es REDIMENSIONABLE entre 760x560 y tamaños arbitrarios.
@@ -126,10 +113,18 @@ const float MIN_DESIGN_W = 760.0f;
 const float MIN_DESIGN_H = 560.0f;
 float g_scale = 1.0f;
 
-// Barra lateral del rediseño: columna de pasos con logo y línea de acento.
-const float SIDEBAR_W = 208.0f;
-const float CONTENT_PAD = 28.0f;    // separación barra lateral <-> contenido
-const float RIGHT_MARGIN = 40.0f;   // margen derecho del contenido
+// Márgenes del nuevo diseño (sin barra lateral): el contenido ocupa todo el
+// ancho de la ventana entre estos márgenes.
+const float CONTENT_X = 48.0f;      // margen izquierdo del contenido
+const float RIGHT_MARGIN = 48.0f;   // margen derecho del contenido
+
+// Geometría de la página de trabajo. El scroll de la consola (WM_MOUSEWHEEL)
+// comparte estas constantes con DrawLogConsole para que ambos calculen las
+// mismas líneas visibles (antes literales mágicos duplicados).
+const float kLogTopY = 268.0f;      // borde superior de la consola de log
+const float kLogBottomGap = 76.0f;  // aire bajo la consola (texto de destino)
+const float kLogLineH = 17.0f;      // alto de línea de la consola
+const float kLogChromeH = 42.0f;    // cabecera (30) + margen inferior (12)
 
 // Estadísticas reales de la instalación (se muestran en "Completado").
 unsigned long long g_bytesDeployed = 0;
@@ -1433,81 +1428,8 @@ unsigned int GetDpiForSystemSafe() {
 }
 
 // ============================================================================
-// Dibujo: primitivas modernas (todo en unidades de diseño 96 DPI)
+// Tipografías del asistente (las primitivas de dibujo viven en ui_theme.hpp)
 // ============================================================================
-
-static void RoundPath(GraphicsPath& path, const RectF& rc, float radius) {
-    const float w = rc.Width;
-    const float h = rc.Height;
-    float rad = radius;
-    if (rad < 0.0f) rad = 0.0f;
-    const float maxRad = (std::min)(w, h) * 0.5f;
-    if (rad > maxRad) rad = maxRad;
-    const float d = rad * 2.0f;
-    path.Reset();
-    path.StartFigure();
-    path.AddArc(rc.X, rc.Y, d, d, 180.0f, 90.0f);
-    path.AddArc(rc.X + w - d, rc.Y, d, d, 270.0f, 90.0f);
-    path.AddArc(rc.X + w - d, rc.Y + h - d, d, d, 0.0f, 90.0f);
-    path.AddArc(rc.X, rc.Y + h - d, d, d, 90.0f, 90.0f);
-    path.CloseFigure();
-}
-
-static void FillRound(Graphics& g, const RectF& rc, float radius, const Color& fill) {
-    GraphicsPath path;
-    RoundPath(path, rc, radius);
-    SolidBrush brush(fill);
-    g.FillPath(&brush, &path);
-}
-
-static void FillRoundGradient(Graphics& g, const RectF& rc, float radius, const Color& c1, const Color& c2, bool vertical = false) {
-    GraphicsPath path;
-    RoundPath(path, rc, radius);
-    LinearGradientBrush brush(rc, c1, c2, vertical ? 90.0f : 0.0f);
-    g.FillPath(&brush, &path);
-}
-
-static void StrokeRound(Graphics& g, const RectF& rc, float radius, const Color& border, float width = 1.0f) {
-    GraphicsPath path;
-    RoundPath(path, rc, radius);
-    Pen pen(border, width);
-    g.DrawPath(&pen, &path);
-}
-
-static void DrawTextIn(Graphics& g, const wchar_t* text, const RectF& rc, const Font& font,
-                       const Color& color, bool centerH = true, bool centerV = true,
-                       StringTrimming trimming = StringTrimmingNone, bool noWrap = false) {
-    StringFormat format;
-    format.SetAlignment(centerH ? StringAlignmentCenter : StringAlignmentNear);
-    format.SetLineAlignment(centerV ? StringAlignmentCenter : StringAlignmentNear);
-    if (trimming != StringTrimmingNone) {
-        format.SetTrimming(trimming);
-        if (noWrap) format.SetFormatFlags(StringFormatFlagsNoWrap);
-    }
-    SolidBrush brush(color);
-    g.DrawString(text, -1, &font, rc, &format, &brush);
-}
-
-static void DrawCheckMark(Graphics& g, float x0, float y0, float x1, float y1, float x2, float y2, float width, const Color& color) {
-    Pen pen(color, width);
-    pen.SetStartCap(LineCapRound);
-    pen.SetEndCap(LineCapRound);
-    g.DrawLine(&pen, x0, y0, x1, y1);
-    g.DrawLine(&pen, x1, y1, x2, y2);
-}
-
-static void DrawCheckBox(Graphics& g, const RectF& rc, bool checked) {
-    if (checked) {
-        FillRoundGradient(g, rc, 5.0f, COL_ACCENT_A, COL_ACCENT_B);
-        DrawCheckMark(g, rc.X + rc.Width * 0.22f, rc.Y + rc.Height * 0.52f,
-                      rc.X + rc.Width * 0.42f, rc.Y + rc.Height * 0.72f,
-                      rc.X + rc.Width * 0.80f, rc.Y + rc.Height * 0.28f,
-                      2.0f, Color(255, 255, 255, 255));
-    } else {
-        FillRound(g, rc, 5.0f, Color(255, 12, 15, 21));
-        StrokeRound(g, rc, 5.0f, Color(255, 58, 68, 86), 1.0f);
-    }
-}
 
 struct Fonts {
     FontFamily family;
@@ -1542,40 +1464,104 @@ Fonts& SharedFonts() {
     return instance;
 }
 
-static void DrawLogo(Graphics& g, const Fonts& fonts, float cx, float cy, float size) {
-    const RectF tile(cx - size * 0.5f, cy - size * 0.5f, size, size);
-    FillRoundGradient(g, tile, size * 0.24f, COL_ACCENT_A, COL_ACCENT_B);
-    const RectF shine(tile.X, tile.Y, tile.Width, tile.Height * 0.5f);
-    FillRound(g, shine, size * 0.24f, Color(28, 255, 255, 255));
-    DrawTextIn(g, L"A", tile, fonts.fLogo, Color(255, 255, 255, 255), true, true);
-}
-
-// Fondo Midnight Sapphire con resplandores zafiro/violeta + barra superior.
+// Fondo "Aurora Carbon": degradado vertical sutil + resplandores aurora
+// (elipses translúcidas) que dan profundidad sin ruido, y barra de acento.
 static void DrawChrome(Graphics& g, const Fonts&, float W, float H) {
-    SolidBrush bg(COL_BG);
-    g.FillRectangle(&bg, 0.0f, 0.0f, W, H);
+    const RectF bg(0.0f, 0.0f, W, H);
+    LinearGradientBrush base(bg, Color(255, 13, 17, 21), Color(255, 8, 10, 13), 90.0f);
+    g.FillRectangle(&base, bg);
+    SolidBrush glowA(Color(22, 32, 227, 178));
+    g.FillEllipse(&glowA, W - 320.0f, -180.0f, 420.0f, 320.0f);
+    SolidBrush glowB(Color(16, 46, 155, 255));
+    g.FillEllipse(&glowB, W - 170.0f, -130.0f, 300.0f, 240.0f);
+    SolidBrush glowC(Color(12, 32, 227, 178));
+    g.FillEllipse(&glowC, -170.0f, H - 200.0f, 400.0f, 320.0f);
     const RectF topBar(0.0f, 0.0f, W, 3.0f);
     LinearGradientBrush accent(topBar, COL_ACCENT_A, COL_ACCENT_B, 0.0f);
     g.FillRectangle(&accent, topBar);
 }
 
-// Encabezado del área de contenido: banda #0A0A0A con título y subtítulo
-// (el logo y los pasos viven en la barra lateral del rediseño).
-static void DrawPageHeader(Graphics& g, const Fonts& fonts, float W, const wchar_t* subtitle) {
-    const RectF band(SIDEBAR_W, 3.0f, W - SIDEBAR_W, 52.0f);
-    SolidBrush bandBrush(COL_PANEL);
-    g.FillRectangle(&bandBrush, band);
-    const RectF hairline(band.X, band.Y + band.Height, band.Width, 1.0f);
-    SolidBrush hair(Gdiplus::Color(255, 24, 28, 38));
-    g.FillRectangle(&hair, hairline);
+// Índice del paso activo (definida más abajo; el stepper de la cabecera la
+// necesita y DrawPageHeader se dibuja antes).
+static int StepIndexForHeader();
 
-    RectF titleRect(band.X + CONTENT_PAD, band.Y + 8.0f, band.Width - CONTENT_PAD * 2.0f - 90.0f, 18.0f);
-    DrawTextIn(g, APP_NAME, titleRect, fonts.fLabel, COL_TEXT, false, true);
-    RectF subRect(band.X + CONTENT_PAD, band.Y + 28.0f, band.Width - CONTENT_PAD * 2.0f - 90.0f, 16.0f);
+// Encabezado del nuevo diseño (SIN barra lateral): marca a la izquierda,
+// stepper horizontal de etapas a la derecha y "Cancelar" en la esquina.
+// El tramo del stepper ya recorrido hace de progreso del asistente.
+static void DrawPageHeader(Graphics& g, const Fonts& fonts, float W, const wchar_t* subtitle) {
+    const RectF band(0.0f, 3.0f, W, 89.0f);
+    SolidBrush bandBrush(Color(255, 13, 17, 21));
+    g.FillRectangle(&bandBrush, band);
+
+    DrawLogoMark(g, fonts.fLogo, 70.0f, 47.0f, 44.0f);
+    RectF nameRect(102.0f, 26.0f, 300.0f, 22.0f);
+    DrawTextIn(g, APP_NAME, nameRect, fonts.fHeading, COL_TEXT, false, true);
+    RectF subRect(102.0f, 50.0f, 300.0f, 16.0f);
     DrawTextIn(g, subtitle, subRect, fonts.fTiny, COL_TEXT_DIM, false, true);
+
+    // --- Stepper horizontal de etapas (a la izquierda de "Cancelar") ------
+    struct SideStep { const wchar_t* label; int state; };   // 0 pendiente, 1 activo, 2 hecho
+    SideStep steps[5];
+    int count = 0;
+    const int idx = StepIndexForHeader();
+    if (g_state.mode == AppMode::Uninstall) {
+        steps[0] = { L"Bienvenida",   idx == 0 ? 1 : 2 };
+        steps[1] = { L"Confirmación", idx == 1 ? 1 : (idx > 1 ? 2 : 0) };
+        steps[2] = { L"Progreso",     idx == 2 ? 1 : (idx > 2 ? 2 : 0) };
+        steps[3] = { L"Completado",   idx == 3 ? 1 : 0 };
+        count = 4;
+    } else {
+        steps[0] = { L"Bienvenida",   idx == 0 ? 1 : 2 };
+        steps[1] = { L"Licencia",     idx == 1 ? 1 : (idx > 1 ? 2 : 0) };
+        steps[2] = { L"Destino",      idx == 2 ? 1 : (idx > 2 ? 2 : 0) };
+        steps[3] = { L"Instalación",  idx == 3 ? 1 : (idx > 3 ? 2 : 0) };
+        steps[4] = { L"Completado",   idx == 4 ? 1 : 0 };
+        count = 5;
+    }
+
+    const float trackY = 116.0f;
+    const float trackLeft = CONTENT_X + 64.0f;
+    const float trackRight = W - RIGHT_MARGIN - 132.0f;   // deja sitio a "Cancelar"
+    const float gap = (trackRight - trackLeft) / static_cast<float>(count - 1);
+
+    // Raíl base + tramo recorrido (progreso del asistente).
+    FillRound(g, RectF(trackLeft, trackY - 1.0f, trackRight - trackLeft, 2.0f), 1.0f,
+              Color(255, 38, 46, 55));
+    if (idx > 0) {
+        FillRoundGradient(g, RectF(trackLeft, trackY - 1.5f, gap * idx, 3.0f), 1.5f,
+                          COL_ACCENT_A, COL_ACCENT_B);
+    }
+
+    for (int i = 0; i < count; ++i) {
+        const float cx = trackLeft + gap * i;
+        const bool active = steps[i].state == 1;
+        const bool done = steps[i].state == 2;
+        const float dotR = active ? 8.0f : 6.5f;
+        const RectF dot(cx - dotR, trackY - dotR, dotR * 2.0f, dotR * 2.0f);
+        if (done) {
+            FillRoundGradient(g, dot, dotR, COL_ACCENT_A, COL_ACCENT_B);
+            DrawCheckMark(g, cx - 3.5f, trackY, cx - 1.0f, trackY + 2.5f, cx + 3.5f, trackY - 2.5f,
+                          1.6f, Color(255, 255, 255, 255));
+        } else if (active) {
+            FillRound(g, dot, dotR, Color(255, 13, 17, 21));
+            StrokeRound(g, dot, dotR, COL_ACCENT_A, 2.0f);
+            FillRound(g, RectF(cx - 2.5f, trackY - 2.5f, 5.0f, 5.0f), 2.5f, COL_ACCENT_A);
+        } else {
+            FillRound(g, dot, dotR, Color(255, 18, 22, 27));
+            StrokeRound(g, dot, dotR, Color(255, 42, 51, 61), 1.0f);
+        }
+        RectF labelRect(cx - 70.0f, trackY + 12.0f, 140.0f, 16.0f);
+        DrawTextIn(g, steps[i].label, labelRect, fonts.fTiny,
+                   active ? COL_TEXT : (done ? COL_TEXT_SOFT : COL_TEXT_DIM), true, true);
+    }
+
+    // Hairline de cierre de la cabecera.
+    const RectF hairline(0.0f, 150.0f, W, 1.0f);
+    SolidBrush hair(Color(255, 30, 38, 47));
+    g.FillRectangle(&hair, hairline);
 }
 
-// Índice del paso activo para la barra lateral (5 etapas en instalación,
+// Índice del paso activo para el stepper (5 etapas en instalación,
 // 4 en desinstalación: el modo cambia la numeración).
 static int StepIndexForHeader() {
     if (g_state.mode == AppMode::Uninstall) {
@@ -1598,104 +1584,34 @@ static int StepIndexForHeader() {
     return 0;
 }
 
-// Barra lateral del rediseño: logo, versión y lista de pasos con estado
-// (hecho = neón con marca, activo = anillo acento, pendiente = gris).
-static void DrawSidebar(Graphics& g, const Fonts& fonts, float W, float H) {
-    (void)W;
-    (void)H;
-    const RectF rail(0.0f, 3.0f, SIDEBAR_W, H);
-    SolidBrush railBrush(COL_PANEL);
-    g.FillRectangle(&railBrush, rail);
-    const RectF hair(SIDEBAR_W, 3.0f, 1.0f, H);
-    SolidBrush hairBrush(Color(255, 22, 26, 36));
-    g.FillRectangle(&hairBrush, hair);
 
-    DrawLogo(g, fonts, 42.0f, 48.0f, 34.0f);
-    RectF brandRect(66.0f, 34.0f, SIDEBAR_W - 74.0f, 16.0f);
-    DrawTextIn(g, APP_NAME, brandRect, fonts.fLabel, COL_TEXT, false, true);
-    RectF brandSub(66.0f, 52.0f, SIDEBAR_W - 74.0f, 14.0f);
-    const std::wstring brandText = (g_state.mode == AppMode::Uninstall)
-        ? std::wstring(L"Desinstalador")
-        : (g_state.mode == AppMode::Update
-               ? std::wstring(L"Actualización")
-               : std::wstring(L"Asistente v") + APP_VERSION);
-    DrawTextIn(g, brandText.c_str(), brandSub, fonts.fTiny, COL_TEXT_DIM, false, true);
 
-    struct SideStep { const wchar_t* label; int state; };   // 0 pendiente, 1 activo, 2 hecho
-    SideStep steps[5];
-    int count = 0;
-    const int idx = StepIndexForHeader();
-    if (g_state.mode == AppMode::Uninstall) {
-        steps[0] = { L"Bienvenida",   idx == 0 ? 1 : 2 };
-        steps[1] = { L"Confirmación", idx == 1 ? 1 : (idx > 1 ? 2 : 0) };
-        steps[2] = { L"Progreso",     idx == 2 ? 1 : (idx > 2 ? 2 : 0) };
-        steps[3] = { L"Completado",   idx == 3 ? 1 : 0 };
-        count = 4;
-    } else {
-        steps[0] = { L"Bienvenida",   idx == 0 ? 1 : 2 };
-        steps[1] = { L"Licencia",     idx == 1 ? 1 : (idx > 1 ? 2 : 0) };
-        steps[2] = { L"Destino",      idx == 2 ? 1 : (idx > 2 ? 2 : 0) };
-        steps[3] = { L"Instalación",  idx == 3 ? 1 : (idx > 3 ? 2 : 0) };
-        steps[4] = { L"Completado",   idx == 4 ? 1 : 0 };
-        count = 5;
-    }
-
-    float y = 132.0f;
-    for (int i = 0; i < count; ++i, y += 46.0f) {
-        const bool active = steps[i].state == 1;
-        const bool done = steps[i].state == 2;
-        const float dotR = 10.0f;
-        const RectF dot(30.0f, y - dotR, dotR * 2.0f, dotR * 2.0f);
-        wchar_t num[8] = {};
-        swprintf(num, 8, L"%d", i + 1);
-        if (done) {
-            FillRoundGradient(g, dot, dotR, COL_ACCENT_A, COL_ACCENT_B);
-            DrawCheckMark(g, 35.0f, y + 0.5f, 38.5f, y + 4.5f, 45.0f, y - 4.5f, 2.0f,
-                          Color(255, 255, 255, 255));
-        } else if (active) {
-            FillRound(g, dot, dotR, Color(255, 16, 20, 28));
-            StrokeRound(g, dot, dotR, COL_ACCENT_A, 2.0f);
-            RectF numRect(30.0f, y - dotR, dotR * 2.0f, dotR * 2.0f);
-            DrawTextIn(g, num, numRect, fonts.fTiny, COL_ACCENT_A, true, true);
-        } else {
-            FillRound(g, dot, dotR, Color(255, 18, 22, 30));
-            StrokeRound(g, dot, dotR, Color(255, 44, 52, 68), 1.0f);
-            RectF numRect(30.0f, y - dotR, dotR * 2.0f, dotR * 2.0f);
-            DrawTextIn(g, num, numRect, fonts.fTiny, COL_TEXT_DIM, true, true);
-        }
-        RectF labelRect(52.0f, y - 9.0f, SIDEBAR_W - 60.0f, 18.0f);
-        DrawTextIn(g, steps[i].label, labelRect, fonts.fSmall,
-                   active ? COL_TEXT : (done ? COL_TEXT_SOFT : COL_TEXT_DIM), false, true);
-        if (i + 1 < count) {
-            const RectF link(39.0f, y + dotR + 2.0f, 2.0f, 46.0f - dotR * 2.0f - 4.0f);
-            SolidBrush linkBrush(done ? Color(255, 40, 130, 150) : Color(255, 30, 36, 48));
-            g.FillRectangle(&linkBrush, link);
-        }
-    }
-}
-
-// Barra de progreso fluida con relleno degradado y línea de brillo.
+// Barra de progreso "Aurora": relleno degradado pill con brillo superior y
+// punto luminoso en el frente del relleno (sensación de flujo).
 static void DrawProgressBar(Graphics& g, const RectF& track, double pct) {
-    FillRound(g, track, 5.0f, Color(255, 18, 22, 30));
-    StrokeRound(g, track, 5.0f, Color(255, 36, 44, 58), 1.0f);
+    FillRound(g, track, track.Height * 0.5f, Color(255, 18, 22, 27));
+    StrokeRound(g, track, track.Height * 0.5f, Color(255, 38, 46, 55), 1.0f);
     if (pct > 0.0) {
         double fillW = track.Width * (pct / 100.0);
-        if (fillW < 2.0 && pct > 0.0) fillW = 2.0;
-        if (fillW > 1.0f) {
-            const RectF fill(track.X, track.Y, static_cast<float>(fillW), track.Height);
-            Region clip(fill);
-            g.SetClip(&clip);
-            FillRoundGradient(g, track, 5.0f, COL_ACCENT_A, COL_ACCENT_B);
-            const RectF glow(track.X, track.Y, static_cast<float>(fillW), 2.0f);
-            SolidBrush glowBrush(Color(90, 255, 255, 255));
-            g.FillRectangle(&glowBrush, glow);
-            g.ResetClip();
-        }
+        if (fillW < 2.0) fillW = 2.0;
+        const RectF fill(track.X, track.Y, static_cast<float>(fillW), track.Height);
+        Region clip(fill);
+        g.SetClip(&clip);
+        FillRoundGradient(g, track, track.Height * 0.5f, COL_ACCENT_A, COL_ACCENT_B);
+        const RectF shine(track.X + 2.0f, track.Y + 2.0f,
+                          static_cast<float>(fillW) - 4.0f, track.Height * 0.30f);
+        FillRound(g, shine, track.Height * 0.15f, Color(70, 255, 255, 255));
+        g.ResetClip();
+        // Punto luminoso al frente del relleno.
+        const float capR = track.Height * 0.42f;
+        FillRound(g, RectF(track.X + static_cast<float>(fillW) - capR,
+                           track.Y + (track.Height - capR * 2.0f) * 0.5f,
+                           capR * 2.0f, capR * 2.0f), capR, Color(120, 255, 255, 255));
     }
 }
 
 // ============================================================================
-// Consola de log central (panel #0A0A0A, autoscroll, scroll con rueda)
+// Consola de log central (panel hundido, autoscroll, scroll con rueda)
 // ============================================================================
 
 static void DrawLogConsole(Graphics& g, const Fonts& fonts, const RectF& rc) {
@@ -1706,10 +1622,12 @@ static void DrawLogConsole(Graphics& g, const Fonts& fonts, const RectF& rc) {
     // aquí solo el título — el reloj duplicado quedaba congelado entre
     // invalidaciones de la consola).
     RectF headLabel(rc.X + 16.0f, rc.Y + 10.0f, rc.Width - 32.0f, 14.0f);
-    DrawTextIn(g, L"CONSOLA DE INSTALACIÓN", headLabel, fonts.fLabel, COL_TEXT_DIM, false, true);
+    DrawTextIn(g, g_state.mode == AppMode::Uninstall ? L"CONSOLA DE DESINSTALACIÓN"
+                                                     : L"CONSOLA DE INSTALACIÓN",
+               headLabel, fonts.fLabel, COL_TEXT_DIM, false, true);
 
     const float padX = 16.0f;
-    const float lineH = 17.0f;
+    const float lineH = kLogLineH;
     const float listTop = rc.Y + 30.0f;
     const float listBottom = rc.Y + rc.Height - 12.0f;
     const int visible = static_cast<int>((listBottom - listTop) / lineH);
@@ -1782,28 +1700,28 @@ float DesignY(int physicalY) { return static_cast<float>(physicalY) / g_scale; }
 
 LayoutRects ComputeLayout(float W, float H) {
     LayoutRects r;
-    const float contentX = SIDEBAR_W + CONTENT_PAD;
+    const float contentX = CONTENT_X;
     const float contentRight = W - RIGHT_MARGIN;
     const float buttonH = 44.0f;
     const float buttonY = H - buttonH - 24.0f;
 
-    r.next = RectF(contentRight - 168.0f, buttonY, 168.0f, buttonH);
+    r.next = RectF(contentRight - 176.0f, buttonY, 176.0f, buttonH);
     r.back = RectF(contentX, buttonY, 124.0f, buttonH);
-    r.cancel = RectF(contentRight - 76.0f, 64.0f, 76.0f, 24.0f);   // bajo la banda del encabezado
-    r.browse = RectF(contentX, 158.0f, 118.0f, 30.0f);
-    r.work = RectF(contentX, 42.0f, contentRight - contentX, 104.0f);
-    r.time = RectF(contentX, 128.0f, 140.0f, 16.0f);
-    r.log = RectF(contentX, 152.0f, contentRight - contentX, H - 152.0f - 62.0f);
+    r.cancel = RectF(contentRight - 92.0f, 32.0f, 92.0f, 30.0f);   // esquina de la cabecera
+    r.browse = RectF(contentRight - 134.0f, 215.0f, 122.0f, 32.0f);   // dentro del panel de ruta
+    r.work = RectF(contentX, 156.0f, contentRight - contentX, 84.0f);   // título+estado+progreso
+    r.time = RectF(contentX, 242.0f, 140.0f, 18.0f);
+    r.log = RectF(contentX, kLogTopY, contentRight - contentX, H - kLogTopY - kLogBottomGap);
     {
         const float rowW = ((contentRight - contentX) - 12.0f) * 0.5f;
-        r.web = RectF(contentX, 312.0f, rowW, 36.0f);
-        r.check = RectF(contentX + rowW + 12.0f, 312.0f, rowW, 36.0f);
+        r.web = RectF(contentX, 428.0f, rowW, 36.0f);
+        r.check = RectF(contentX + rowW + 12.0f, 428.0f, rowW, 36.0f);
     }
 
     if (g_state.currentStep == WizardStep::License || g_state.currentStep == WizardStep::UninstallConfirm) {
-        const float rowH = 36.0f;
-        const float gap = 10.0f;
-        const float y0 = (g_state.currentStep == WizardStep::License) ? 312.0f : 272.0f;
+        const float rowH = 34.0f;
+        const float gap = 8.0f;
+        const float y0 = (g_state.currentStep == WizardStep::License) ? 404.0f : 372.0f;
         r.rowCount = (g_state.currentStep == WizardStep::License) ? 3 : 1;
         float y = y0;
         for (int i = 0; i < r.rowCount; ++i) {
@@ -1846,23 +1764,30 @@ int HoverZoneAt(const LayoutRects& r, float lx, float ly) {
 }
 
 static void DrawOptionRow(Graphics& g, const Fonts& fonts, const RectF& row, const wchar_t* label, bool value, bool hot) {
-    FillRound(g, row, 8.0f, hot ? Color(255, 24, 30, 42) : Color(255, 15, 18, 25));
-    StrokeRound(g, row, 8.0f, hot ? COL_BTN_GHOST_BORDER_HOT : COL_PANEL_BORDER, 1.0f);
-    const RectF boxRect(row.X + 12.0f, row.Y + (row.Height - 18.0f) * 0.5f, 18.0f, 18.0f);
+    const float radius = row.Height * 0.5f;
+    FillRound(g, row, radius, hot ? Color(255, 26, 33, 41) : Color(255, 16, 20, 25));
+    StrokeRound(g, row, radius, hot ? COL_BTN_GHOST_BORDER_HOT : COL_PANEL_BORDER, 1.0f);
+    const RectF boxRect(row.X + 14.0f, row.Y + (row.Height - 18.0f) * 0.5f, 18.0f, 18.0f);
     DrawCheckBox(g, boxRect, value);
-    RectF labelRect(row.X + 40.0f, row.Y, row.Width - 50.0f, row.Height);
+    RectF labelRect(row.X + 42.0f, row.Y, row.Width - 54.0f, row.Height);
     DrawTextIn(g, label, labelRect, fonts.fSmall, COL_TEXT, false, true);
 }
 
+// Botón primario "pill": degradado menta->cielo, halo translúcido detrás y
+// texto grafito (contraste real sobre acentos claros).
 static void DrawPrimaryButton(Graphics& g, const Fonts& fonts, const RectF& rc, const wchar_t* text, bool hot) {
-    FillRoundGradient(g, rc, 8.0f, COL_ACCENT_A, COL_ACCENT_B);
-    if (hot) FillRound(g, rc, 8.0f, Color(26, 255, 255, 255));
-    DrawTextIn(g, text, rc, fonts.fSmall, Color(255, 255, 255, 255), true, true);
+    const float radius = rc.Height * 0.5f;
+    const RectF halo(rc.X - 6.0f, rc.Y - 5.0f, rc.Width + 12.0f, rc.Height + 10.0f);
+    FillRound(g, halo, radius + 6.0f, Color(static_cast<BYTE>(hot ? 56 : 36), 32, 227, 178));
+    FillRoundGradient(g, rc, radius, COL_ACCENT_A, COL_ACCENT_B);
+    if (hot) FillRound(g, rc, radius, Color(30, 255, 255, 255));
+    DrawTextIn(g, text, rc, fonts.fSmall, Color(255, 10, 14, 17), true, true);
 }
 
 static void DrawGhostButton(Graphics& g, const Fonts& fonts, const RectF& rc, const wchar_t* text, bool hot) {
-    FillRound(g, rc, 8.0f, hot ? COL_BTN_GHOST_HOT : COL_BTN_GHOST);
-    StrokeRound(g, rc, 8.0f, hot ? COL_BTN_GHOST_BORDER_HOT : COL_BTN_GHOST_BORDER, 1.0f);
+    const float radius = rc.Height * 0.5f;
+    FillRound(g, rc, radius, hot ? COL_BTN_GHOST_HOT : COL_BTN_GHOST);
+    StrokeRound(g, rc, radius, hot ? COL_BTN_GHOST_BORDER_HOT : COL_BTN_GHOST_BORDER, 1.0f);
     DrawTextIn(g, text, rc, fonts.fSmall, hot ? COL_TEXT : COL_TEXT_SOFT, true, true);
 }
 
@@ -1872,20 +1797,22 @@ void RenderWelcome(Graphics& g, const Fonts& fonts, float W, float H, const Layo
     const float CW = layout.next.X + layout.next.Width - contentX;
     const float cx = contentX + CW * 0.5f;
 
-    DrawLogo(g, fonts, cx, 96.0f, 56.0f);
+    // Hero: logotipo con halo, nombre + versión y eslogan.
+    DrawLogoMark(g, fonts.fLogo, cx, 198.0f, 58.0f);
 
-    RectF nameRect(contentX, 138.0f, CW, 40.0f);
+    RectF nameRect(contentX, 236.0f, CW, 38.0f);
     std::wstring nameAndVersion = std::wstring(APP_NAME) + L"  v" + APP_VERSION;
     DrawTextIn(g, nameAndVersion.c_str(), nameRect, fonts.fTitle, COL_TEXT, true, false);
 
-    RectF tagRect(contentX, 182.0f, CW, 22.0f);
+    RectF tagRect(contentX, 278.0f, CW, 22.0f);
     DrawTextIn(g, L"Visor de imágenes premium para Windows — rápido, ligero y moderno",
                tagRect, fonts.fSmall, COL_TEXT_SOFT, true, true);
 
-    const float cardY = 226.0f;
+    // Tarjeta de características con viñetas de acento.
+    const float cardY = 312.0f;
     const RectF card(contentX, cardY, CW, 168.0f);
-    FillRound(g, card, 14.0f, COL_PANEL);
-    StrokeRound(g, card, 14.0f, COL_PANEL_BORDER, 1.0f);
+    FillRound(g, card, 16.0f, COL_PANEL);
+    StrokeRound(g, card, 16.0f, COL_PANEL_BORDER, 1.0f);
 
     const wchar_t* features[] = {
         L"Más de 30 formatos: PNG, WebP, HEIC, AVIF, GIF, RAW y más",
@@ -1904,7 +1831,7 @@ void RenderWelcome(Graphics& g, const Fonts& fonts, float W, float H, const Layo
         fy += 29.0f;
     }
 
-    RectF hint(contentX, H - 92.0f, CW, 18.0f);
+    RectF hint(contentX, 500.0f, CW, 18.0f);
     DrawTextIn(g, (g_machineWide
                        ? L"Se instalará para todos los usuarios (requiere administrador)."
                        : L"Se instalará para tu usuario, sin permisos de administrador."),
@@ -1918,30 +1845,31 @@ void RenderDestination(Graphics& g, const Fonts& fonts, float W, float H, const 
     const float contentX = layout.back.X;
     const float CW = layout.next.X + layout.next.Width - contentX;
 
-    RectF titleRect(contentX, 40.0f, CW, 30.0f);
+    RectF titleRect(contentX, 160.0f, CW, 30.0f);
     DrawTextIn(g, L"Carpeta de destino", titleRect, fonts.fHeading, COL_TEXT, true, true);
 
-    const RectF panel(contentX, 82.0f, CW, 60.0f);
-    FillRound(g, panel, 10.0f, COL_PANEL_DEEP);
-    StrokeRound(g, panel, 10.0f, COL_PANEL_BORDER, 1.0f);
-    RectF panelLabel(panel.X + 16.0f, panel.Y + 8.0f, panel.Width - 32.0f, 13.0f);
+    // Panel de ruta con el selector nativo integrado a la derecha.
+    const RectF panel(contentX, 200.0f, CW, 62.0f);
+    FillRound(g, panel, 12.0f, COL_PANEL_DEEP);
+    StrokeRound(g, panel, 12.0f, COL_PANEL_BORDER, 1.0f);
+    RectF panelLabel(panel.X + 16.0f, panel.Y + 8.0f, panel.Width - 160.0f, 13.0f);
     DrawTextIn(g, L"CARPETA DE INSTALACIÓN", panelLabel, fonts.fLabel, COL_TEXT_DIM, false, true);
-    RectF panelPath(panel.X + 16.0f, panel.Y + 28.0f, panel.Width - 32.0f, 22.0f);
+    RectF panelPath(panel.X + 16.0f, panel.Y + 30.0f, panel.Width - 160.0f, 22.0f);
     DrawTextIn(g, g_state.installPath.c_str(), panelPath, fonts.fSmall, COL_TEXT, false, true,
                StringTrimmingEllipsisCharacter, true);
 
     DrawGhostButton(g, fonts, layout.browse, L"Examinar...", g_state.hoverZone == HOVER_BROWSE);
 
     const float cardW = (CW - 14.0f) * 0.5f;
-    const float cardsY = 206.0f;
-    const RectF cardFree(contentX, cardsY, cardW, 74.0f);
-    const RectF cardSize(contentX + cardW + 14.0f, cardsY, cardW, 74.0f);
+    const float cardsY = 278.0f;
+    const RectF cardFree(contentX, cardsY, cardW, 76.0f);
+    const RectF cardSize(contentX + cardW + 14.0f, cardsY, cardW, 76.0f);
     auto drawCard = [&](const RectF& rc, const wchar_t* label, const std::wstring& value, const Color& valueColor) {
-        FillRound(g, rc, 10.0f, COL_PANEL);
-        StrokeRound(g, rc, 10.0f, COL_PANEL_BORDER, 1.0f);
-        RectF l(rc.X + 16.0f, rc.Y + 10.0f, rc.Width - 32.0f, 13.0f);
+        FillRound(g, rc, 12.0f, COL_PANEL);
+        StrokeRound(g, rc, 12.0f, COL_PANEL_BORDER, 1.0f);
+        RectF l(rc.X + 16.0f, rc.Y + 11.0f, rc.Width - 32.0f, 13.0f);
         DrawTextIn(g, label, l, fonts.fLabel, COL_TEXT_DIM, false, true);
-        RectF v(rc.X + 16.0f, rc.Y + 30.0f, rc.Width - 32.0f, 26.0f);
+        RectF v(rc.X + 16.0f, rc.Y + 32.0f, rc.Width - 32.0f, 26.0f);
         DrawTextIn(g, value.c_str(), v, fonts.fBody, valueColor, false, true,
                    StringTrimmingEllipsisCharacter, true);
     };
@@ -1952,11 +1880,11 @@ void RenderDestination(Graphics& g, const Fonts& fonts, float W, float H, const 
         : std::wstring(L"No incrustado (compilación de desarrollo)");
     drawCard(cardSize, L"TAMAÑO DE LA INSTALACIÓN", sizeText, COL_TEXT);
 
-    float infoY = cardsY + 90.0f;
+    float infoY = 370.0f;
     if (g_state.existingInstallFound) {
         const RectF info(contentX, infoY, CW, 52.0f);
-        FillRound(g, info, 10.0f, Color(255, 30, 24, 12));
-        StrokeRound(g, info, 10.0f, Color(255, 120, 92, 30), 1.0f);
+        FillRound(g, info, 12.0f, Color(255, 34, 27, 14));
+        StrokeRound(g, info, 12.0f, Color(255, 120, 92, 30), 1.0f);
         const float dotR = 4.0f;
         FillRound(g, RectF(info.X + 16.0f, info.Y + info.Height * 0.5f - dotR, dotR * 2.0f, dotR * 2.0f),
                   dotR, COL_WARN);
@@ -1968,11 +1896,11 @@ void RenderDestination(Graphics& g, const Fonts& fonts, float W, float H, const 
         infoY += 64.0f;
     }
 
-    RectF note(contentX, infoY + 8.0f, CW, 18.0f);
+    RectF note(contentX, infoY + 10.0f, CW, 18.0f);
     DrawTextIn(g, L"Recomendado: al menos 100 MB libres. ARTPICST no instala servicios ni procesos en segundo plano.",
                note, fonts.fTiny, COL_TEXT_DIM, false, true, StringTrimmingEllipsisCharacter, true);
 
-    RectF destRect(contentX, H - 78.0f, CW, 18.0f);
+    RectF destRect(contentX, H - 92.0f, CW, 18.0f);
     std::wstring dest = L"Se instalará en:  " + g_state.installPath;
     DrawTextIn(g, dest.c_str(), destRect, fonts.fTiny, COL_TEXT_DIM, false, true,
                StringTrimmingEllipsisCharacter, true);
@@ -1983,10 +1911,10 @@ void RenderLicense(Graphics& g, const Fonts& fonts, float W, float H, const Layo
     const float contentX = layout.back.X;
     const float CW = layout.next.X + layout.next.Width - contentX;
 
-    RectF titleRect(contentX, 40.0f, CW, 30.0f);
+    RectF titleRect(contentX, 160.0f, CW, 30.0f);
     DrawTextIn(g, L"Licencia y opciones", titleRect, fonts.fHeading, COL_TEXT, true, true);
 
-    const RectF box(contentX, 82.0f, CW, 200.0f);
+    const RectF box(contentX, 200.0f, CW, 176.0f);
     FillRound(g, box, 12.0f, COL_PANEL_DEEP);
     StrokeRound(g, box, 12.0f, COL_PANEL_BORDER, 1.0f);
 
@@ -2024,7 +1952,7 @@ void RenderLicense(Graphics& g, const Fonts& fonts, float W, float H, const Layo
     SolidBrush licenseBrush(Color(255, 168, 178, 194));
     g.DrawString(licenseText, -1, &licenseFont, textArea, &textFormat, &licenseBrush);
 
-    RectF optTitle(contentX, 294.0f, CW, 14.0f);
+    RectF optTitle(contentX, 388.0f, CW, 14.0f);
     DrawTextIn(g, L"OPCIONES DE INSTALACIÓN", optTitle, fonts.fLabel, COL_TEXT_DIM, false, true);
 
     struct OptionRow { const wchar_t* label; const bool* value; int hover; };
@@ -2038,7 +1966,7 @@ void RenderLicense(Graphics& g, const Fonts& fonts, float W, float H, const Layo
                       g_state.hoverZone == rows[i].hover);
     }
 
-    RectF destRect(contentX, H - 78.0f, CW, 18.0f);
+    RectF destRect(contentX, H - 92.0f, CW, 18.0f);
     std::wstring dest = L"Se instalará en:  " + g_state.installPath;
     DrawTextIn(g, dest.c_str(), destRect, fonts.fTiny, COL_TEXT_DIM, false, true,
                StringTrimmingEllipsisCharacter, true);
@@ -2051,7 +1979,7 @@ void RenderUninstallConfirm(Graphics& g, const Fonts& fonts, float W, float H, c
     const float CW = layout.next.X + layout.next.Width - contentX;
 
     const float r = 26.0f;
-    const float cy = 96.0f;
+    const float cy = 202.0f;
     const RectF ring(contentX + 4.0f, cy - r, r * 2.0f, r * 2.0f);
     GraphicsPath ringPath;
     RoundPath(ringPath, ring, r);
@@ -2060,14 +1988,14 @@ void RenderUninstallConfirm(Graphics& g, const Fonts& fonts, float W, float H, c
     Font bangFont(&fonts.family, 30.0f, FontStyleBold, UnitPixel);
     DrawTextIn(g, L"!", ring, bangFont, Color(255, 20, 20, 24), true, true);
 
-    RectF titleRect(contentX + 72.0f, 66.0f, CW - 72.0f, 30.0f);
+    RectF titleRect(contentX + 72.0f, 172.0f, CW - 72.0f, 30.0f);
     DrawTextIn(g, L"Desinstalar ARTPICST", titleRect, fonts.fHeading, COL_TEXT, false, true);
 
-    RectF subRect(contentX + 72.0f, 100.0f, CW - 72.0f, 20.0f);
+    RectF subRect(contentX + 72.0f, 206.0f, CW - 72.0f, 20.0f);
     DrawTextIn(g, L"El programa y sus componentes se eliminarán de este equipo.",
                subRect, fonts.fSmall, COL_TEXT_SOFT, false, true);
 
-    const RectF card(contentX, 146.0f, CW, 104.0f);
+    const RectF card(contentX, 246.0f, CW, 104.0f);
     FillRound(g, card, 12.0f, COL_PANEL);
     StrokeRound(g, card, 12.0f, COL_PANEL_BORDER, 1.0f);
 
@@ -2091,13 +2019,13 @@ void RenderUninstallConfirm(Graphics& g, const Fonts& fonts, float W, float H, c
                   L"Conservar configuraciones e historial del usuario",
                   g_state.keepUserConfig, g_state.hoverZone == HOVER_ROW_DESKTOP);
 
-    RectF hint(contentX, 336.0f, CW, 18.0f);
+    RectF hint(contentX, 424.0f, CW, 18.0f);
     DrawTextIn(g, L"Las imágenes del equipo y sus miniaturas no se verán afectadas.",
                hint, fonts.fTiny, COL_TEXT_DIM, false, true);
 }
 
 void RenderWorking(Graphics& g, const Fonts& fonts, float W, float H) {
-    const float contentX = SIDEBAR_W + CONTENT_PAD;
+    const float contentX = CONTENT_X;
     const float contentRight = W - RIGHT_MARGIN;
     const float CW = contentRight - contentX;
 
@@ -2105,45 +2033,47 @@ void RenderWorking(Graphics& g, const Fonts& fonts, float W, float H) {
         g_state.mode == AppMode::Uninstall ? L"Desinstalando ARTPICST" :
         g_state.mode == AppMode::Update    ? L"Actualizando ARTPICST" :
                                              L"Instalando ARTPICST";
-    RectF titleRect(contentX, 42.0f, CW, 30.0f);
+    RectF titleRect(contentX, 160.0f, CW, 30.0f);
     DrawTextIn(g, title, titleRect, fonts.fHeading, COL_TEXT, true, true);
 
-    RectF statusRect(contentX, 76.0f, CW, 20.0f);
+    RectF statusRect(contentX, 192.0f, CW, 20.0f);
     DrawTextIn(g, g_state.installStatus.c_str(), statusRect, fonts.fSmall, COL_TEXT_SOFT, true, true);
 
     // Barra de progreso REORGANIZADA: más alta (14 px), a todo el ancho del
-    // contenido, con porcentaje integrado a la derecha dentro de la banda.
-    const RectF track(contentX, 108.0f, CW, 14.0f);
+    // contenido, con porcentaje en chip oscuro a la derecha (legible tanto
+    // sobre el raíl como sobre el relleno degradado).
+    const RectF track(contentX, 222.0f, CW, 14.0f);
     DrawProgressBar(g, track, g_state.progressShown);
     wchar_t percentText[32];
     swprintf(percentText, 32, L"%.0f%%", g_state.progressShown);
-    RectF pctRect(track.X + track.Width - 64.0f, track.Y + 1.0f, 56.0f, 12.0f);
-    DrawTextIn(g, percentText, pctRect, fonts.fTiny, COL_TEXT, false, true,
+    const RectF pctRect(track.X + track.Width - 70.0f, track.Y, 64.0f, track.Height);
+    FillRound(g, pctRect, track.Height * 0.5f, Color(130, 10, 14, 17));
+    DrawTextIn(g, percentText, pctRect, fonts.fTiny, COL_TEXT, true, true,
                StringTrimmingNone, true);
 
     // Marca de tiempo a la izquierda, bajo la barra (la consola ya no
     // duplica el cronómetro en su cabecera).
     wchar_t timeText[32];
     swprintf(timeText, 32, L"%.1f s", g_state.workElapsed);
-    RectF timeRect(contentX, 128.0f, 120.0f, 16.0f);
+    RectF timeRect(contentX, 242.0f, 120.0f, 18.0f);
     DrawTextIn(g, timeText, timeRect, fonts.fTiny, COL_TEXT_DIM, false, true,
                StringTrimmingNone, true);
 
     // Consola de log: comienza más abajo y llega hasta los botones (todo el
     // alto extra ganado por eliminar la cabecera duplicada).
-    const RectF console(contentX, 152.0f, CW, H - 152.0f - 76.0f);
+    const RectF console(contentX, kLogTopY, CW, H - kLogTopY - kLogBottomGap);
     DrawLogConsole(g, fonts, console);
 
     std::wstring dest = (g_state.mode == AppMode::Uninstall)
         ? (L"Desinstalando de: " + g_state.uninstallInfoDir)
         : (L"Destino: " + g_state.installPath);
-    RectF destRect(contentX, H - 50.0f, CW, 18.0f);
+    RectF destRect(contentX, H - 56.0f, CW, 18.0f);
     DrawTextIn(g, dest.c_str(), destRect, fonts.fTiny, COL_TEXT_DIM, true, true,
                StringTrimmingEllipsisCharacter, true);
 }
 
 void RenderComplete(Graphics& g, const Fonts& fonts, float W) {
-    const float contentX = SIDEBAR_W + CONTENT_PAD;
+    const float contentX = CONTENT_X;
     const float contentRight = W - RIGHT_MARGIN;
     const float CW = contentRight - contentX;
     const float cx = contentX + CW * 0.5f;
@@ -2153,13 +2083,13 @@ void RenderComplete(Graphics& g, const Fonts& fonts, float W) {
         //     de verificación, evocando los finales de los instaladores
         //     clásicos pero con luz neón. ---
         const float r = 32.0f;
-        const float cy = 96.0f;
+        const float cy = 214.0f;
         for (int i = 3; i >= 1; --i) {
             const float rr = r + i * 7.0f;
             const RectF halo(cx - rr, cy - rr, rr * 2.0f, rr * 2.0f);
             GraphicsPath haloPath;
             RoundPath(haloPath, halo, rr);
-            SolidBrush haloBrush(Color(static_cast<BYTE>(20 - i * 5), 86, 160, 255));
+            SolidBrush haloBrush(Color(static_cast<BYTE>(20 - i * 5), 32, 227, 178));
             g.FillPath(&haloBrush, &haloPath);
         }
         const RectF ring(cx - r, cy - r, r * 2.0f, r * 2.0f);
@@ -2174,7 +2104,7 @@ void RenderComplete(Graphics& g, const Fonts& fonts, float W) {
             g_state.mode == AppMode::Uninstall ? L"Desinstalación completada" :
             g_state.mode == AppMode::Update    ? L"Actualización completada" :
                                                  L"Instalación completada";
-        RectF titleRect(contentX, 142.0f, CW, 38.0f);
+        RectF titleRect(contentX, 258.0f, CW, 38.0f);
         DrawTextIn(g, title, titleRect, fonts.fTitle, COL_TEXT, true, true);
 
         std::wstring sub;
@@ -2185,7 +2115,7 @@ void RenderComplete(Graphics& g, const Fonts& fonts, float W) {
         } else {
             sub = L"Gracias por elegir ARTPICST.  " + g_state.installPath;
         }
-        RectF subRect(contentX, 184.0f, CW, 22.0f);
+        RectF subRect(contentX, 300.0f, CW, 22.0f);
         DrawTextIn(g, sub.c_str(), subRect, fonts.fSmall, COL_TEXT_SOFT, true, true,
                    StringTrimmingEllipsisCharacter, true);
 
@@ -2198,7 +2128,7 @@ void RenderComplete(Graphics& g, const Fonts& fonts, float W) {
                 std::to_wstring(g_shortcutsCreated),
             };
             const float cardW = (CW - 24.0f) / 3.0f;
-            const float cardY = 222.0f;
+            const float cardY = 344.0f;
             for (int i = 0; i < 3; ++i) {
                 const RectF rc(contentX + i * (cardW + 12.0f), cardY, cardW, 64.0f);
                 FillRound(g, rc, 10.0f, COL_PANEL);
@@ -2213,13 +2143,13 @@ void RenderComplete(Graphics& g, const Fonts& fonts, float W) {
 
             // --- Fila final clásica: enlace a la web + casilla de ejecución. ---
             const float rowW = (CW - 12.0f) * 0.5f;
-            const RectF web(contentX, 312.0f, rowW, 36.0f);
-            const RectF check(contentX + rowW + 12.0f, 312.0f, rowW, 36.0f);
+            const RectF web(contentX, 428.0f, rowW, 36.0f);
+            const RectF check(contentX + rowW + 12.0f, 428.0f, rowW, 36.0f);
 
             FillRound(g, web, 9.0f, COL_BTN_GHOST);
             StrokeRound(g, web, 9.0f,
                         g_state.hoverZone == HOVER_WEB ? COL_BTN_GHOST_BORDER_HOT : COL_BTN_GHOST_BORDER, 1.0f);
-            Pen arrow(Color(255, 86, 160, 255), 1.6f);
+            Pen arrow(Color(255, 46, 155, 255), 1.6f);
             arrow.SetStartCap(LineCapRound);
             arrow.SetEndCap(LineCapRound);
             const float ax = web.X + 22.0f, ay = web.Y + web.Height * 0.5f;
@@ -2238,7 +2168,7 @@ void RenderComplete(Graphics& g, const Fonts& fonts, float W) {
         }
     } else {
         const float r = 34.0f;
-        const float cy = 118.0f;
+        const float cy = 226.0f;
         const RectF ring(cx - r, cy - r, r * 2.0f, r * 2.0f);
         GraphicsPath ringPath;
         RoundPath(ringPath, ring, r);
@@ -2247,10 +2177,10 @@ void RenderComplete(Graphics& g, const Fonts& fonts, float W) {
         Font bangFont(&fonts.family, 38.0f, FontStyleBold, UnitPixel);
         DrawTextIn(g, L"!", ring, bangFont, Color(255, 255, 255, 255), true, true);
 
-        RectF titleRect(contentX, 172.0f, CW, 40.0f);
+        RectF titleRect(contentX, 280.0f, CW, 40.0f);
         DrawTextIn(g, L"No se pudo completar la operación", titleRect, fonts.fTitle, COL_TEXT, true, true);
 
-        RectF msgRect(contentX, 218.0f, CW, 44.0f);
+        RectF msgRect(contentX, 326.0f, CW, 44.0f);
         DrawTextIn(g, g_state.failureReason.c_str(), msgRect, fonts.fSmall, COL_TEXT_SOFT, true, false);
     }
 }
@@ -2277,7 +2207,6 @@ void RenderWindow(Graphics& g, const RECT& client) {
     // caché global construida una sola vez.
     const Fonts& fonts = SharedFonts();
     DrawChrome(g, fonts, W, H);
-    DrawSidebar(g, fonts, W, H);
     DrawPageHeader(g, fonts, W, SubtitleForHeader());
 
     const LayoutRects layout = ComputeLayout(W, H);
@@ -2610,8 +2539,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             const int delta = GET_WHEEL_DELTA_WPARAM(wParam);
             RECT client{};
             GetClientRect(hwnd, &client);
-            const float consoleH = static_cast<float>(client.bottom) / g_scale - 152.0f - 76.0f;
-            const int visible = static_cast<int>((consoleH - 42.0f) / 17.0f);   // cabecera 30 + margen inferior 12
+            const float consoleH = static_cast<float>(client.bottom) / g_scale - kLogTopY - kLogBottomGap;
+            const int visible = static_cast<int>((consoleH - kLogChromeH) / kLogLineH);
             const int maxScroll = static_cast<int>(g_state.log.size()) > visible
                                       ? static_cast<int>(g_state.log.size()) - visible : 0;
             int scroll = g_state.logScroll - (delta > 0 ? 3 : -3);

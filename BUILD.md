@@ -275,8 +275,9 @@ Releases). El workflow de CI hace esto automáticamente junto al ZIP portable.
 - ✅ Consumo ultra-ligero de memoria (RAM ≤ 80 MB, CPU ~0%)
 
 ### Instalador (wizard GDI+ autocontenido)
-- ✅ Ventana 720×560 redimensionable y centrada, tema pitch-black (#000000 / #0A0A0A,
-  acentos #00F0FF / #7000FF), doble búfer y sin parpadeo
+- ✅ Ventana 880×620 redimensionable y centrada, tema "Aurora Carbon" (#0B0E11
+  grafito + degradado menta #20E3B2 → cielo #2E9BFF), stepper horizontal de
+  etapas con progreso integrado, doble búfer y sin parpadeo
 - ✅ Payload autocontenido: el `.exe` incrusta visor, updater, icono, `version.json`
   y README como recursos RCDATA — un único archivo distribuible
 - ✅ Instalación en hilo separado con `PostMessage`: la UI nunca se congela

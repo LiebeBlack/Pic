@@ -13,7 +13,7 @@ Visor de imágenes premium nativo para Windows (C++ / Win32) con interfaz acríl
 - **Fondo Ajedrezado Inteligente**: Visualización clara de transparencias en PNG, WebP, ICO y GIF
 - **Orientación EXIF Automática**: Detecta y corrige la orientación de fotos de móviles y cámaras
 - **Navegación Avanzada**: Flechas ↑↓ para zoom, ←→ para imágenes, arrastrar para pan
-- **Instalador Autocontenido**: Wizard GDI+ pitch-black con consola de log en vivo y payload incrustado (un solo `.exe` distribuible)
+- **Instalador Autocontenido**: Wizard GDI+ con tema "Aurora Carbon", stepper de etapas y consola de log en vivo; payload incrustado (un solo `.exe` distribuible)
 - **Auto-Actualizador Integrado**: Comprueba GitHub Releases una vez al día en segundo plano, notifica con una ventana flotante y actualiza con un clic (descarga verificada por SHA-256)
 - **Consumo Ultra-Ligero**: Huella de memoria optimizada (RAM < 80 MB, CPU ~0%)
 

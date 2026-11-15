@@ -11,8 +11,8 @@ archivo distribuible.
 
 | Elemento | Implementación |
 | --- | --- |
-| Wizard gráfico | GDI+ con doble búfer, ventana 720×560 centrada y redimensionable |
-| Tema | *Pitch black* (`#000000` / `#0A0A0A`, acentos `#00F0FF` / `#7000FF`) |
+| Wizard gráfico | GDI+ con doble búfer, ventana 880×620 centrada y redimensionable, con stepper horizontal de etapas |
+| Tema | *Aurora Carbon* (`#0B0E11` grafito, degradado menta `#20E3B2` → cielo `#2E9BFF`) compartido con el actualizador (`installer/ui_theme.hpp`) |
 | Payload | 5 recursos `RCDATA` (201..205): visor, icono, `version.json`, README, updater |
 | Progreso | 10 fases técnicas con consola de log en vivo y marca temporal `t = X.X s` |
 | Concurrencia | Instalación en hilo aparte con `PostMessage`: la UI nunca se congela |

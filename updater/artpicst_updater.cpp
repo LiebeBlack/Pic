@@ -66,6 +66,7 @@
 #endif
 
 #include "../installer/version.hpp"
+#include "../installer/ui_theme.hpp"
 
 // ----------------------------------------------------------------------------
 // Parser JSON de releases: FUENTE COMPARTIDA con el selftest y el fuzzer.
@@ -100,6 +101,7 @@ using artpicst::releasejson::ParseReleaseJson;
 #endif
 
 using namespace Gdiplus;
+using namespace artpicst::ui;
 
 // ============================================================================
 // Configuración y utilidades
@@ -772,24 +774,9 @@ void StartUpdateWorker(bool silentStart) {
 // ============================================================================
 // UI: notificación flotante minimalista y ventana de progreso (GDI+)
 // ============================================================================
-// Ventana compacta sin barra de título (460x258), OLED #000000, acentos neón.
-// Fases visibles: disponible (botones + checkbox) y descargando (barra real).
-
-const Color COL_BG(255, 0, 0, 0);
-const Color COL_PANEL(255, 10, 10, 10);
-const Color COL_BORDER(255, 36, 42, 54);
-const Color COL_ACCENT_A(255, 0, 240, 255);
-const Color COL_ACCENT_B(255, 112, 0, 255);
-const Color COL_TEXT(255, 236, 240, 246);
-const Color COL_TEXT_SOFT(255, 150, 160, 178);
-const Color COL_TEXT_DIM(255, 100, 110, 128);
-const Color COL_BTN(255, 18, 20, 26);
-const Color COL_BTN_HOT(255, 30, 34, 46);
-const Color COL_BTN_BORDER(255, 46, 54, 70);
-const Color COL_BTN_BORDER_HOT(255, 0, 240, 255);
-const Color COL_SUCCESS(255, 60, 230, 140);
-const Color COL_ERROR(255, 255, 84, 92);
-const Color COL_WARN(255, 255, 186, 70);
+// Ventana compacta sin barra de título (460x258), tema "Aurora Carbon" de
+// installer/ui_theme.hpp (mismo look que el instalador). Fases visibles:
+// disponible (botones + checkbox) y descargando (barra real).
 
 enum HoverZone { UZ_NONE = 0, UZ_INSTALL, UZ_LATER, UZ_CHECKBOX, UZ_CLOSE, UZ_RETRY, UZ_MORE };
 enum class UpdView { Checking, Ask, Downloading, Toast };
@@ -821,46 +808,8 @@ UiRects ComputeUiRects(float W, float H) {
     return r;
 }
 
-static void RoundPath(Gdiplus::GraphicsPath& path, const RectF& rc, float radius) {
-    const float d = radius * 2.0f;
-    path.Reset();
-    path.StartFigure();
-    path.AddArc(rc.X, rc.Y, d, d, 180.0f, 90.0f);
-    path.AddArc(rc.X + rc.Width - d, rc.Y, d, d, 270.0f, 90.0f);
-    path.AddArc(rc.X + rc.Width - d, rc.Y + rc.Height - d, d, d, 0.0f, 90.0f);
-    path.AddArc(rc.X, rc.Y + rc.Height - d, d, d, 90.0f, 90.0f);
-    path.CloseFigure();
-}
-
-static void FillRound(Graphics& g, const RectF& rc, float radius, const Color& c) {
-    GraphicsPath p; RoundPath(p, rc, radius);
-    SolidBrush b(c); g.FillPath(&b, &p);
-}
-
-static void FillRoundGradient(Graphics& g, const RectF& rc, float radius, const Color& a, const Color& b) {
-    GraphicsPath p; RoundPath(p, rc, radius);
-    LinearGradientBrush br(rc, a, b, 0.0f);
-    g.FillPath(&br, &p);
-}
-
-static void StrokeRound(Graphics& g, const RectF& rc, float radius, const Color& c, float w = 1.0f) {
-    GraphicsPath p; RoundPath(p, rc, radius);
-    Pen pen(c, w); g.DrawPath(&pen, &p);
-}
-
-static void DrawTextIn(Graphics& g, const wchar_t* text, const RectF& rc, const Font& font,
-                       const Color& color, bool centerH = true, bool centerV = true,
-                       StringTrimming trim = StringTrimmingNone, bool noWrap = false) {
-    StringFormat f;
-    f.SetAlignment(centerH ? StringAlignmentCenter : StringAlignmentNear);
-    f.SetLineAlignment(centerV ? StringAlignmentCenter : StringAlignmentNear);
-    if (trim != StringTrimmingNone) {
-        f.SetTrimming(trim);
-        if (noWrap) f.SetFormatFlags(StringFormatFlagsNoWrap);
-    }
-    SolidBrush b(color);
-    g.DrawString(text, -1, &font, rc, &f, &b);
-}
+// (Las primitivas de dibujo —RoundPath, FillRound, DrawTextIn, etc.— viven
+//  en installer/ui_theme.hpp, compartidas con el instalador.)
 
 struct Fonts {
     FontFamily family;
@@ -875,22 +824,22 @@ struct Fonts {
               label(&family, 10.0f, FontStyleBold, UnitPixel) {}
 };
 
-static void DrawLogoMark(Graphics& g, const Fonts& fonts, const RectF& tile) {
-    FillRoundGradient(g, tile, tile.Height * 0.28f, COL_ACCENT_A, COL_ACCENT_B);
-    DrawTextIn(g, L"A", tile, fonts.title, Color(255, 255, 255, 255), true, true);
-}
-
+// Barra de progreso fina con relleno degradado y punto luminoso al frente.
 static void DrawProgressBar(Graphics& g, const RectF& track, double pct) {
-    FillRound(g, track, 4.0f, Color(255, 18, 22, 30));
-    StrokeRound(g, track, 4.0f, Color(255, 36, 44, 58), 1.0f);
+    FillRound(g, track, track.Height * 0.5f, Color(255, 18, 22, 27));
+    StrokeRound(g, track, track.Height * 0.5f, Color(255, 38, 46, 55), 1.0f);
     if (pct > 0.0) {
         float fillW = static_cast<float>(track.Width * (pct / 100.0));
         if (fillW < 2.0f) fillW = 2.0f;
         const RectF fill(track.X, track.Y, fillW, track.Height);
         Region clip(fill);
         g.SetClip(&clip);
-        FillRoundGradient(g, track, 4.0f, COL_ACCENT_A, COL_ACCENT_B);
+        FillRoundGradient(g, track, track.Height * 0.5f, COL_ACCENT_A, COL_ACCENT_B);
         g.ResetClip();
+        const float capR = track.Height * 0.45f;
+        FillRound(g, RectF(track.X + fillW - capR,
+                           track.Y + (track.Height - capR * 2.0f) * 0.5f,
+                           capR * 2.0f, capR * 2.0f), capR, Color(120, 255, 255, 255));
     }
 }
 
@@ -899,9 +848,14 @@ std::chrono::steady_clock::time_point g_downloadStart;
 double g_downloadStartElapsed = 0.0;
 
 void RenderUpdater(Graphics& g, float W, float H) {
-    SolidBrush bg(COL_BG);
-    g.FillRectangle(&bg, 0.0f, 0.0f, W, H);
-    const RectF topBar(0.0f, 0.0f, W, 2.0f);
+    // Fondo "Aurora Carbon" (misma identidad que el instalador): degradado
+    // vertical, resplandor aurora y barra de acento superior.
+    const RectF bg(0.0f, 0.0f, W, H);
+    LinearGradientBrush base(bg, Color(255, 13, 17, 21), Color(255, 9, 12, 15), 90.0f);
+    g.FillRectangle(&base, bg);
+    SolidBrush glow(Color(20, 32, 227, 178));
+    g.FillEllipse(&glow, W - 200.0f, -110.0f, 270.0f, 210.0f);
+    const RectF topBar(0.0f, 0.0f, W, 3.0f);
     LinearGradientBrush accent(topBar, COL_ACCENT_A, COL_ACCENT_B, 0.0f);
     g.FillRectangle(&accent, topBar);
 
@@ -911,7 +865,7 @@ void RenderUpdater(Graphics& g, float W, float H) {
     if (g_view == UpdView::Toast) {
         // Toast breve: "Sin conexión" / "Ya estás en la última versión".
         const bool ok = g_upd.phase == UpdatePhase::Done;
-        DrawLogoMark(g, fonts, RectF(16.0f, H * 0.5f - 17.0f, 34.0f, 34.0f));
+        DrawLogoMark(g, fonts.title, 33.0f, H * 0.5f, 34.0f);
         const wchar_t* msg = ok ? L"ARTPICST ya está en la última versión."
                                 : L"No hay conexión con GitHub. Se intentará más tarde.";
         RectF msgRect(62.0f, 0.0f, W - 76.0f, H);
@@ -919,7 +873,7 @@ void RenderUpdater(Graphics& g, float W, float H) {
         return;
     }
 
-    DrawLogoMark(g, fonts, RectF(14.0f, 14.0f, 34.0f, 34.0f));
+    DrawLogoMark(g, fonts.title, 31.0f, 31.0f, 34.0f);
     RectF headRect(58.0f, 14.0f, W - 96.0f, 20.0f);
     DrawTextIn(g, g_view == UpdView::Checking ? L"COMPROBANDO ACTUALIZACIONES…" : L"ACTUALIZACIÓN DISPONIBLE",
                headRect, fonts.label, COL_ACCENT_A, false, true, StringTrimmingNone, true);
@@ -935,8 +889,9 @@ void RenderUpdater(Graphics& g, float W, float H) {
         DrawTextIn(g, L"Se comparará tu versión instalada con la última publicada.\nPuedes cerrar esta ventana sin esperar.",
                    hint, fonts.smallFont, COL_TEXT_SOFT, false, true);
         const RectF& c = r.close;
-        FillRound(g, c, 6.0f, g_hover == UZ_CLOSE ? COL_BTN_HOT : COL_BTN);
-        StrokeRound(g, c, 6.0f, g_hover == UZ_CLOSE ? COL_BTN_BORDER_HOT : COL_BTN_BORDER, 1.0f);
+        const float radius = c.Height * 0.5f;
+        FillRound(g, c, radius, g_hover == UZ_CLOSE ? COL_BTN_GHOST_HOT : COL_BTN_GHOST);
+        StrokeRound(g, c, radius, g_hover == UZ_CLOSE ? COL_BTN_GHOST_BORDER_HOT : COL_BTN_GHOST_BORDER, 1.0f);
         DrawTextIn(g, L"✕", c, fonts.smallFont, g_hover == UZ_CLOSE ? COL_TEXT : COL_TEXT_SOFT, true, true);
         return;
     }
@@ -974,8 +929,9 @@ void RenderUpdater(Graphics& g, float W, float H) {
 
         // Botón cerrar (X)
         const RectF& c = r.close;
-        FillRound(g, c, 6.0f, g_hover == UZ_CLOSE ? COL_BTN_HOT : COL_BTN);
-        StrokeRound(g, c, 6.0f, g_hover == UZ_CLOSE ? COL_BTN_BORDER_HOT : COL_BTN_BORDER, 1.0f);
+        const float radius = c.Height * 0.5f;
+        FillRound(g, c, radius, g_hover == UZ_CLOSE ? COL_BTN_GHOST_HOT : COL_BTN_GHOST);
+        StrokeRound(g, c, radius, g_hover == UZ_CLOSE ? COL_BTN_GHOST_BORDER_HOT : COL_BTN_GHOST_BORDER, 1.0f);
         DrawTextIn(g, L"✕", c, fonts.smallFont, COL_TEXT_SOFT, true, true);
         return;
     }
@@ -988,7 +944,10 @@ void RenderUpdater(Graphics& g, float W, float H) {
 
     // Changelog sincronizado: las notas de la RELEASE de GitHub viajan dentro
     // del propio JSON de la API (release.body) — siempre es el texto oficial.
-    RectF body(14.0f, 64.0f, W - 28.0f, 66.0f);
+    const RectF notesPanel(12.0f, 58.0f, W - 24.0f, 72.0f);
+    FillRound(g, notesPanel, 10.0f, COL_PANEL_DEEP);
+    StrokeRound(g, notesPanel, 10.0f, COL_PANEL_BORDER, 1.0f);
+    RectF body(22.0f, 62.0f, W - 44.0f, 64.0f);
     const std::wstring notes = CleanReleaseNotes(g_upd.release.body, 320);
     DrawTextIn(g, notes.c_str(), body, fonts.body, COL_TEXT_SOFT, false, false);
 
@@ -1007,29 +966,24 @@ void RenderUpdater(Graphics& g, float W, float H) {
     // Checkbox "Instalar actualizaciones automáticas en segundo plano en el futuro"
     const RectF cb = r.checkbox;
     const RectF box(cb.X, cb.Y + (cb.Height - 16.0f) * 0.5f, 16.0f, 16.0f);
-    if (g_autoInstallChecked) {
-        FillRoundGradient(g, box, 4.0f, COL_ACCENT_A, COL_ACCENT_B);
-        Pen pen(Color(255, 255, 255, 255), 1.6f);
-        pen.SetStartCap(LineCapRound); pen.SetEndCap(LineCapRound);
-        g.DrawLine(&pen, box.X + 3.5f, box.Y + 8.5f, box.X + 6.5f, box.Y + 11.5f);
-        g.DrawLine(&pen, box.X + 6.5f, box.Y + 11.5f, box.X + 12.5f, box.Y + 4.5f);
-    } else {
-        FillRound(g, box, 4.0f, Color(255, 12, 15, 21));
-        StrokeRound(g, box, 4.0f, Color(255, 58, 68, 86), 1.0f);
-    }
+    DrawCheckBox(g, box, g_autoInstallChecked);
     RectF cbText(cb.X + 24.0f, cb.Y, cb.Width - 24.0f, cb.Height);
     DrawTextIn(g, L"Instalar actualizaciones automáticas en segundo plano en el futuro",
                cbText, fonts.smallFont, COL_TEXT_DIM, false, true, StringTrimmingEllipsisCharacter, true);
 
-    // Botones
+    // Botones "pill": primario con halo de acento + fantasma.
     const RectF& inst = r.install;
-    FillRoundGradient(g, inst, 7.0f, COL_ACCENT_A, COL_ACCENT_B);
-    if (g_hover == UZ_INSTALL) FillRound(g, inst, 7.0f, Color(26, 255, 255, 255));
-    DrawTextIn(g, L"Instalar actualización ahora", inst, fonts.smallFont, Color(255, 255, 255, 255), true, true);
+    const float instRadius = inst.Height * 0.5f;
+    const RectF halo(inst.X - 5.0f, inst.Y - 4.0f, inst.Width + 10.0f, inst.Height + 8.0f);
+    FillRound(g, halo, instRadius + 5.0f, Color(static_cast<BYTE>(g_hover == UZ_INSTALL ? 56 : 36), 32, 227, 178));
+    FillRoundGradient(g, inst, instRadius, COL_ACCENT_A, COL_ACCENT_B);
+    if (g_hover == UZ_INSTALL) FillRound(g, inst, instRadius, Color(30, 255, 255, 255));
+    DrawTextIn(g, L"Instalar actualización ahora", inst, fonts.smallFont, Color(255, 10, 14, 17), true, true);
 
     const RectF& later = r.later;
-    FillRound(g, later, 7.0f, g_hover == UZ_LATER ? COL_BTN_HOT : COL_BTN);
-    StrokeRound(g, later, 7.0f, g_hover == UZ_LATER ? COL_BTN_BORDER_HOT : COL_BTN_BORDER, 1.0f);
+    const float laterRadius = later.Height * 0.5f;
+    FillRound(g, later, laterRadius, g_hover == UZ_LATER ? COL_BTN_GHOST_HOT : COL_BTN_GHOST);
+    StrokeRound(g, later, laterRadius, g_hover == UZ_LATER ? COL_BTN_GHOST_BORDER_HOT : COL_BTN_GHOST_BORDER, 1.0f);
     DrawTextIn(g, L"Recordar más tarde", later, fonts.smallFont, COL_TEXT_SOFT, true, true);
 }
 

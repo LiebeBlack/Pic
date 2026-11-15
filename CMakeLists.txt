@@ -100,6 +100,7 @@ add_executable(artpicst WIN32
 add_executable(artpicst_updater WIN32
     updater/artpicst_updater.cpp
     updater/artpicst_updater.rc
+    installer/ui_theme.hpp
 )
 target_include_directories(artpicst_updater PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/installer)
 
@@ -261,6 +262,7 @@ if(ARTPICST_PACKAGE)
     add_executable(artpicst_installer WIN32
         installer/artpicst_installer.cpp
         installer/version.hpp
+        installer/ui_theme.hpp
         installer/artpicst_installer.rc
     )
     target_include_directories(artpicst_installer PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/installer)
