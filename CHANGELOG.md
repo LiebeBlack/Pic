@@ -11,6 +11,16 @@
 - **Orientación EXIF aplicada explícitamente** (`IWICBitmapFlipRotator` sobre el
   tag 274, antes de convertir a PBGRA): WIC no la aplica sola y las fotos
   verticales de móvil se habrían visto tumbadas en miniaturas y vista previa.
+- **Recursos y latencia del camino crítico:** WIC decodifica **directamente del
+  `IStream`** del shell, sin copiar el archivo a un vector ni envolverlo en otro
+  stream en memoria (antes el pico de cada miniatura duplicaba el tamaño del
+  archivo); el búfer completo solo se materializa para el respaldo `stb_image`
+  (PSD, TGA, PNM, PIC) y ahí se reserva de una vez con `IStream::Stat`. La vista
+  previa se decodifica al **tamaño real del panel** (mínimo 256 px, tope 2048) y
+  solo se recodifica si el panel crece más de un 25 %, en lugar de decodificar
+  siempre 4096² (64 MB) para un panel de 300 px. Sin compilador en el equipo de
+  desarrollo no hay cifras medidas: son reducciones de trabajo y de pico de
+  memoria, no una mejora de velocidad medida.
 - **Registro sin secuestrar nada**: se escribe siempre en
   `SystemFileAssociations\<ext>\ShellEx\{GUID}` y, a nivel de extensión, solo si
   esa extensión no tenía ya un manejador, de modo que JPG/PNG/HEIC conservan el

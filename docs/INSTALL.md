@@ -54,8 +54,11 @@ ningún runtime externo: es un único archivo distribuible.
   `SystemFileAssociations\<ext>\ShellEx\{GUID}` y, a nivel de extensión, **solo
   si esa extensión no tenía ya un manejador**: JPG, PNG, HEIC… conservan el
   proveedor nativo de Windows; PSD, TGA, PNM, PIC y RAW sin códec ganan miniatura.
-- **Decodificación** con WIC (la escala ocurre dentro del decodificador, así una
-  foto de 50 MP no se materializa entera) y `stb_image` como respaldo.
+- **Decodificación** con WIC directamente del `IStream` del shell (la escala
+  ocurre dentro del decodificador, así una foto de 50 MP no se materializa
+  entera) y `stb_image` como respaldo, que solo entonces lee el archivo a
+  memoria. La vista previa se decodifica al tamaño real del panel (256–2048 px)
+  y se recodifica solo si el panel crece más de un 25 %.
 - **Orientación EXIF aplicada de verdad**: WIC entrega los píxeles tal cual están
   en el archivo, así que la etiqueta 274 se consulta y se aplica con
   `IWICBitmapFlipRotator`. Sin ese paso, toda foto vertical de móvil se vería

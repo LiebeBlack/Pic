@@ -22,8 +22,14 @@
 //     sin ese paso, una foto vertical de móvil se vería tumbada en el
 //     Explorador.
 //   · Si no hay códec WIC (PSD, TGA, PNM, PIC…), stb_image como respaldo.
-//   · Todo el trabajo se hace sobre un búfer en memoria acotado: un archivo
-//     corrupto o gigante no puede colgar el proceso anfitrión.
+//   · La miniatura se decodifica DIRECTAMENTE del IStream que entrega el shell:
+//     nunca se duplica el archivo en memoria (el búfer completo solo se
+//     materializa cuando hace falta el respaldo stb).
+//   · El panel de vista previa se decodifica al TAMAÑO REAL del panel (mínimo
+//     256 px, máximo 2048) y solo se recodifica si el panel crece más de un
+//     25 %: una vista previa de 300 px no reserva el mapa de 2048 px.
+//   · Todo el trabajo se hace sobre búferes acotados: un archivo corrupto o
+//     gigante no puede colgar el proceso anfitrión.
 //
 // SEGURIDAD Y AISLAMIENTO
 //   · El proveedor de miniaturas NO pide desactivar el aislamiento de proceso:
@@ -62,7 +68,6 @@
 
 #include <windows.h>
 #include <objbase.h>
-#include <shlwapi.h>
 #include <shobjidl.h>
 #include <propsys.h>
 #include <propidl.h>
@@ -84,7 +89,6 @@
 #include "stb_image.h"
 
 #ifdef _MSC_VER
-#pragma comment(lib, "shlwapi.lib")
 #pragma comment(lib, "windowscodecs.lib")
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "uuid.lib")
@@ -161,7 +165,10 @@ struct DecodedImage {
 // Tope de entrada: el visor acepta archivos grandes, pero un handler del shell
 // no debe reservar media memoria del sistema por una miniatura.
 constexpr size_t kMaxInputBytes = 512ull * 1024ull * 1024ull;
-constexpr UINT   kMaxPreviewSide = 4096;
+// Tope de la vista previa. El panel se decodifica a su tamaño real (ver
+// PreviewDecodeSide); este límite solo protege a un panel a pantalla completa en
+// 4K: 2048 px son 16 MB de mapa de bits, frente a los 64 MB de 4096.
+constexpr UINT   kMaxPreviewSide = 2048;
 
 // Lee el stream completo. El búfer es del handler y nunca se comparte.
 HRESULT ReadStreamToBuffer(IStream* stream, std::vector<BYTE>& out) {
@@ -170,6 +177,16 @@ HRESULT ReadStreamToBuffer(IStream* stream, std::vector<BYTE>& out) {
 
     LARGE_INTEGER zero{};
     stream->Seek(zero, STREAM_SEEK_SET, nullptr);   // best-effort: algunos streams no buscan
+
+    // El tamaño suele ser conocido: una reserva exacta evita las reubicaciones
+    // geométricas del vector (con archivos de decenas de MB, varias copias
+    // completas del búfer). Si no se conoce o supera el tope, no se reserva.
+    STATSTG stat{};
+    if (SUCCEEDED(stream->Stat(&stat, STATFLAG_NONAME)) &&
+        stat.cbSize.QuadPart > 0 &&
+        static_cast<unsigned long long>(stat.cbSize.QuadPart) <= kMaxInputBytes) {
+        out.reserve(static_cast<size_t>(stat.cbSize.QuadPart));
+    }
 
     BYTE chunk[64 * 1024];
     for (;;) {
@@ -250,12 +267,12 @@ WICBitmapTransformOptions TransformForOrientation(UINT orientation) {
     }
 }
 
-// Decodifica con WIC, escala EN EL DECODIFICADOR y deja la imagen ya orientada.
-HRESULT DecodeWithWic(const std::vector<BYTE>& bytes, UINT maxSide, DecodedImage& out) {
-    if (bytes.empty() || bytes.size() > 0xFFFFFFFFull) return E_INVALIDARG;
-
-    IStream* memStream = SHCreateMemStream(bytes.data(), static_cast<UINT>(bytes.size()));
-    if (!memStream) return E_OUTOFMEMORY;
+// Decodifica con WIC directamente del stream (escala EN EL DECODIFICADOR y deja
+// la imagen ya orientada). No hay copia intermedia del archivo: antes se leía
+// el archivo completo a un vector y se envolvía en otro stream en memoria, lo
+// que duplicaba el pico de memoria de cada miniatura.
+HRESULT DecodeWithWicStream(IStream* stream, UINT maxSide, DecodedImage& out) {
+    if (!stream) return E_POINTER;
 
     IWICImagingFactory*   factory   = nullptr;
     IWICBitmapDecoder*    decoder   = nullptr;
@@ -268,7 +285,7 @@ HRESULT DecodeWithWic(const std::vector<BYTE>& bytes, UINT maxSide, DecodedImage
                                   IID_IWICImagingFactory,
                                   reinterpret_cast<void**>(&factory));
     if (SUCCEEDED(hr)) {
-        hr = factory->CreateDecoderFromStream(memStream, nullptr,
+        hr = factory->CreateDecoderFromStream(stream, nullptr,
                                               WICDecodeMetadataCacheOnDemand, &decoder);
     }
     if (SUCCEEDED(hr)) hr = decoder->GetFrame(0, &frame);
@@ -334,7 +351,6 @@ HRESULT DecodeWithWic(const std::vector<BYTE>& bytes, UINT maxSide, DecodedImage
     if (frame)     frame->Release();
     if (decoder)   decoder->Release();
     if (factory)   factory->Release();
-    memStream->Release();
     return hr;
 }
 
@@ -441,14 +457,27 @@ void DownscaleBgra(const DecodedImage& src, UINT dstW, UINT dstH, std::vector<BY
 }
 
 // Decodifica al lado máximo indicado (0 = tamaño nativo acotado por kMaxPreviewSide).
-HRESULT DecodeImage(const std::vector<BYTE>& bytes, UINT maxSide, DecodedImage& out) {
+//
+// Ruta rápida y de mínima memoria: WIC lee del propio IStream del shell, que ya
+// está en memoria, sin copiarlo. El búfer completo solo se materializa cuando
+// WIC no reconoce el formato (PSD, TGA, PNM, PIC), que es el único caso en el
+// que stb_image lo necesita.
+HRESULT DecodeImage(IStream* stream, UINT maxSide, DecodedImage& out) {
     out.Clear();
+    if (!stream) return E_POINTER;
     if (maxSide == 0) maxSide = kMaxPreviewSide;
 
-    const HRESULT hr = DecodeWithWic(bytes, maxSide, out);
+    // El stream se reutiliza al redimensionar el panel: sin rebobinarlo, la
+    // segunda decodificación empezaría donde la dejó el decodificador anterior.
+    LARGE_INTEGER zero{};
+    stream->Seek(zero, STREAM_SEEK_SET, nullptr);
+
+    const HRESULT hr = DecodeWithWicStream(stream, maxSide, out);
     if (SUCCEEDED(hr) && out.width > 0 && out.height > 0) return S_OK;
 
     out.Clear();
+    std::vector<BYTE> bytes;
+    if (FAILED(ReadStreamToBuffer(stream, bytes))) return E_FAIL;
     // stb entrega la imagen ya reducida al lado pedido (ver DecodeWithStb).
     if (!DecodeWithStb(bytes, maxSide, out)) return E_FAIL;
     return S_OK;
@@ -520,12 +549,8 @@ public:
         UINT side = (cx == 0) ? 256u : cx;
         if (side > 1024u) side = 1024u;
 
-        std::vector<BYTE> bytes;
-        HRESULT hr = ReadStreamToBuffer(m_stream, bytes);
-        if (FAILED(hr)) return hr;
-
         DecodedImage image;
-        hr = DecodeImage(bytes, side, image);
+        const HRESULT hr = DecodeImage(m_stream, side, image);
         if (FAILED(hr) || image.width == 0 || image.height == 0) return E_FAIL;
 
         UINT outW = image.width, outH = image.height;
@@ -687,28 +712,8 @@ public:
 
     STDMETHODIMP DoPreview() override {
         if (!m_stream) return E_UNEXPECTED;
-
-        std::vector<BYTE> bytes;
-        HRESULT hr = ReadStreamToBuffer(m_stream, bytes);
+        const HRESULT hr = LoadBitmapForSide(PreviewDecodeSide());
         if (FAILED(hr)) return hr;
-
-        DecodedImage image;
-        hr = DecodeImage(bytes, kMaxPreviewSide, image);
-        if (FAILED(hr) || image.width == 0 || image.height == 0) return E_FAIL;
-
-        void* bits = nullptr;
-        HBITMAP bitmap = CreateDib32(image.width, image.height, &bits);
-        if (!bitmap || !bits) {
-            if (bitmap) DeleteObject(bitmap);
-            return E_OUTOFMEMORY;
-        }
-        memcpy(bits, image.pixels.data(), static_cast<size_t>(image.width) * image.height * 4u);
-
-        if (m_bitmap) DeleteObject(m_bitmap);
-        m_bitmap = bitmap;
-        m_bitmapW = image.width;
-        m_bitmapH = image.height;
-
         if (m_pane && IsWindow(m_pane)) InvalidateRect(m_pane, nullptr, FALSE);
         return S_OK;
     }
@@ -740,6 +745,15 @@ public:
     }
 
     STDMETHODIMP TranslateAccelerator(MSG*) override { return S_FALSE; }
+
+    // Llamado en WM_SIZE: si el panel creció más de un 25 % se vuelve a
+    // decodificar con más resolución. El crecimiento geométrico hace que, al
+    // arrastrar el divisor, haya como mucho un par de recodificaciones.
+    void OnPaneSize() {
+        if (!m_stream || !m_pane) return;
+        const UINT side = PreviewDecodeSide();
+        if (side > m_decodeSide + m_decodeSide / 4) LoadBitmapForSide(side);
+    }
 
     // --- Pintado del panel -------------------------------------------------
     void PaintPane(HWND hwnd) {
@@ -787,6 +801,47 @@ public:
     }
 
 private:
+    // Lado de decodificación: el tamaño REAL del panel, con un mínimo legible y
+    // el tope global. Decodificar siempre a 2048 px costaba 16 MB y decenas de
+    // milisegundos para una vista previa de 300 px.
+    UINT PreviewDecodeSide() const {
+        int w = 0, h = 0;
+        if (m_pane && IsWindow(m_pane)) {
+            RECT r{};
+            GetClientRect(m_pane, &r);
+            w = r.right - r.left;
+            h = r.bottom - r.top;
+        }
+        UINT side = static_cast<UINT>((std::max)(w, h));
+        if (side < 256u) side = 256u;   // el host aún no ha maquetado el panel
+        if (side > kMaxPreviewSide) side = kMaxPreviewSide;
+        return side;
+    }
+
+    // Decodifica el stream al lado pedido y sustituye el mapa de bits del panel.
+    HRESULT LoadBitmapForSide(UINT side) {
+        if (!m_stream) return E_UNEXPECTED;
+
+        DecodedImage image;
+        const HRESULT hr = DecodeImage(m_stream, side, image);
+        if (FAILED(hr) || image.width == 0 || image.height == 0) return E_FAIL;
+
+        void* bits = nullptr;
+        HBITMAP bitmap = CreateDib32(image.width, image.height, &bits);
+        if (!bitmap || !bits) {
+            if (bitmap) DeleteObject(bitmap);
+            return E_OUTOFMEMORY;
+        }
+        memcpy(bits, image.pixels.data(), static_cast<size_t>(image.width) * image.height * 4u);
+
+        if (m_bitmap) DeleteObject(m_bitmap);
+        m_bitmap = bitmap;
+        m_bitmapW = image.width;
+        m_bitmapH = image.height;
+        m_decodeSide = (std::max)(image.width, image.height);
+        return S_OK;
+    }
+
     void ApplyRect() {
         if (!m_pane) return;
         RECT parentClient{};
@@ -820,6 +875,7 @@ private:
     HBITMAP m_bitmap = nullptr;
     UINT m_bitmapW = 0;
     UINT m_bitmapH = 0;
+    UINT m_decodeSide = 0;   // lado con el que se decodificó el mapa actual
 };
 
 LRESULT CALLBACK PreviewPaneProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -837,7 +893,9 @@ LRESULT CALLBACK PreviewPaneProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             return 1;   // sin parpadeo: el fondo se pinta en WM_PAINT
         case WM_SIZE:
             // El host puede mover o redimensionar el panel sin volver a llamar a
-            // SetRect; sin esto el panel se quedaría con el fondo en blanco.
+            // SetRect: hay que repintar y, si el panel creció de verdad, volver a
+            // decodificar a mayor resolución (nunca dos veces el mismo tamaño).
+            if (self) self->OnPaneSize();
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         case WM_PAINT:
