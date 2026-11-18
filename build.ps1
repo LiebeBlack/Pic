@@ -3,7 +3,7 @@
 # ----------------------------------------------------------------------------
 # Este es el ÚNICO pipeline que define el orden de compilación del proyecto:
 #   recursos -> visor -> updater -> selftest -> tests -> gate de política SIMD
-#            -> payload -> instalador -> dist
+#            -> extensión de shell -> payload -> instalador -> dist
 #
 # Los demás scripts NO duplican este pipeline: o delegan aquí (build.bat) o son
 # variantes estrictamente del mismo orden para otro compilador (build_mingw.bat,
@@ -228,6 +228,11 @@ Write-Host "[2/5] Compilando visor (artpicst.exe)..." -ForegroundColor Yellow
 
 $viewerArgs = @(
     "/nologo", "/EHsc", "/std:c++latest", "/O2", "/Ob3", "/Oi", "/GL", "/Gy", "/guard:cf",
+    # Tuning de código para el equipo de desarrollo (12th Gen Intel Core i5-12400):
+    # /favor:INTEL64 orienta la programación de instrucciones al núcleo Intel
+    # (no cambia el baseline SIMD ni emite AVX), /Gw optimiza los datos
+    # globales con LTCG y /Zc:inline elimina COMDAT no referenciados.
+    "/favor:INTEL64", "/Gw", "/Zc:inline",
     $SIMD_FLAG, $SIMD_DEFINE,
     "/utf-8", "/W4", "/permissive-", "/wd4324", "/I.", "/Iinclude",
     "/DUNICODE", "/D_UNICODE", "/DNOMINMAX", "/DWIN32_LEAN_AND_MEAN", "/DSTBI_WINDOWS_UTF8",
@@ -251,6 +256,7 @@ Write-Host "[3/5] Compilando updater (artpicst_updater.exe)..." -ForegroundColor
 Push-Location updater
 $updaterArgs = @(
     "/nologo", "/EHsc", "/std:c++latest", "/O2", "/Ob3", "/Oi", "/guard:cf",
+    "/favor:INTEL64", "/Zc:inline",
     $SIMD_FLAG, $SIMD_DEFINE,
     "/utf-8", "/W4", "/permissive-", "/wd4324", "/I.", "/I..\installer",
     "/DUNICODE", "/D_UNICODE", "/DNOMINMAX", "/DWIN32_LEAN_AND_MEAN",
@@ -314,6 +320,31 @@ if ($Bench) {
 }
 
 # ---------------------------------------------------------------------------
+# [3d/5] Extensión de shell (miniaturas y vista previa del Explorador)
+# ---------------------------------------------------------------------------
+# DLL COM en proceso con IThumbnailProvider + IPreviewHandler. Se compila antes
+# del payload porque el .rc del instalador la incrusta como RCDATA 206.
+Write-Host "[3d/5] Compilando extensión de shell (artpicst_shell.dll)..." -ForegroundColor Yellow
+
+$shellArgs = @(
+    "/nologo", "/EHsc", "/std:c++latest", "/O2", "/Ob3", "/Oi", "/guard:cf",
+    "/favor:INTEL64", "/Zc:inline",
+    $SIMD_FLAG, $SIMD_DEFINE,
+    "/utf-8", "/W4", "/permissive-", "/wd4324", "/Iinclude",
+    "/DUNICODE", "/D_UNICODE", "/DNOMINMAX", "/DWIN32_LEAN_AND_MEAN",
+    "/D_WIN32_WINNT=0x0601", "/D_CRT_SECURE_NO_WARNINGS",
+    "/LD", "/Fe:build\artpicst_shell.dll", "shell\artpicst_shell.cpp",
+    "/link", "/DEF:shell\artpicst_shell.def",
+    "shlwapi.lib", "windowscodecs.lib", "ole32.lib", "uuid.lib", "user32.lib",
+    "gdi32.lib", "msimg32.lib", "advapi32.lib",
+    "/OPT:REF", "/OPT:ICF",
+    "/GUARD:CF", "/DYNAMICBASE", "/HIGHENTROPYVA", "/NXCOMPAT"
+)
+if ((Invoke-Tool "cl" $shellArgs) -ne 0) {
+    Fail "Error compilando la extensión de shell (artpicst_shell.dll)."
+}
+
+# ---------------------------------------------------------------------------
 # [4/5] Payload autocontenido (resources/app/ para el instalador)
 # ---------------------------------------------------------------------------
 Write-Host "[4/5] Preparando payload autocontenido (resources/app/)..." -ForegroundColor Yellow
@@ -335,6 +366,7 @@ if ($installerResExit -ne 0) {
 }
 $installerArgs = @(
     "/nologo", "/EHsc", "/std:c++latest", "/O2", "/Ob3", "/Oi", "/guard:cf",
+    "/favor:INTEL64", "/Zc:inline",
     $SIMD_FLAG, $SIMD_DEFINE,
     "/utf-8", "/W4", "/permissive-", "/wd4324", "/I.", "/I..\include",
     "/DUNICODE", "/D_UNICODE", "/DNOMINMAX", "/DWIN32_LEAN_AND_MEAN",

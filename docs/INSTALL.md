@@ -1,9 +1,9 @@
 # ARTPICST — Instalador, distribución y desinstalación
 
 El instalador es un **ejecutable autocontenido**: `artpicst-installer.exe`
-incrusta el visor, el auto-actualizador, el icono, `version.json` y el README como
-recursos `RCDATA`. No necesita NSIS, WiX ni ningún runtime externo: es un único
-archivo distribuible.
+incrusta el visor, el auto-actualizador, la extensión de shell (`artpicst_shell.dll`),
+el icono, `version.json` y el README como recursos `RCDATA`. No necesita NSIS, WiX ni
+ningún runtime externo: es un único archivo distribuible.
 
 ---
 
@@ -13,8 +13,8 @@ archivo distribuible.
 | --- | --- |
 | Wizard gráfico | GDI+ con doble búfer, ventana 880×620 centrada y redimensionable, con stepper horizontal de etapas |
 | Tema | *Aurora Carbon* (`#0B0E11` grafito, degradado menta `#20E3B2` → cielo `#2E9BFF`) compartido con el actualizador (`installer/ui_theme.hpp`) |
-| Payload | 5 recursos `RCDATA` (201..205): visor, icono, `version.json`, README, updater |
-| Progreso | 10 fases técnicas con consola de log en vivo y marca temporal `t = X.X s` |
+| Payload | 6 recursos `RCDATA` (201..206): visor, icono, `version.json`, README, updater y extensión de shell |
+| Progreso | 11 fases técnicas con consola de log en vivo y marca temporal `t = X.X s` |
 | Concurrencia | Instalación en hilo aparte con `PostMessage`: la UI nunca se congela |
 | Elevación | Manifiesto `requireAdministrator` + relanzado con `runas`; si se rechaza, degrada a instalación por usuario |
 | Reversión | Rollback automático si una fase falla a medias |
@@ -33,7 +33,39 @@ archivo distribuible.
 8. Registro del desinstalador (`Uninstall\ARTPICST`, `App Paths`, ProgID,
    `RegisteredApplications`).
 9. Registro de `EstimatedSize` y metadatos para «Aplicaciones instaladas».
-10. Verificación final y limpieza.
+10. Activación de las miniaturas y la vista previa del Explorador
+    (`artpicst_shell.dll`).
+11. Verificación final y limpieza.
+
+### Integración con el Explorador (miniaturas y vista previa)
+
+`artpicst_shell.dll` es un servidor COM en proceso con dos manejadores:
+
+| Manejador | Interfaz | Efecto |
+| --- | --- | --- |
+| Miniaturas | `IThumbnailProvider` | Iconos grandes, Mosaicos y Contenido muestran la imagen real, con transparencia y relación de aspecto |
+| Vista previa | `IPreviewHandler` | Panel de vista previa del Explorador (Alt+P): imagen centrada y escalada con suavizado HALFTONE |
+
+- **Registro con la raíz correcta.** El instalador llama a los exports propios
+  del DLL (`ArtpicstRegisterShell` / `ArtpicstUnregisterShell`) con HKLM si se
+  instala para todos los usuarios y con HKCU si es una instalación por usuario.
+  No se usa `regsvr32`, que siempre escribe en HKLM.
+- **Registro aditivo.** Se escribe siempre en
+  `SystemFileAssociations\<ext>\ShellEx\{GUID}` y, a nivel de extensión, **solo
+  si esa extensión no tenía ya un manejador**: JPG, PNG, HEIC… conservan el
+  proveedor nativo de Windows; PSD, TGA, PNM, PIC y RAW sin códec ganan miniatura.
+- **Decodificación** con WIC (la escala ocurre dentro del decodificador, así una
+  foto de 50 MP no se materializa entera) y `stb_image` como respaldo.
+- **Orientación EXIF aplicada de verdad**: WIC entrega los píxeles tal cual están
+  en el archivo, así que la etiqueta 274 se consulta y se aplica con
+  `IWICBitmapFlipRotator`. Sin ese paso, toda foto vertical de móvil se vería
+  tumbada tanto en la miniatura como en la vista previa.
+- **Desinstalación limpia.** Se llama al export de baja y además se retiran las
+  claves propias por si el DLL ya no estaba; una asociación escrita por otro
+  visor **no se toca**. El proveedor de miniaturas no pide desactivar el
+  aislamiento de proceso: el Explorador puede ejecutarlo aislado.
+- Si el registro está bloqueado, la instalación continúa con un aviso en la
+  consola: la aplicación sigue siendo válida sin miniaturas del Explorador.
 
 ---
 
@@ -114,7 +146,7 @@ En modo silencioso no se muestra ninguna ventana; el resultado se comunica
 ## 6. Desinstalación limpia
 
 El desinstalador es el propio instalador (`--uninstall`) y muestra un wizard
-gráfico con la misma estética (10 fases). Elimina:
+gráfico con la misma estética (6 etapas, 14 s). Elimina:
 
 1. Accesos directos del Escritorio y del Menú Inicio (perfil propio y *Todos los
    usuarios*).
@@ -126,11 +158,20 @@ gráfico con la misma estética (10 fases). Elimina:
 5. **El propio ejecutable en uso**: se mueve a `%TEMP%` y se programa su borrado
    final junto con el directorio (`rd /s /q`), con `SHChangeNotify` para refrescar
    el shell.
+6. **La caché de actualizaciones** (`%LOCALAPPDATA%\ARTPICST\updates`) y, si no
+   se conserva la configuración, el resto de datos de usuario.
+
+**Caché de actualizaciones.** `%LOCALAPPDATA%\ARTPICST\updates` (instaladores
+descargados por el auto-actualizador) se elimina **siempre**, conserve o no la
+configuración: son decenas de MB de descargas ya no necesarias.
 
 **Conservación opcional.** El wizard permite conservar la configuración del
-usuario; en ese caso no se elimina `%LOCALAPPDATA%\ARTPICST`, que contiene
-preferencias y el log de diagnóstico (`artpicst.log`, con rotación a
-`artpicst.log.1` al superar 1 MB).
+usuario (marcada por defecto). En ese caso no se elimina
+`%LOCALAPPDATA%\ARTPICST`, que contiene preferencias y el log de diagnóstico
+(`artpicst.log`, con rotación a `artpicst.log.1` al superar 1 MB), y en el
+registro se conserva `Software\ARTPICST` (solo se retiran `InstallDir` y
+`Version`). Si se desmarca, se elimina también esa carpeta y el árbol completo
+de `Software\ARTPICST`.
 
 ---
 

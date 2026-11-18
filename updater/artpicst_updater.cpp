@@ -693,7 +693,13 @@ void PurgeOldDownloads() {
         ULARGE_INTEGER ft{};
         ft.HighPart = fd.ftLastWriteTime.dwHighDateTime;
         ft.LowPart = fd.ftLastWriteTime.dwLowDateTime;
-        const unsigned long long ageDays = (now - ft.QuadPart / 10000000ull) / 86400ull;
+        // FILETIME cuenta desde 1601 y NowUnix() desde 1970: sin convertir,
+        // la resta se desbordaba y se borraban TAMBIÉN las descargas recién
+        // hechas (incluida la que se estaba preparando para instalar).
+        constexpr unsigned long long kFileTimeToUnix = 11644473600ull;
+        const unsigned long long fileUnix = ft.QuadPart / 10000000ull;
+        const unsigned long long ageDays = (fileUnix > kFileTimeToUnix && now > fileUnix - kFileTimeToUnix)
+                                               ? (now - (fileUnix - kFileTimeToUnix)) / 86400ull : 0ull;
         if (ageDays > 7) {
             DeleteFileW((GetTempUpdatesDir() + L"\\" + fd.cFileName).c_str());
         }
@@ -824,6 +830,15 @@ struct Fonts {
               label(&family, 10.0f, FontStyleBold, UnitPixel) {}
 };
 
+// Caché global de fuentes: construir cuatro Font + un FontFamily de GDI+ en
+// CADA fotograma era el mayor coste del repintado (la misma optimización que
+// ya usa el instalador). Con el búfer persistente, cada frame pasa a ser una
+// simple copia del contenido ya compuesto.
+Fonts& SharedFonts() {
+    static Fonts instance;   // construcción perezosa tras GdiplusStartup
+    return instance;
+}
+
 // Barra de progreso fina con relleno degradado y punto luminoso al frente.
 static void DrawProgressBar(Graphics& g, const RectF& track, double pct) {
     FillRound(g, track, track.Height * 0.5f, Color(255, 18, 22, 27));
@@ -846,6 +861,10 @@ static void DrawProgressBar(Graphics& g, const RectF& track, double pct) {
 // Marca de tiempo del inicio de la descarga (para velocidad mostrada).
 std::chrono::steady_clock::time_point g_downloadStart;
 double g_downloadStartElapsed = 0.0;
+double g_downloadShownPct = 0.0;   // barra suavizada (persigue bytesDone/bytesTotal)
+
+// Búfer de composición persistente (ver installer/ui_theme.hpp).
+BackBuffer g_backBuffer;
 
 void RenderUpdater(Graphics& g, float W, float H) {
     // Fondo "Aurora Carbon" (misma identidad que el instalador): degradado
@@ -859,7 +878,7 @@ void RenderUpdater(Graphics& g, float W, float H) {
     LinearGradientBrush accent(topBar, COL_ACCENT_A, COL_ACCENT_B, 0.0f);
     g.FillRectangle(&accent, topBar);
 
-    Fonts fonts;
+    const Fonts& fonts = SharedFonts();
     const UiRects r = ComputeUiRects(W, H);
 
     if (g_view == UpdView::Toast) {
@@ -903,9 +922,10 @@ void RenderUpdater(Graphics& g, float W, float H) {
 
         const long long done = g_upd.bytesDone.load();
         const long long total = g_upd.bytesTotal.load();
-        const double pct = total > 0 ? (static_cast<double>(done) / static_cast<double>(total)) * 100.0 : 0.0;
         const RectF track(14.0f, 74.0f, W - 28.0f, 8.0f);
-        DrawProgressBar(g, track, pct);
+        // Valor ya suavizado por el temporizador: la barra avanza continua en
+        // vez de saltar con cada bloque de red recibido.
+        DrawProgressBar(g, track, g_downloadShownPct);
 
         wchar_t line[160] = {};
         // Velocidad media: bytes descargados / tiempo transcurrido.
@@ -1015,8 +1035,9 @@ void OnInstallNow() {
     }
     g_view = UpdView::Downloading;
     g_downloadStart = std::chrono::steady_clock::now();
-    SetTimer(g_hwnd, 2, 33, nullptr);   // repintar progreso ~30 fps
-    InvalidateRect(g_hwnd, nullptr, TRUE);
+    g_downloadShownPct = 0.0;
+    SetTimer(g_hwnd, 2, 16, nullptr);   // ~60 fps: progreso continuo
+    InvalidateRect(g_hwnd, nullptr, FALSE);
 
     // FIX CRASH: antes el hilo se lanzaba con detach() y WM_DESTROY hacia
     // join() de una variable NUNCA asignada — el join era inútil y el proceso
@@ -1070,9 +1091,34 @@ LRESULT CALLBACK UpdaterWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         case WM_TIMER:
             if (wParam == 2) {
                 if (g_view == UpdView::Downloading) {
-                    g_downloadStartElapsed = std::chrono::duration<double>(
-                        std::chrono::steady_clock::now() - g_downloadStart).count();
-                    InvalidateRect(hwnd, nullptr, FALSE);
+                    // Suavizado medido en tiempo real (dt): mismo recorrido a
+                    // cualquier frecuencia de refresco, sin tirones cuando los
+                    // bloques de red llegan a ráfagas.
+                    static auto s_lastTick = std::chrono::steady_clock::now();
+                    const auto now = std::chrono::steady_clock::now();
+                    double dt = std::chrono::duration<double>(now - s_lastTick).count();
+                    s_lastTick = now;
+                    if (dt < 0.0) dt = 0.0;
+                    if (dt > 0.10) dt = 0.10;
+                    g_downloadStartElapsed =
+                        std::chrono::duration<double>(now - g_downloadStart).count();
+                    const long long done = g_upd.bytesDone.load();
+                    const long long total = g_upd.bytesTotal.load();
+                    double realPct = g_downloadShownPct;
+                    if (total > 0) {
+                        realPct = (static_cast<double>(done) / static_cast<double>(total)) * 100.0;
+                    } else if (g_upd.phase == UpdatePhase::Installing) {
+                        realPct = 100.0;
+                    }
+                    g_downloadShownPct = SmoothTowards(g_downloadShownPct, realPct, dt, 0.12, 0.02);
+                    // Invalidación SELECTIVA: solo la franja de barra+estado
+                    // cambia durante la descarga; repintar toda la ventana a
+                    // 60 fps era trabajo GDI+ desperdiciado.
+                    RECT band{ 0, 64, 0, 140 };
+                    RECT client{};
+                    GetClientRect(hwnd, &client);
+                    band.right = client.right;
+                    InvalidateRect(hwnd, &band, FALSE);
                     // Red de seguridad: la ventana se cierra sola tras 5 min.
                     if (g_downloadStartElapsed > 300.0) {
                         KillTimer(hwnd, 2);
@@ -1098,19 +1144,19 @@ LRESULT CALLBACK UpdaterWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 GetClientRect(hwnd, &client);
                 const int widthPx = (client.right - client.left > 0) ? client.right - client.left : 1;
                 const int heightPx = (client.bottom - client.top > 0) ? client.bottom - client.top : 1;
-                HDC memDc = CreateCompatibleDC(hdc);
-                HBITMAP memBmp = memDc ? CreateCompatibleBitmap(hdc, widthPx, heightPx) : nullptr;
-                HGDIOBJ oldBmp = memBmp ? SelectObject(memDc, memBmp) : nullptr;
-                if (memDc && memBmp) {
-                    Graphics g(memDc);
+                // Búfer persistente (recreado solo al cambiar de tamaño).
+                if (g_backBuffer.Ensure(hdc, widthPx, heightPx)) {
+                    Graphics g(g_backBuffer.Dc());
                     g.SetSmoothingMode(SmoothingModeHighQuality);
                     g.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
                     RenderUpdater(g, static_cast<float>(client.right), static_cast<float>(client.bottom));
-                    BitBlt(hdc, 0, 0, widthPx, heightPx, memDc, 0, 0, SRCCOPY);
-                    SelectObject(memDc, oldBmp);
-                    DeleteObject(memBmp);
+                    g_backBuffer.BlitTo(hdc);
+                } else {
+                    Graphics g(hdc);
+                    g.SetSmoothingMode(SmoothingModeHighQuality);
+                    g.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
+                    RenderUpdater(g, static_cast<float>(client.right), static_cast<float>(client.bottom));
                 }
-                if (memDc) DeleteDC(memDc);
             }
             EndPaint(hwnd, &ps);
             return 0;
@@ -1126,8 +1172,13 @@ LRESULT CALLBACK UpdaterWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             // cliente y los botones NO recibían el clic.
             RECT client{};
             GetClientRect(hwnd, &client);
-            const float px = static_cast<float>(GET_X_LPARAM(lParam));
-            const float py = static_cast<float>(GET_Y_LPARAM(lParam));
+            // WM_NCHITTEST entrega coordenadas de PANTALLA, no de cliente: sin
+            // esta conversión los botones podían no responder (la ventana se
+            // arrastraba en vez de pulsar) según la posición en el escritorio.
+            POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            ScreenToClient(hwnd, &pt);
+            const float px = static_cast<float>(pt.x);
+            const float py = static_cast<float>(pt.y);
             const LRESULT where = DefWindowProcW(hwnd, msg, wParam, lParam);
             if (where == HTCLIENT &&
                 HitZoneAt(static_cast<float>(client.right), static_cast<float>(client.bottom), px, py) != UZ_NONE) {
@@ -1240,6 +1291,7 @@ LRESULT CALLBACK UpdaterWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             // FIX CRASH: espera REAL al hilo de "Instalar ahora" (antes era un
             // join() de un thread nunca asignado porque el hilo iba detached).
             if (g_downloadThread.joinable()) g_downloadThread.join();
+            g_backBuffer.Release();
             PostQuitMessage(0);
             return 0;
         default:

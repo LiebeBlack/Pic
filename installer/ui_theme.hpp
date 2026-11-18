@@ -19,6 +19,7 @@
 #pragma once
 
 #include <gdiplus.h>
+#include <cmath>
 
 namespace artpicst {
 namespace ui {
@@ -151,6 +152,88 @@ inline void DrawLogoMark(Gdiplus::Graphics& g, const Gdiplus::Font& glyph,
     FillRound(g, shine, size * 0.16f, Gdiplus::Color(42, 255, 255, 255));
     DrawTextIn(g, L"A", tile, glyph, Gdiplus::Color(255, 255, 255, 255), true, true);
 }
+
+// ============================================================================
+// Suavizado de progreso independiente del tiempo
+// ============================================================================
+// Interpolación exponencial con constante de tiempo: el resultado es idéntico
+// a 30, 60 o 144 Hz (no depende de cuántas veces se ejecute el temporizador) y
+// aterriza exacto en el objetivo, sin el "temblor" final del factor fijo.
+// 'tau' es la constante de tiempo en segundos (menor = más rápido).
+inline double SmoothTowards(double current, double target, double dtSeconds,
+                            double tauSeconds = 0.09, double snap = 0.05) {
+    if (dtSeconds <= 0.0) return current;
+    if (tauSeconds <= 0.0) return target;
+    const double k = 1.0 - std::exp(-dtSeconds / tauSeconds);
+    double next = current + (target - current) * k;
+    if (std::fabs(target - next) <= snap) next = target;
+    // Nunca retrocede ni adelanta el objetivo (evita rebotes al cambiar de
+    // fase con objetivos decrecientes).
+    if (target >= current) { if (next > target) next = target; }
+    else                   { if (next < target) next = target; }
+    return next;
+}
+
+// ============================================================================
+// Back buffer persistente (anti-parpadeo y coste O(1) por fotograma)
+// ============================================================================
+// Instalador y actualizador componían cada frame en un HDC de memoria que se
+// creaba y destruía en CADA WM_PAINT (hasta 60 veces por segundo): GDI
+// asignaba y liberaba varios MB/s y el asignador del sistema acababa marcando
+// el ritmo del repintado. Este búfer se reutiliza y solo se recrea cuando
+// cambia el tamaño del cliente, de modo que pintar pasa a ser una copia.
+class BackBuffer {
+public:
+    BackBuffer() = default;
+    ~BackBuffer() { Release(); }
+    BackBuffer(const BackBuffer&) = delete;
+    BackBuffer& operator=(const BackBuffer&) = delete;
+
+    // Garantiza un búfer del tamaño pedido. false => el llamador pinta directo.
+    bool Ensure(HDC reference, int width, int height) {
+        if (!reference || width <= 0 || height <= 0) return false;
+        if (dc_ && width == width_ && height == height_) return true;
+        Release();
+        dc_ = CreateCompatibleDC(reference);
+        if (!dc_) return false;
+        bmp_ = CreateCompatibleBitmap(reference, width, height);
+        if (!bmp_) {
+            DeleteDC(dc_);
+            dc_ = nullptr;
+            return false;
+        }
+        old_ = SelectObject(dc_, bmp_);
+        width_ = width;
+        height_ = height;
+        return true;
+    }
+
+    void Release() {
+        if (dc_) {
+            if (old_) SelectObject(dc_, old_);
+            if (bmp_) DeleteObject(bmp_);
+            DeleteDC(dc_);
+        }
+        dc_ = nullptr;
+        bmp_ = nullptr;
+        old_ = nullptr;
+        width_ = 0;
+        height_ = 0;
+    }
+
+    HDC Dc() const { return dc_; }
+
+    void BlitTo(HDC target) const {
+        if (dc_ && target) BitBlt(target, 0, 0, width_, height_, dc_, 0, 0, SRCCOPY);
+    }
+
+private:
+    HDC     dc_ = nullptr;
+    HBITMAP bmp_ = nullptr;
+    HGDIOBJ old_ = nullptr;
+    int     width_ = 0;
+    int     height_ = 0;
+};
 
 }  // namespace ui
 }  // namespace artpicst

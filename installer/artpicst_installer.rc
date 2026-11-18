@@ -1,16 +1,19 @@
 // Icono, versión y PAYLOAD AUTOCONTENIDO del instalador de ARTPICST.
 //
-// Los recursos RCDATA (201..205) incrustan la aplicación completa dentro del
-// ejecutable del instalador: artpicst.exe, icono, version.json, README.md y el
-// módulo de actualización (artpicst_updater.exe). El instalador es así una
-// unidad única y distribuible: extrae su payload al instalar.
+// Los recursos RCDATA (201..206) incrustan la aplicación completa dentro del
+// ejecutable del instalador: artpicst.exe, icono, version.json, README.md, el
+// módulo de actualización (artpicst_updater.exe) y la extensión de shell
+// (artpicst_shell.dll: miniaturas y vista previa del Explorador). El
+// instalador es así una unidad única y distribuible: extrae su payload al
+// instalar.
 //
 // La ruta usa BARRAS NORMALES a propósito: rc.exe (MSVC) y GNU windres las
 // resuelven relativas al directorio del .rc y las aceptan igual, mientras que
 // las barras invertidas hacen fallar a windres en algunos entornos.
 //
 // IMPORTANTE: antes de compilar este .rc, scripts/collect_app_payload.py debe
-// haber poblado resources/app/ (compilar primero visor y updater).
+// haber poblado resources/app/ (compilar primero visor, updater y extensión de
+// shell).
 
 #pragma code_page(1252)
 
@@ -21,6 +24,7 @@
 #define RES_APP_VERSION 203
 #define RES_APP_README  204
 #define RES_APP_UPDATER 205
+#define RES_APP_SHELL   206
 
 IDI_APP_ICON ICON "../resources/artpicst.ico"
 
@@ -29,6 +33,7 @@ RES_APP_ICO     RCDATA "../resources/app/artpicst.ico"
 RES_APP_VERSION RCDATA "../resources/app/version.json"
 RES_APP_README  RCDATA "../resources/app/README.md"
 RES_APP_UPDATER RCDATA "../resources/app/artpicst_updater.exe"
+RES_APP_SHELL   RCDATA "../resources/app/artpicst_shell.dll"
 
 VS_VERSION_INFO VERSIONINFO
 FILEVERSION 1,2,1,0

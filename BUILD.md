@@ -18,6 +18,12 @@ Todos los objetivos se compilan con `/arch:SSE4.2` (MSVC) o `-msse4.2`
 instrucciones y la macro hace que `src/image_core.hpp` *active* las rutas
 SSE4.1/SSE4.2 (MSVC no define `__SSE4_2__`). Hacen falta las dos.
 
+Además del baseline, los pipelines MSVC añaden `/favor:INTEL64`, `/Gw` y
+`/Zc:inline`: consejos de generación de código y de enlazado orientados al
+Intel Core i5-12400 del equipo de desarrollo. Ninguno cambia el conjunto de
+instrucciones emitido ni relaja `/arch:SSE4.2` — el gate de política SIMD los
+vigila igual que el resto.
+
 AVX, AVX2 y AVX-512 están **prohibidos**: `src/image_core.hpp` aborta en
 compilación con `#error` si detecta `__AVX__`/`__AVX2__`/`__AVX512F__`, y
 `tests/check_simd_policy.py` recorre fuentes, scripts y workflows buscando
@@ -38,7 +44,8 @@ build.bat
 ### Opción 3: Manual
 Si prefieres compilar cada componente por separado. **El orden importa**: el
 instalador incrusta los binarios como recursos RCDATA, así que hay que compilar
-primero visor y updater, poblar `resources\app\` y solo entonces compilarlo.
+primero visor, updater y la extensión de shell, poblar `resources\app\` y solo
+entonces compilarlo.
 
 #### 1. Recursos (visor, updater e instalador)
 ```cmd
@@ -209,13 +216,32 @@ iteraciones, EXIF con offsets hostiles y allocator con 50.000 allocs. Cualquier
 lectura fuera de límites, use-after-free o leak falla el job con el stack
 del sanitizer — la capa de proof-of-memory-safety que los tests solos no dan.
 
+#### 3b. Extensión de shell (miniaturas y vista previa del Explorador)
+
+DLL COM en proceso con `IThumbnailProvider` + `IPreviewHandler`. Se compila
+ANTES de poblar el payload porque el `.rc` del instalador la incrusta.
+
+```cmd
+cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /guard:cf /arch:SSE4.2 /DARTPICST_TARGET_SSE42=1 /utf-8 /W4 /permissive- /wd4324 /Iinclude /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0601 /D_CRT_SECURE_NO_WARNINGS /LD /Fe:"build\artpicst_shell.dll" shell\artpicst_shell.cpp /link /DEF:shell\artpicst_shell.def shlwapi.lib windowscodecs.lib ole32.lib uuid.lib user32.lib gdi32.lib msimg32.lib advapi32.lib /OPT:REF /OPT:ICF /GUARD:CF /DYNAMICBASE /HIGHENTROPYVA /NXCOMPAT
+```
+
+Con MinGW: `g++ -std=c++23 -O2 -msse4.2 -DARTPICST_TARGET_SSE42=1 -shared -static
+-o build\artpicst_shell.dll shell\artpicst_shell.cpp shell\artpicst_shell.def
+-lshlwapi -lwindowscodecs -lole32 -luuid -luser32 -lgdi32 -lmsimg32 -ladvapi32`.
+
+El DLL decodifica con WIC (escala dentro del decodificador) y usa `stb_image`
+como respaldo para los formatos sin códec WIC instalado. Expone además
+`ArtpicstRegisterShell(HKEY)` / `ArtpicstUnregisterShell(HKEY)`, que es lo que
+usa el instalador para registrar en HKLM o HKCU según la elevación real.
+
 #### 4. Payload autocontenido
 ```cmd
 python scripts\collect_app_payload.py --root .
 ```
 
-Copia `artpicst.exe`, `artpicst_updater.exe`, `artpicst.ico`, `version.json` y
-`README.md` a `resources\app\`, desde donde el `.rc` del instalador los incrusta.
+Copia `artpicst.exe`, `artpicst_updater.exe`, `artpicst_shell.dll`, `artpicst.ico`,
+`version.json` y `README.md` a `resources\app\`, desde donde el `.rc` del
+instalador los incrusta.
 
 #### 5. Instalador autocontenido
 ```cmd
@@ -281,7 +307,7 @@ Releases). El workflow de CI hace esto automáticamente junto al ZIP portable.
 - ✅ Payload autocontenido: el `.exe` incrusta visor, updater, icono, `version.json`
   y README como recursos RCDATA — un único archivo distribuible
 - ✅ Instalación en hilo separado con `PostMessage`: la UI nunca se congela
-- ✅ Duración exacta de **34 segundos** con 10 fases técnicas en vivo (progreso y
+- ✅ Duración exacta de **34 segundos** con 11 fases técnicas en vivo (progreso y
   consola de log con autoscroll, marca de tiempo `t = X.X s` por línea)
 - ✅ Elevación por UAC (manifiesto `requireAdministrator` + relanzado con `runas`),
   con degradación a instalación por usuario si se rechaza
@@ -289,10 +315,15 @@ Releases). El workflow de CI hace esto automáticamente junto al ZIP portable.
 - ✅ Accesos directos en el Menú Inicio (todos los usuarios) y en el Escritorio
 - ✅ Registro completo: `Uninstall\ARTPICST` (HKLM/HKCU), `App Paths`, ProgID,
   `RegisteredApplications` y asociaciones por `OpenWithProgids` **sin secuestrar**
-  el programa predeterminado del usuario (las miniaturas del Explorador se conservan)
-- ✅ Desinstalador con wizard gráfico propio (14 segundos, 10 fases, misma estética),
-  opción de conservar la configuración del usuario, limpieza de accesos directos,
-  claves y carpeta, y borrado diferido del propio ejecutable
+  el programa predeterminado del usuario (las miniaturas del Explorador se conservan
+  para los formatos que ya tenían proveedor nativo)
+- ✅ Extensión de shell propia (`artpicst_shell.dll`) registrada por el instalador en
+  `SystemFileAssociations\<ext>\ShellEx`: miniaturas (Iconos grandes, Mosaicos y
+  Contenido) y vista previa (Alt+P), rellenando solo las extensiones sin manejador
+- ✅ Desinstalador con wizard gráfico propio (14 segundos, 6 etapas, misma estética),
+  opción de conservar la configuración del usuario (si se marca, solo se retiran
+  `InstallDir` y `Version`), limpieza de accesos directos, claves y carpeta,
+  purga de la caché de actualizaciones y borrado diferido del propio ejecutable
 - ✅ Modo actualización silencioso (`--update <payload> --dir <dir>`) usado por el
   auto-actualizador, con relanzamiento automático de la app
 - ✅ Reversión automática (rollback) si la instalación falla a medias

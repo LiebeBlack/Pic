@@ -2,8 +2,9 @@
 # ============================================================================
 # collect_app_payload.py — Prepara el payload autocontenido del instalador
 # ----------------------------------------------------------------------------
-# Copia los binarios recién compilados (visor, updater, icono, version.json y
-# README) a resources/app/, desde donde artpicst_installer.rc los incrusta
+# Copia los binarios recién compilados (visor, updater, extensión de shell,
+# icono, version.json y README) a resources/app/, desde donde
+# artpicst_installer.rc los incrusta
 # como recursos RCDATA. Así el instalador es una unidad única distribuible.
 #
 # Uso:  python scripts/collect_app_payload.py --root <raíz del repo>
@@ -21,6 +22,7 @@ REQUIRED = [
     "version.json",
     "README.md",
     "artpicst_updater.exe",
+    "artpicst_shell.dll",
 ]
 
 
@@ -39,6 +41,7 @@ def main() -> int:
     sources = {
         "artpicst.exe": build / "artpicst.exe",
         "artpicst_updater.exe": build / "artpicst_updater.exe",
+        "artpicst_shell.dll": build / "artpicst_shell.dll",
         "artpicst.ico": root / "resources" / "artpicst.ico",
         "version.json": root / "version.json",
         "README.md": root / "README.md",
@@ -49,7 +52,7 @@ def main() -> int:
         print("ERROR: faltan archivos de entrada para el payload:")
         for name in missing:
             print(f"  - {sources[name]}")
-        print("Compila primero artpicst.exe y artpicst_updater.exe (build.ps1 / CI).")
+        print("Compila primero artpicst.exe, artpicst_updater.exe y artpicst_shell.dll (build.ps1 / CI).")
         return 1
 
     for name, src in sources.items():
@@ -57,7 +60,7 @@ def main() -> int:
         shutil.copyfile(src, dst)
         print(f"  payload: {name} <- {src} ({dst.stat().st_size:,} bytes)")
 
-    # Verificación final: los 5 archivos que artpicst_installer.rc exige.
+    # Verificación final: los 6 archivos que artpicst_installer.rc exige.
     still_missing = [name for name in REQUIRED if not (payload / name).is_file()]
     if still_missing:
         print("ERROR: el payload quedó incompleto: " + ", ".join(still_missing))

@@ -86,6 +86,7 @@ constexpr UINT RES_APP_ICO     = 202;   // RCDATA artpicst.ico
 constexpr UINT RES_APP_VERSION = 203;   // RCDATA version.json
 constexpr UINT RES_APP_README  = 204;   // RCDATA README.md
 constexpr UINT RES_APP_UPDATER = 205;   // RCDATA artpicst_updater.exe
+constexpr UINT RES_APP_SHELL   = 206;   // RCDATA artpicst_shell.dll
 
 const wchar_t APP_NAME[]       = L"ARTPICST";
 // Fuente única de verdad (version.hpp). Un array wchar_t[] no puede
@@ -229,6 +230,11 @@ struct InstallerState {
 };
 
 InstallerState g_state;
+
+// Búfer de composición persistente: sobrevive entre fotogramas y solo se
+// recrea al cambiar el tamaño del cliente (ver installer/ui_theme.hpp).
+BackBuffer g_backBuffer;
+
 bool g_lastRunSucceeded = false;   // resultado del último RunPipeline (modo silencioso)
 std::wstring g_lastError;          // último error del pipeline (exit codes del modo --silent)
 
@@ -422,6 +428,7 @@ const PayloadEntry kPayload[] = {
     { RES_APP_VERSION, L"version.json",         L"Metadatos de versión" },
     { RES_APP_README,  L"README.md",            L"Documentación" },
     { RES_APP_UPDATER, L"artpicst_updater.exe", L"Módulo de actualización" },
+    { RES_APP_SHELL,   L"artpicst_shell.dll",   L"Miniaturas del Explorador" },
 };
 constexpr int kPayloadCount = static_cast<int>(sizeof(kPayload) / sizeof(kPayload[0]));
 
@@ -658,7 +665,7 @@ const std::vector<std::wstring>& SupportedAssociationExtensions() {
         L".png", L".apng", L".bmp", L".dib", L".rle", L".gif",
         L".tif", L".tiff", L".webp", L".heic", L".heif", L".hif",
         L".avif", L".jxl", L".jxr", L".wdp", L".hdp", L".ico",
-        L".cur", L".tga", L".tpic", L".psd", L".hdr", L".pic",
+        L".cur", L".icon", L".tga", L".tpic", L".psd", L".hdr", L".pic",
         L".pnm", L".ppm", L".pgm", L".pbm", L".jp2", L".j2k",
         L".jpx", L".emf", L".wmf", L".exif", L".dng", L".cr2",
         L".cr3", L".nef", L".arw", L".orf", L".rw2", L".raf",
@@ -733,6 +740,76 @@ bool RegisterFileAssociations(const std::wstring& exePath) {
 
     if (ok) SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
     return ok;
+}
+
+// ============================================================================
+// Extensión de shell: miniaturas y vista previa del Explorador
+// ============================================================================
+// artpicst_shell.dll es un servidor COM en proceso con dos manejadores:
+//   · IThumbnailProvider -> miniaturas en Iconos grandes / Mosaicos / Contenido
+//   · IPreviewHandler    -> panel de vista previa del Explorador (Alt+P)
+//
+// El registro lo hace ESTA sección llamando a los exports propios del DLL
+// (ArtpicstRegisterShell / ArtpicstUnregisterShell) con la raíz que
+// corresponde a la elevación real: HKLM si se instala para todos los usuarios,
+// HKCU si es una instalación por usuario. No se usa regsvr32 porque siempre
+// escribe en HKLM y fallaría en una instalación por usuario.
+
+constexpr wchar_t kShellDllName[]        = L"artpicst_shell.dll";
+constexpr wchar_t kShellThumbClsid[]     = L"{6C7E9E51-3E8B-4E2C-9A5B-1D2F4A7C8B10}";
+constexpr wchar_t kShellPreviewClsid[]   = L"{0F3A6B24-7D1C-4B58-9E47-2C8D5A1F6E33}";
+constexpr wchar_t kShellThumbHandler[]   = L"{E357FCCD-A995-4576-B01F-234630154E96}";
+constexpr wchar_t kShellPreviewHandler[] = L"{8895B1C6-B41F-4C1C-A562-0D564250836F}";
+
+using ShellExportFn = HRESULT(WINAPI*)(HKEY);
+
+// Carga el DLL desde la carpeta de instalación y llama a un export con la raíz
+// de registro correspondiente. LoadLibraryEx con LOAD_WITH_ALTERED_SEARCH_PATH
+// evita que un DLL homónimo en el directorio actual se cargue por error.
+bool CallShellExport(const std::wstring& dllPath, const char* exportName) {
+    HMODULE module = LoadLibraryExW(dllPath.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+    if (!module) return false;
+    const auto fn = reinterpret_cast<ShellExportFn>(
+        reinterpret_cast<void*>(GetProcAddress(module, exportName)));
+    bool ok = false;
+    if (fn) ok = SUCCEEDED(fn(RegRoot()));
+    FreeLibrary(module);
+    return ok;
+}
+
+// Comprobación de LECTURA: el instalador no da por escrito que el registro se
+// aplicó solo porque el export devolvió S_OK (una directiva de grupo puede
+// bloquear Software\Classes sin devolver un error al crear la clave).
+bool ShellRegistrationPresent() {
+    std::wstring value;
+    const std::wstring key = std::wstring(L"Software\\Classes\\CLSID\\") +
+                             kShellThumbClsid + L"\\InprocServer32";
+    return ReadRegStringValue(RegRoot(), key, L"", value) && !value.empty();
+}
+
+// Respaldo sin el DLL: retira exactamente lo que registró la extensión. Se usa
+// al desinstalar cuando el archivo ya no está (o está bloqueado por el
+// Explorador) y en la reversión de una instalación fallida.
+void RemoveShellIntegrationFallback() {
+    const HKEY roots[] = { HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER };
+    for (HKEY root : roots) {
+        RegDeleteTreeW(root, (std::wstring(L"Software\\Classes\\CLSID\\") + kShellThumbClsid).c_str());
+        RegDeleteTreeW(root, (std::wstring(L"Software\\Classes\\CLSID\\") + kShellPreviewClsid).c_str());
+        for (const auto& ext : SupportedAssociationExtensions()) {
+            const std::wstring handlers[2] = { kShellThumbHandler, kShellPreviewHandler };
+            const std::wstring clsids[2] = { kShellThumbClsid, kShellPreviewClsid };
+            for (int i = 0; i < 2; ++i) {
+                // Solo se borra la asociación si sigue apuntando a nuestro CLSID:
+                // si otro visor la reemplazó, su elección se respeta.
+                DeleteRegValueIfEquals(root,
+                    L"Software\\Classes\\SystemFileAssociations\\" + ext + L"\\ShellEx\\" + handlers[i],
+                    L"", clsids[i]);
+                DeleteRegValueIfEquals(root,
+                    L"Software\\Classes\\" + ext + L"\\ShellEx\\" + handlers[i],
+                    L"", clsids[i]);
+            }
+        }
+    }
 }
 
 uint64_t DirectorySizeBytes(const std::wstring& dir) {
@@ -851,6 +928,7 @@ struct PipeJob {
     bool createDesktopShortcut = true;
     bool createStartMenuShortcut = true;
     bool registerAssociations = true;
+    bool keepUserConfig = true;      // desinstalación: conservar %LOCALAPPDATA%\ARTPICST
     bool relaunchOnFinish = false;   // modo actualización: reabrir ARTPICST
     bool pacing = true;              // false en --silent (sin simulación)
 };
@@ -874,6 +952,24 @@ bool TaskPrepareEnvironment(PipeUi& ui, const PipeJob& job, Pacer& clock, std::w
         return false;
     }
     ui.Log(LogKind::Ok, clock.Elapsed(), L"[OK] Directorio verificado: %ls", job.dstDir.c_str());
+
+    // Preflight de espacio: la página Destino ya lo muestra, pero sin esta
+    // comprobación una unidad casi llena fallaba a mitad de la extracción
+    // (instalación a medias con rollback). Se exige el payload completo más
+    // 32 MB de holgura para el staging de respaldo. Espacio desconocido (0) no
+    // bloquea: nunca se rechaza una instalación por un dato no disponible.
+    const unsigned long long needed = PayloadTotalBytes();
+    const unsigned long long freeBytes = DiskFreeBytes(job.dstDir);
+    const unsigned long long safetyMargin = 32ull * 1024ull * 1024ull;
+    if (needed > 0 && freeBytes > 0 && freeBytes < needed + safetyMargin) {
+        error = std::wstring(L"Espacio insuficiente en ") + job.dstDir + L": se necesitan " +
+                FormatBytes(needed + safetyMargin) + L" y hay " + FormatBytes(freeBytes) + L" libres.";
+        return false;
+    }
+    if (needed > 0 && freeBytes > 0) {
+        ui.Log(LogKind::Ok, clock.Elapsed(), L"[OK] Espacio en disco: %ls libres (payload %ls)",
+               FormatBytes(freeBytes).c_str(), FormatBytes(needed).c_str());
+    }
     return true;
 }
 
@@ -1029,9 +1125,12 @@ bool TaskExtractResources(PipeUi& ui, const PipeJob& job, Pacer& clock, std::wst
         ui.Log(LogKind::Ok, clock.Elapsed(), L"[OK] %ls (%ls) descomprimido", kPayload[i].fileName, FormatBytes(bytes).c_str());
     }
     // El propio instalador se copia como desinstalador oficial en el destino.
-    if (!job.selfPath.empty() &&
-        _wcsicmp(job.selfPath.c_str(), (job.dstDir + L"\\artpicst_installer.exe").c_str()) != 0) {
-        CopyFileIfExists(job.selfPath, job.dstDir + L"\\artpicst_installer.exe");
+    // La copia anterior se aparta como ".old" para que una actualización
+    // fallida la restaure: antes se sobrescribía y el rollback la borraba.
+    const std::wstring uninstallerCopy = job.dstDir + L"\\artpicst_installer.exe";
+    if (!job.selfPath.empty() && _wcsicmp(job.selfPath.c_str(), uninstallerCopy.c_str()) != 0) {
+        StageOldFile(uninstallerCopy);
+        CopyFileIfExists(job.selfPath, uninstallerCopy);
     }
     return true;
 }
@@ -1108,9 +1207,42 @@ bool TaskRegisterUninstaller(PipeUi& ui, const PipeJob& job, Pacer& clock, std::
     return true;
 }
 
+// Activa las miniaturas y la vista previa del Explorador. No es un fallo
+// fatal: si el registro está bloqueado, la aplicación sigue siendo válida y se
+// avisa en el registro de instalación.
+bool TaskRegisterShellIntegration(PipeUi& ui, const PipeJob& job, Pacer& clock, std::wstring&) {
+    if (!job.registerAssociations) {
+        ui.Log(LogKind::Info, clock.Elapsed(), L"[IN] Miniaturas del Explorador omitidas (opción del usuario)");
+        return true;
+    }
+    const std::wstring dllPath = job.dstDir + L"\\" + kShellDllName;
+    if (GetFileAttributesW(dllPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        ui.Log(LogKind::Warn, clock.Elapsed(), L"[AV] Falta artpicst_shell.dll; sin miniaturas del Explorador");
+        return true;
+    }
+    if (!CallShellExport(dllPath, "ArtpicstRegisterShell")) {
+        ui.Log(LogKind::Warn, clock.Elapsed(), L"[AV] No se pudo registrar la extensión de miniaturas");
+        return true;
+    }
+    // Sin este aviso el Explorador seguiría mostrando su caché anterior, incluso
+    // cuando la comprobación de lectura posterior falle.
+    SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
+    if (!ShellRegistrationPresent()) {
+        ui.Log(LogKind::Warn, clock.Elapsed(),
+               L"[AV] El registro devolvió éxito pero CLSID\\InprocServer32 no es legible");
+        return true;
+    }
+    ui.Log(LogKind::Ok, clock.Elapsed(),
+           L"[OK] Miniaturas y vista previa activadas (%d formatos)",
+           static_cast<int>(SupportedAssociationExtensions().size()));
+    return true;
+}
+
 bool TaskFinalCleanup(PipeUi& ui, const PipeJob& job, Pacer& clock, std::wstring& error) {
-    // Verificación integral: los 5 archivos del payload deben existir.
-    const wchar_t* required[] = { L"artpicst.exe", L"artpicst.ico", L"version.json", L"artpicst_updater.exe" };
+    // Verificación integral: los archivos imprescindibles del payload deben
+    // existir. README.md queda fuera a propósito: es opcional.
+    const wchar_t* required[] = { L"artpicst.exe", L"artpicst.ico", L"version.json",
+                                 L"artpicst_updater.exe", L"artpicst_shell.dll" };
     for (const wchar_t* name : required) {
         if (GetFileAttributesW((job.dstDir + L"\\" + name).c_str()) == INVALID_FILE_ATTRIBUTES) {
             error = std::wstring(L"Verificación fallida: falta ") + name;
@@ -1161,18 +1293,92 @@ bool TaskUninstallAssociations(PipeUi& ui, const PipeJob&, Pacer& clock, std::ws
             DeleteRegValueIfEquals(root, extKey, L"", L"ARTPICST.Image");
         }
     }
-    ui.Log(LogKind::Ok, clock.Elapsed(), L"[OK] %d asociaciones revocadas (miniaturas intactas)",
+    ui.Log(LogKind::Ok, clock.Elapsed(),
+           L"[OK] %d asociaciones revocadas (la extensión de shell se retira aparte)",
            static_cast<int>(SupportedAssociationExtensions().size()));
     return true;
 }
 
-bool TaskUninstallRegistry(PipeUi& ui, const PipeJob&, Pacer& clock, std::wstring&) {
+// Retira la extensión de shell. Primero por el export del DLL (sabe qué
+// asociaciones escribió) y después con el respaldo en registro, para que no
+// queden CLSIDs huérfanos si el archivo ya no está.
+bool TaskUninstallShellIntegration(PipeUi& ui, const PipeJob& job, Pacer& clock, std::wstring&) {
+    const std::wstring dllPath = job.dstDir + L"\\" + kShellDllName;
+    if (GetFileAttributesW(dllPath.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        CallShellExport(dllPath, "ArtpicstUnregisterShell");
+    }
+    RemoveShellIntegrationFallback();
+    SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
+    ui.Log(LogKind::Ok, clock.Elapsed(), L"[OK] Miniaturas y vista previa del Explorador retiradas");
+    return true;
+}
+
+bool TaskUninstallRegistry(PipeUi& ui, const PipeJob& job, Pacer& clock, std::wstring&) {
     const HKEY roots[] = { HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER };
+    int cleaned = 0;
     for (HKEY root : roots) {
         RegDeleteTreeW(root, UNINSTALL_REG_KEY);
-        RegDeleteTreeW(root, AppKeyPath().c_str());
+        if (job.keepUserConfig) {
+            // Se conserva Software\ARTPICST (preferencias del visor y del
+            // auto-actualizador) y solo se retiran los datos de instalación.
+            // Antes se borraba el árbol completo aunque el usuario hubiera
+            // marcado "conservar la configuración": la casilla no hacía nada.
+            DeleteRegValue(root, AppKeyPath(), artpicst::kRegValInstallDir);
+            DeleteRegValue(root, AppKeyPath(), artpicst::kRegValVersion);
+        } else {
+            RegDeleteTreeW(root, AppKeyPath().c_str());
+        }
+        ++cleaned;
     }
-    ui.Log(LogKind::Ok, clock.Elapsed(), L"[OK] Claves de registro eliminadas (HKLM + HKCU)");
+    ui.Log(LogKind::Ok, clock.Elapsed(),
+           job.keepUserConfig ? L"[OK] Registro de instalación retirado; preferencias conservadas (%d raíces)"
+                              : L"[OK] Claves de registro eliminadas (HKLM + HKCU, %d raíces)", cleaned);
+    return true;
+}
+
+// Limpieza de datos de usuario: la caché de actualizaciones
+// (%LOCALAPPDATA%\ARTPICST\updates) se elimina siempre porque son instaladores
+// descargados que ocupan decenas de MB; el resto de la carpeta (preferencias y
+// log) solo si el usuario desmarcó "conservar la configuración".
+static int DeleteFilesInFolder(const std::wstring& folder) {
+    int removed = 0;
+    WIN32_FIND_DATAW fd{};
+    HANDLE find = FindFirstFileW((folder + L"\\*").c_str(), &fd);
+    if (find == INVALID_HANDLE_VALUE) return 0;
+    do {
+        if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) continue;
+        if (DeleteFileW((folder + L"\\" + fd.cFileName).c_str())) ++removed;
+    } while (FindNextFileW(find, &fd));
+    FindClose(find);
+    return removed;
+}
+
+bool TaskUninstallUserData(PipeUi& ui, const PipeJob& job, Pacer& clock, std::wstring&) {
+    wchar_t localAppData[MAX_PATH] = {};
+    const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", localAppData, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) {
+        // '%%' porque este texto pasa por vswprintf en PipeUi::Log.
+        ui.Log(LogKind::Warn, clock.Elapsed(), L"[AV] %%LOCALAPPDATA%% no disponible; sin limpieza de caché");
+        return true;
+    }
+    const std::wstring base = std::wstring(localAppData) + L"\\" + APP_NAME;
+    const std::wstring updates = base + L"\\updates";
+    const int cached = DeleteFilesInFolder(updates);
+    RemoveDirectoryW(updates.c_str());
+    if (cached > 0) {
+        ui.Log(LogKind::Ok, clock.Elapsed(), L"[OK] Caché de actualizaciones liberada (%d archivos)", cached);
+    }
+    if (job.keepUserConfig) {
+        ui.Log(LogKind::Info, clock.Elapsed(), L"[IN] Preferencias y registros del usuario conservados");
+        return true;
+    }
+    const int files = DeleteFilesInFolder(base);
+    if (!RemoveDirectoryW(base.c_str())) {
+        ui.Log(LogKind::Warn, clock.Elapsed(),
+               L"[AV] No se pudo retirar %ls (¿el visor sigue abierto?)", base.c_str());
+        return true;
+    }
+    ui.Log(LogKind::Ok, clock.Elapsed(), L"[OK] Datos de usuario eliminados (%d archivos)", files);
     return true;
 }
 
@@ -1244,21 +1450,38 @@ const PipeTask kInstallTasks[] = {
     { 18.0, L"Configurando componentes y accesos directos", TaskCreateShortcuts },
     { 22.0, L"Instalando registros y asociaciones",       TaskRegisterAssociations },
     { 25.5, L"Desfragmentando y optimizando recursos",    TaskOptimizeLayout },
-    { 29.0, L"Registrando el desinstalador",              TaskRegisterUninstaller },
+    { 27.5, L"Registrando el desinstalador",              TaskRegisterUninstaller },
+    { 30.0, L"Activando miniaturas del Explorador",       TaskRegisterShellIntegration },
     { 32.0, L"Limpieza final y verificación",             TaskFinalCleanup },
 };
 constexpr int kInstallTaskCount = static_cast<int>(sizeof(kInstallTasks) / sizeof(kInstallTasks[0]));
 
 const PipeTask kUninstallTasks[] = {
     {  1.0, L"Preparando la desinstalación",              TaskUninstallPrepare },
-    {  4.0, L"Revocando asociaciones de archivo",         TaskUninstallAssociations },
+    {  3.0, L"Revocando asociaciones de archivo",         TaskUninstallAssociations },
+    {  5.0, L"Retirando miniaturas del Explorador",       TaskUninstallShellIntegration },
     {  7.0, L"Eliminando registros del sistema",          TaskUninstallRegistry },
-    { 10.0, L"Eliminando accesos directos",               TaskUninstallShortcuts },
-    { 13.0, L"Eliminando archivos del programa",          TaskUninstallFiles },
+    {  9.0, L"Eliminando accesos directos",               TaskUninstallShortcuts },
+    { 11.5, L"Eliminando archivos del programa",          TaskUninstallFiles },
+    { 13.0, L"Limpiando caché y datos de usuario",        TaskUninstallUserData },
 };
 constexpr int kUninstallTaskCount = static_cast<int>(sizeof(kUninstallTasks) / sizeof(kUninstallTasks[0]));
 
 // Reversión limpia si la instalación falla a medias: no se deja basura.
+// Revierte un archivo del payload: si había una versión anterior apartada como
+// ".old" se restaura (actualización fallida) y, si no, se elimina lo nuevo (no
+// había nada antes). Antes solo se restauraba artpicst.exe y los demás se
+// borraban: una actualización fallida dejaba la instalación anterior
+// incompleta (sin icono, sin updater y sin extensión de shell).
+void RollbackPayloadFile(const std::wstring& path) {
+    const std::wstring old = path + L".old";
+    if (GetFileAttributesW(old.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        RestoreStagedFile(path);
+    } else {
+        DeleteFileW(path.c_str());
+    }
+}
+
 void RollbackInstall(const PipeJob& job) {
     RemoveAppShortcutsIn(GetShellFolder(CSIDL_DESKTOPDIRECTORY));
     RemoveAppShortcutsIn(GetShellFolder(CSIDL_COMMON_DESKTOPDIRECTORY));
@@ -1271,13 +1494,21 @@ void RollbackInstall(const PipeJob& job) {
         RegDeleteTreeW(root, L"Software\\Classes\\ARTPICST.Image");
         RegDeleteTreeW(root, L"Software\\Classes\\Applications\\artpicst.exe");
     }
-    // Restaurar binarios originales apartados como ".old" y retirar los nuevos.
-    RestoreStagedFile(job.dstDir + L"\\artpicst.exe");
-    DeleteFileW((job.dstDir + L"\\artpicst.ico").c_str());
-    DeleteFileW((job.dstDir + L"\\version.json").c_str());
-    DeleteFileW((job.dstDir + L"\\README.md").c_str());
-    DeleteFileW((job.dstDir + L"\\artpicst_updater.exe").c_str());
-    DeleteFileW((job.dstDir + L"\\artpicst_installer.exe").c_str());
+    // La extensión de shell se retira ANTES de borrar el DLL que la implementa.
+    const std::wstring shellDll = job.dstDir + L"\\" + kShellDllName;
+    if (GetFileAttributesW(shellDll.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        CallShellExport(shellDll, "ArtpicstUnregisterShell");
+    }
+    RemoveShellIntegrationFallback();
+    // Restaurar cada archivo del payload (o retirarlo si no existía antes). Se
+    // omite el propio desinstalador en ejecución: Windows no deja borrarlo y su
+    // copia nueva es equivalente a la anterior.
+    for (const auto& entry : kPayload) {
+        const std::wstring dst = job.dstDir + L"\\" + entry.fileName;
+        if (!job.selfPath.empty() && _wcsicmp(dst.c_str(), job.selfPath.c_str()) == 0) continue;
+        RollbackPayloadFile(dst);
+    }
+    RollbackPayloadFile(job.dstDir + L"\\artpicst_installer.exe");
     SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
 }
 
@@ -1290,6 +1521,7 @@ void RunPipeline(AppMode mode) {
     job.createDesktopShortcut = g_state.createDesktopShortcut;
     job.createStartMenuShortcut = g_state.createStartMenuShortcut;
     job.registerAssociations = g_state.registerFileAssociations;
+    job.keepUserConfig = g_state.keepUserConfig;
     job.relaunchOnFinish = (mode == AppMode::Update);
     job.pacing = !g_state.silent;
     job.dstDir = (mode == AppMode::Uninstall) ? DetectInstallDir() : g_state.installPath;
@@ -2286,7 +2518,10 @@ void StartWork(AppMode mode) {
         ? L"Preparando la desinstalación..."
         : L"Preparando la instalación...";
     if (g_state.hwnd) {
-        SetTimer(g_state.hwnd, TIMER_PROGRESS, 33, nullptr);   // ~30 fps de animación
+        // 16 ms (~60 fps): el avance del progreso y de la consola se percibe
+        // continuo. La invalidación es selectiva, así que el coste por frame
+        // es mínimo y no depende del tamaño de la ventana.
+        SetTimer(g_state.hwnd, TIMER_PROGRESS, 16, nullptr);
         InvalidateRect(g_state.hwnd, nullptr, FALSE);
     }
     g_state.worker = std::thread(RunPipeline, mode);
@@ -2304,7 +2539,12 @@ void HandlePipeMessage(PipeMessage* msg) {
             break;
         case PipeMessage::Kind::Done: {
             g_state.installSucceeded = msg->success;
+            // El temporizador se detiene justo después y la página cambia: si
+            // el objetivo (100 %) no se refleja en el valor animado, la barra
+            // se quedaba congelada en ~98 %. Se aterriza de forma explícita.
             g_state.progressTarget = 100.0;
+            g_state.progressShown = 100.0;
+            g_state.workElapsed = g_state.workTotalSeconds;
             g_state.isWorking = false;
             if (!msg->success) {
                 for (auto it = g_state.log.rbegin(); it != g_state.log.rend(); ++it) {
@@ -2442,6 +2682,16 @@ void ToggleOptionAt(int rowIndex) {
 // Ventana
 // ============================================================================
 
+// Contexto GDI+ común a todos los repintados (calidad premium + DPI de diseño).
+static void SetupGraphics(Graphics& graphics, float scale) {
+    graphics.ScaleTransform(scale, scale);
+    graphics.SetCompositingQuality(CompositingQualityHighQuality);
+    graphics.SetSmoothingMode(SmoothingModeHighQuality);
+    graphics.SetPixelOffsetMode(PixelOffsetModeHalf);
+    graphics.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
+    graphics.SetTextContrast(4000);
+}
+
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     static HCURSOR s_cursorArrow = LoadCursor(nullptr, IDC_ARROW);
     static HCURSOR s_cursorHand = LoadCursor(nullptr, IDC_HAND);
@@ -2463,14 +2713,17 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
         case WM_TIMER:
             if (wParam == TIMER_PROGRESS) {
-                // Animación fluida del porcentaje (interpolación exponencial).
-                const double diff = g_state.progressTarget - g_state.progressShown;
-                if (diff > 0.01) {
-                    g_state.progressShown += diff * 0.22;
-                    if (g_state.progressTarget - g_state.progressShown < 0.05) {
-                        g_state.progressShown = g_state.progressTarget;
-                    }
-                }
+                // Animación del porcentaje medida en TIEMPO REAL (dt) y no por
+                // número de ticks: el recorrido es idéntico a 30, 60 o 144 Hz
+                // y en equipos lentos, sin acelerones ni temblor final.
+                static auto s_lastTick = std::chrono::steady_clock::now();
+                const auto now = std::chrono::steady_clock::now();
+                double dt = std::chrono::duration<double>(now - s_lastTick).count();
+                s_lastTick = now;
+                if (dt < 0.0) dt = 0.0;
+                if (dt > 0.10) dt = 0.10;   // tras una pausa, reanudar sin saltos
+                g_state.progressShown = SmoothTowards(g_state.progressShown,
+                                                      g_state.progressTarget, dt, 0.085);
                 g_state.workElapsed = g_state.workTotalSeconds * (g_state.progressShown / 100.0);
                 // FIX ANTI-PARPADEO: en vez de invalidar TODA la ventana a
                 // 30 fps, solo se invalidan las regiones cuyo contenido ha
@@ -2571,27 +2824,21 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 const int widthPx = (client.right - client.left > 0) ? client.right - client.left : 1;
                 const int heightPx = (client.bottom - client.top > 0) ? client.bottom - client.top : 1;
 
-                HDC memDc = CreateCompatibleDC(hdc);
-                HBITMAP memBmp = memDc ? CreateCompatibleBitmap(hdc, widthPx, heightPx) : nullptr;
-                HGDIOBJ oldBmp = (memDc && memBmp) ? SelectObject(memDc, memBmp) : nullptr;
-
-                if (memDc && memBmp) {
-                    Graphics graphics(memDc);
-                    graphics.ScaleTransform(g_scale, g_scale);
-                    graphics.SetCompositingQuality(CompositingQualityHighQuality);
-                    graphics.SetSmoothingMode(SmoothingModeHighQuality);
-                    graphics.SetPixelOffsetMode(PixelOffsetModeHalf);
-                    graphics.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
-                    graphics.SetTextContrast(4000);
-
+                // Búfer persistente: sin asignar/liberar un bitmap del tamaño
+                // de la ventana en cada fotograma (antes eran varios MB/s de
+                // tráfico GDI solo para pintar).
+                if (g_backBuffer.Ensure(hdc, widthPx, heightPx)) {
+                    Graphics graphics(g_backBuffer.Dc());
+                    SetupGraphics(graphics, g_scale);
                     RenderWindow(graphics, client);
-
                     // Copia atómica del frame compuesto a la ventana real.
-                    BitBlt(hdc, 0, 0, widthPx, heightPx, memDc, 0, 0, SRCCOPY);
-                    SelectObject(memDc, oldBmp);
-                    DeleteObject(memBmp);
+                    g_backBuffer.BlitTo(hdc);
+                } else {
+                    // Reserva: pintado directo si no hay memoria para el búfer.
+                    Graphics graphics(hdc);
+                    SetupGraphics(graphics, g_scale);
+                    RenderWindow(graphics, client);
                 }
-                if (memDc) DeleteDC(memDc);
             }
             EndPaint(hwnd, &ps);
             return 0;
@@ -2663,6 +2910,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             // (isWorking == false). Un join() desde el hilo de UI con el
             // worker activo congela la ventana ("No responde").
             if (!g_state.isWorking && g_state.worker.joinable()) g_state.worker.join();
+            g_backBuffer.Release();
             PostQuitMessage(0);
             return 0;
         }

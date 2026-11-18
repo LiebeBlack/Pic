@@ -1,0 +1,17 @@
+; ============================================================================
+; artpicst_shell.def — Exports del servidor COM de ARTPICST
+; ----------------------------------------------------------------------------
+; DllGetClassObject / DllCanUnloadNow: contrato COM del servidor en proceso.
+; DllRegisterServer / DllUnregisterServer: registro manual con regsvr32.
+; ArtpicstRegisterShell / ArtpicstUnregisterShell: registro con raíz explícita
+;   (HKLM con elevación, HKCU sin ella), usado por el instalador/desinstalador.
+; ============================================================================
+LIBRARY artpicst_shell
+
+EXPORTS
+    DllGetClassObject          @1
+    DllCanUnloadNow            @2
+    DllRegisterServer          @3
+    DllUnregisterServer        @4
+    ArtpicstRegisterShell      @5
+    ArtpicstUnregisterShell    @6

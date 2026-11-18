@@ -5797,18 +5797,44 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 }
             } else if (wParam == TIMER_GIF) {
                 if (g_state.gif.animated() && !g_state.gifPaused) {
-                    // Avance proporcional al tiempo transcurrido: si el sistema va
-                    // retrasado se saltan fotogramas para mantener la animación en sync.
+                    // Reproducción a RITMO REAL. Los temporizadores de Windows
+                    // llegan siempre un poco tarde (~15,6 ms de resolución) y
+                    // antes se hacía gifLastTick = now: ese retraso se perdía en
+                    // cada fotograma y un GIF de 2 s duraba bastante más, sin
+                    // poder recuperarse nunca (el cociente nunca llegaba a 2).
+                    // Ahora el reloj virtual avanza solo por el tiempo
+                    // CONSUMIDO por los fotogramas mostrados, de modo que el
+                    // error no se acumula; si el sistema se retrasa de verdad,
+                    // se saltan fotogramas para volver a sincronía.
                     const int frameCount = g_state.gif.frameCount();
-                    const int delay = g_state.gif.delayAt(g_state.gif.current);
+                    const int delay = std::max(g_state.gif.delayAt(g_state.gif.current), 1);
                     const DWORD now = GetTickCount();
-                    int advance = static_cast<int>((now - g_state.gifLastTick) / std::max(delay, 1));
-                    if (advance < 1) advance = 1;
-                    if (advance > frameCount) advance = frameCount;
+                    const DWORD elapsedMs = now - g_state.gifLastTick;   // aritmética modular
+                    const DWORD steps = elapsedMs / static_cast<DWORD>(delay);
+                    DWORD take = (steps < 1u) ? 1u : steps;
+                    if (take > static_cast<DWORD>(frameCount)) take = static_cast<DWORD>(frameCount);
+                    const int advance = static_cast<int>(take);
                     g_state.gif.current = (g_state.gif.current + advance) % frameCount;
-                    g_state.gifLastTick = now;
+                    if (steps > static_cast<DWORD>(frameCount)) {
+                        // Más de una vuelta de retraso: reanclar en vez de
+                        // arrastrar una deuda imposible de recuperar.
+                        g_state.gifLastTick = now;
+                    } else {
+                        g_state.gifLastTick += static_cast<DWORD>(advance) * static_cast<DWORD>(delay);
+                    }
                     InvalidateImageRegion();
-                    SetTimer(hwnd, TIMER_GIF, static_cast<UINT>(g_state.gif.delayAt(g_state.gif.current)), nullptr);
+                    // El siguiente aviso se programa por lo que FALTA del
+                    // fotograma (no por su duración completa): así el retraso
+                    // del temporizador se compensa y la animación mantiene su
+                    // duración exacta sin deriva.
+                    // 'remaining' es una diferencia MODULAR (GetTickCount da la
+                    // vuelta cada 49,7 días): siempre queda en [0, delay].
+                    const DWORD remaining =
+                        (g_state.gifLastTick + static_cast<DWORD>(delay)) - now;
+                    const int nextMs = (remaining > 0 && remaining <= static_cast<DWORD>(delay))
+                                           ? static_cast<int>(remaining)
+                                           : 1;
+                    SetTimer(hwnd, TIMER_GIF, static_cast<UINT>(nextMs), nullptr);
                 } else {
                     KillTimer(hwnd, TIMER_GIF);
                 }

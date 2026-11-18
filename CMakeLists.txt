@@ -104,6 +104,25 @@ add_executable(artpicst_updater WIN32
 )
 target_include_directories(artpicst_updater PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/installer)
 
+# ---------------------------------------------------------------------------
+# artpicst_shell: extensión de shell del Explorador
+# ---------------------------------------------------------------------------
+# Servidor COM en proceso (IThumbnailProvider + IPreviewHandler) que el
+# instalador registra por extensión. Comparte el baseline SSE4.2 y decodifica
+# con WIC (con stb_image como respaldo), igual que el visor.
+add_library(artpicst_shell SHARED
+    shell/artpicst_shell.cpp
+    shell/artpicst_shell.def
+)
+target_include_directories(artpicst_shell PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+set_target_properties(artpicst_shell PROPERTIES
+    PREFIX ""
+    OUTPUT_NAME "artpicst_shell"
+)
+target_compile_definitions(artpicst_shell PRIVATE STBIR_NO_AVX STBIR_NO_AVX2)
+
 target_include_directories(artpicst PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -111,6 +130,7 @@ target_include_directories(artpicst PRIVATE
 
 artpicst_enable_sse42(artpicst)
 artpicst_enable_sse42(artpicst_updater)
+artpicst_enable_sse42(artpicst_shell)
 
 # STBIR_NO_AVX / STBIR_NO_AVX2 son el cinturón de seguridad de stb_image_resize2:
 # aunque alguien active AVX por error, la cabecera de terceros no lo usará.
@@ -132,17 +152,28 @@ if(WIN32)
         WIN32_LEAN_AND_MEAN
         _WIN32_WINNT=0x0601
     )
+    target_compile_definitions(artpicst_shell PRIVATE
+        UNICODE
+        _UNICODE
+        NOMINMAX
+        WIN32_LEAN_AND_MEAN
+        _WIN32_WINNT=0x0601
+    )
     target_link_libraries(artpicst PRIVATE
         gdiplus user32 kernel32 shell32 shlwapi gdi32 msimg32 ole32 oleaut32 uuid dwmapi windowscodecs comdlg32 d2d1 dwrite
     )
     target_link_libraries(artpicst_updater PRIVATE
         gdiplus shell32 shlwapi user32 advapi32 gdi32 ole32 uuid dwmapi winhttp
     )
+    target_link_libraries(artpicst_shell PRIVATE
+        shlwapi windowscodecs ole32 uuid user32 gdi32 msimg32 advapi32
+    )
 endif()
 
 if(MSVC)
     set_property(TARGET artpicst PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
     set_property(TARGET artpicst_updater PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    set_property(TARGET artpicst_shell PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
     target_compile_options(artpicst PRIVATE
         /W4
         /utf-8
@@ -154,6 +185,11 @@ if(MSVC)
         $<$<CONFIG:Release>:/GL>
         $<$<CONFIG:Release>:/Gy>
         $<$<CONFIG:Release>:/guard:cf>
+        # Tuning de código para el equipo de desarrollo (Intel Core i5-12400):
+        # no cambia el baseline SIMD ni emite AVX (ver tools/build-baseline.json).
+        $<$<CONFIG:Release>:/favor:INTEL64>
+        $<$<CONFIG:Release>:/Gw>
+        $<$<CONFIG:Release>:/Zc:inline>
         $<$<CONFIG:Debug>:/Od>
     )
     target_compile_options(artpicst_updater PRIVATE
@@ -165,6 +201,21 @@ if(MSVC)
         $<$<CONFIG:Release>:/Oi>
         $<$<CONFIG:Release>:/Gy>
         $<$<CONFIG:Release>:/guard:cf>
+        $<$<CONFIG:Release>:/favor:INTEL64>
+        $<$<CONFIG:Release>:/Zc:inline>
+        $<$<CONFIG:Debug>:/Od>
+    )
+    target_compile_options(artpicst_shell PRIVATE
+        /W4
+        /utf-8
+        /MP
+        /permissive-
+        $<$<CONFIG:Release>:/O2>
+        $<$<CONFIG:Release>:/Ob3>
+        $<$<CONFIG:Release>:/Oi>
+        $<$<CONFIG:Release>:/guard:cf>
+        $<$<CONFIG:Release>:/favor:INTEL64>
+        $<$<CONFIG:Release>:/Zc:inline>
         $<$<CONFIG:Debug>:/Od>
     )
     # Endurecimiento del binario. NO se usa /fp:fast: rompería la exactitud de
@@ -176,6 +227,12 @@ if(MSVC)
         $<$<CONFIG:Release>:/OPT:ICF>
         ${ARTPICST_HARDENING_LINK}
         "/MANIFESTUAC:level='asInvoker' uiAccess='false'"
+    )
+    target_link_options(artpicst_shell PRIVATE
+        $<$<CONFIG:Release>:/OPT:REF>
+        $<$<CONFIG:Release>:/OPT:ICF>
+        ${ARTPICST_HARDENING_LINK}
+        "/MANIFEST:EMBED"
     )
     target_link_options(artpicst_updater PRIVATE
         $<$<CONFIG:Release>:/OPT:REF>
@@ -189,6 +246,7 @@ else()
     # tipo ni optimizaciones atadas a una microarquitectura concreta de la CPU.
     target_compile_options(artpicst PRIVATE -O3 -funroll-loops -fno-math-errno -Wall -Wextra)
     target_compile_options(artpicst_updater PRIVATE -O2 -Wall -Wextra)
+    target_compile_options(artpicst_shell PRIVATE -O2 -Wall -Wextra)
     target_link_options(artpicst_updater PRIVATE -municode)
 endif()
 
@@ -240,7 +298,7 @@ endif()
 # ---------------------------------------------------------------------------
 if(ARTPICST_PACKAGE)
     set(ARTPICST_PAYLOAD_DIR "${CMAKE_CURRENT_SOURCE_DIR}/resources/app")
-    set(ARTPICST_PAYLOAD_FILES artpicst.exe artpicst.ico version.json README.md artpicst_updater.exe)
+    set(ARTPICST_PAYLOAD_FILES artpicst.exe artpicst.ico version.json README.md artpicst_updater.exe artpicst_shell.dll)
 
     # Genera resources/app/ a partir de los binarios recién compilados. Antes
     # esto era un FATAL_ERROR de configuración que impedía cualquier build limpio.
@@ -249,11 +307,12 @@ if(ARTPICST_PACKAGE)
         COMMAND ${CMAKE_COMMAND} -E make_directory "${ARTPICST_PAYLOAD_DIR}"
         COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:artpicst>" "${ARTPICST_PAYLOAD_DIR}/artpicst.exe"
         COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:artpicst_updater>" "${ARTPICST_PAYLOAD_DIR}/artpicst_updater.exe"
+        COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:artpicst_shell>" "${ARTPICST_PAYLOAD_DIR}/artpicst_shell.dll"
         COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_CURRENT_SOURCE_DIR}/resources/artpicst.ico" "${ARTPICST_PAYLOAD_DIR}/artpicst.ico"
         COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_CURRENT_SOURCE_DIR}/version.json" "${ARTPICST_PAYLOAD_DIR}/version.json"
         COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_CURRENT_SOURCE_DIR}/README.md" "${ARTPICST_PAYLOAD_DIR}/README.md"
         COMMAND ${CMAKE_COMMAND} -E touch "${ARTPICST_PAYLOAD_DIR}/.payload-stamp"
-        DEPENDS artpicst artpicst_updater
+        DEPENDS artpicst artpicst_updater artpicst_shell
         COMMENT "Poblando resources/app/ (payload autocontenido)"
         VERBATIM
     )
@@ -305,14 +364,14 @@ if(ARTPICST_PACKAGE)
         target_link_options(artpicst_installer PRIVATE -municode)
     endif()
 
-    install(TARGETS artpicst artpicst_installer artpicst_updater RUNTIME DESTINATION .)
+    install(TARGETS artpicst artpicst_installer artpicst_updater artpicst_shell RUNTIME DESTINATION .)
     install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/README.md" DESTINATION .)
     install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/resources/artpicst.ico" DESTINATION .)
 else()
     message(STATUS
         "ARTPICST_PACKAGE=OFF: el instalador autocontenido no se compila. "
         "Activalo con -DARTPICST_PACKAGE=ON (genera y usa resources/app/).")
-    install(TARGETS artpicst artpicst_updater RUNTIME DESTINATION .)
+    install(TARGETS artpicst artpicst_updater artpicst_shell RUNTIME DESTINATION .)
     install(FILES README.md DESTINATION .)
     install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/resources/artpicst.ico" DESTINATION .)
 endif()

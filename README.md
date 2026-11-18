@@ -14,6 +14,7 @@ Visor de imágenes premium nativo para Windows (C++ / Win32) con interfaz acríl
 - **Orientación EXIF Automática**: Detecta y corrige la orientación de fotos de móviles y cámaras
 - **Navegación Avanzada**: Flechas ↑↓ para zoom, ←→ para imágenes, arrastrar para pan
 - **Instalador Autocontenido**: Wizard GDI+ con tema "Aurora Carbon", stepper de etapas y consola de log en vivo; payload incrustado (un solo `.exe` distribuible)
+- **Miniaturas y Vista Previa del Explorador**: `artpicst_shell.dll` (COM nativo) muestra la imagen en Iconos grandes, Mosaicos y Contenido y en el panel de vista previa (Alt+P), conservando la transparencia y sin quitarle el manejador a los formatos que Windows ya miniaturiza
 - **Auto-Actualizador Integrado**: Comprueba GitHub Releases una vez al día en segundo plano, notifica con una ventana flotante y actualiza con un clic (descarga verificada por SHA-256)
 - **Consumo Ultra-Ligero**: Huella de memoria optimizada (RAM < 80 MB, CPU ~0%)
 
@@ -159,7 +160,7 @@ Sin conexión, con rate-limit de la API o si el servidor falla, el updater perma
 ## 🏗️ Arquitectura
 
 - **Main Program**: C++23 nativo con Win32 API, GDI+, WIC, stb_image (ultra-optimizado); baseline SIMD SSE4.2 sin AVX
-- **Installer** (`installer/`): wizard GDI+ autocontenido; extrae su payload RCDATA, instala con elevación UAC, rollback y modo silencioso `--update`; la instalación muestra 10 fases técnicas con consola de log en vivo
+- **Installer** (`installer/`): wizard GDI+ autocontenido; extrae su payload RCDATA, instala con elevación UAC, rollback y modo silencioso `--update`; la instalación muestra 11 fases técnicas con consola de log en vivo
 - **Updater** (`updater/`): módulo independiente con WinHTTP que consulta `releases/latest` en GitHub, compara versiones, verifica SHA-256 y encadena la instalación
 - **Viewer ↔ Updater** (`src/updater_client.hpp`): chequeo diario en segundo plano y menú "Buscar actualizaciones..."
 

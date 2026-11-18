@@ -30,6 +30,7 @@ PAYLOAD = [
     ("version.json",         "APP_VERSION", 203),
     ("README.md",            "APP_README",  204),
     ("artpicst_updater.exe", "APP_UPDATER", 205),
+    ("artpicst_shell.dll",   "APP_SHELL",   206),
 ]
 
 HEADER_TEMPLATE = """\

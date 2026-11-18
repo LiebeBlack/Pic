@@ -71,6 +71,17 @@ jobs:
           /GUARD:CF /DYNAMICBASE /HIGHENTROPYVA /NXCOMPAT || exit /b 1
         cd ..
 
+    - name: Compilar extension de shell (miniaturas y vista previa)
+      shell: cmd
+      run: |
+        if not exist build mkdir build
+        cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /guard:cf %SIMD_FLAG% %SIMD_DEFINE% /utf-8 /W4 /WX- /wd4324 /Iinclude ^
+          /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0601 /D_CRT_SECURE_NO_WARNINGS ^
+          /LD /Fe:"build\artpicst_shell.dll" shell\artpicst_shell.cpp ^
+          /link /DEF:shell\artpicst_shell.def shlwapi.lib windowscodecs.lib ole32.lib uuid.lib user32.lib ^
+                gdi32.lib msimg32.lib advapi32.lib ^
+          /OPT:REF /OPT:ICF /GUARD:CF /DYNAMICBASE /HIGHENTROPYVA /NXCOMPAT || exit /b 1
+
     - name: Preparar payload del instalador
       shell: powershell
       run: |
@@ -83,6 +94,7 @@ jobs:
         Copy-Item "README.md" (Join-Path $payload "README.md") -Force
         # build.yml no compila updater: copiamos el exe principal como placeholder
         Copy-Item "build\artpicst.exe" (Join-Path $payload "artpicst_updater.exe") -Force
+        Copy-Item "build\artpicst_shell.dll" (Join-Path $payload "artpicst_shell.dll") -Force
 
     - name: Compilar recursos del instalador
       shell: cmd

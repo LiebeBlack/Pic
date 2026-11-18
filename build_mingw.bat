@@ -157,6 +157,14 @@ if %ERRORLEVEL% NEQ 0 (
 )
 echo SIMD policy OK
 
+:: [3d/5] Shell extension (Explorer thumbnails + preview)
+echo [3d/5] Building shell extension (artpicst_shell.dll)...
+g++ -std=c++23 -O2 %SIMD_FLAG% %SIMD_DEFINE% -Wall -Wextra -shared -static -static-libgcc -static-libstdc++ -DUNICODE -D_UNICODE -DNOMINMAX -DWIN32_LEAN_AND_MEAN -D_WIN32_WINNT=0x0601 -DSTBIR_NO_AVX -DSTBIR_NO_AVX2 -Iinclude -o build\artpicst_shell.dll shell\artpicst_shell.cpp shell\artpicst_shell.def -lshlwapi -lwindowscodecs -lole32 -luuid -luser32 -lgdi32 -lmsimg32 -ladvapi32
+if %ERRORLEVEL% NEQ 0 (
+    echo Error building shell extension
+    exit /b 1
+)
+
 :: [4/5] Self-contained payload
 echo [4/5] Preparing self-contained payload (resources\app\)...
 python scripts\collect_app_payload.py --root .

@@ -26,6 +26,7 @@ inline constexpr PayloadEntry kPayload[] = {
     { 203, "version.json",         "" },   // RES_APP_VERSION
     { 204, "README.md",            "" },   // RES_APP_README
     { 205, "artpicst_updater.exe", "" },   // RES_APP_UPDATER
+    { 206, "artpicst_shell.dll",   "" },   // RES_APP_SHELL
 };
 
 inline constexpr std::size_t kPayloadCount = sizeof(kPayload) / sizeof(kPayload[0]);

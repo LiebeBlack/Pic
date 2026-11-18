@@ -58,6 +58,7 @@ VIEWER_FLAGS   := -std=c++23 -O3 -funroll-loops -fno-math-errno $(SIMD) $(SIMDDE
 # (-I../installer y -I../include), igual que en build_mingw.bat.
 UPDATER_FLAGS  := -std=c++23 -O2 $(SIMD) $(SIMDDEF) $(WARN) $(LINKSTATIC) -municode $(SYSDEFS) -I. -I../installer
 INSTALLER_FLAGS:= -std=c++23 -O2 $(SIMD) $(SIMDDEF) $(WARN) $(LINKSTATIC) -municode $(SYSDEFS) -I. -I../include
+SHELL_FLAGS    := -std=c++23 -O2 $(SIMD) $(SIMDDEF) $(WARN) -shared $(LINKSTATIC) $(SYSDEFS) -Iinclude
 TEST_FLAGS     := -std=c++20 -O2 $(SIMD) $(SIMDDEF) $(WARN) -I. -Iinclude
 
 VIEWER_LIBS  := -lgdiplus -luser32 -lkernel32 -lshell32 -lshlwapi -lgdi32 -lmsimg32 \
@@ -66,16 +67,17 @@ UPDATER_LIBS := -lwinhttp -lgdiplus -lshell32 -lshlwapi -luser32 -ladvapi32 -lgd
                 -lole32 -luuid -ldwmapi
 INSTALLER_LIBS := -lgdiplus -lshlwapi -lshell32 -lcomctl32 -ldwmapi -luser32 -ladvapi32 \
                   -lgdi32 -lole32 -luuid
+SHELL_LIBS     := -lshlwapi -lwindowscodecs -lole32 -luuid -luser32 -lgdi32 -lmsimg32 -ladvapi32
 
 BUILD := build
 DIST  := dist
 
-.PHONY: all resources viewer updater selftest test policy bench payload installer dist clean msvc help
+.PHONY: all resources viewer updater shell selftest test policy bench payload installer dist clean msvc help
 
 # ---------------------------------------------------------------------------
 # Pipeline completo
 # ---------------------------------------------------------------------------
-all: resources viewer updater selftest test payload installer dist
+all: resources viewer updater shell selftest test payload installer dist
 	@echo ""
 	@echo "========================================"
 	@echo "BUILD SUCCESSFUL (MinGW / make)"
@@ -107,6 +109,14 @@ viewer: resources
 updater: resources
 	@echo "[3/6] Updater (artpicst_updater.exe)"
 	@cd updater && $(CXX) $(UPDATER_FLAGS) -o ../$(BUILD)/artpicst_updater.exe artpicst_updater.cpp ../$(BUILD)/artpicst_updater_res.o $(UPDATER_LIBS) -mwindows
+
+# ---------------------------------------------------------------------------
+# Extensión de shell (miniaturas y vista previa del Explorador)
+# ---------------------------------------------------------------------------
+shell: | $(BUILD)
+	@echo "[2b/6] Extensión de shell (artpicst_shell.dll)"
+	@$(CXX) $(SHELL_FLAGS) -o $(BUILD)/artpicst_shell.dll shell/artpicst_shell.cpp \
+		shell/artpicst_shell.def $(SHELL_LIBS)
 
 selftest: updater
 	@echo "[3a/6] Selftest del updater"
@@ -144,7 +154,7 @@ bench: $(BUILD)/kernel_bench.exe
 # ---------------------------------------------------------------------------
 # Payload + instalador autocontenido
 # ---------------------------------------------------------------------------
-payload: viewer updater | $(BUILD)
+payload: viewer updater shell | $(BUILD)
 	@echo "[4/6] Payload autocontenido (resources/app/)"
 	@$(PYTHON) scripts/collect_app_payload.py --root .
 
