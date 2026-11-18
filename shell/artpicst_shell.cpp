@@ -651,6 +651,14 @@ public:
         }
         m_stream = stream;
         m_stream->AddRef();
+        // Archivo nuevo en una instancia reutilizada: se descarta el mapa
+        // anterior para no mostrar la imagen previa ni reutilizar su tamaño.
+        if (m_bitmap) {
+            DeleteObject(m_bitmap);
+            m_bitmap = nullptr;
+        }
+        m_bitmapW = m_bitmapH = 0;
+        m_decodeSide = 0;
         return S_OK;
     }
 
@@ -712,8 +720,14 @@ public:
 
     STDMETHODIMP DoPreview() override {
         if (!m_stream) return E_UNEXPECTED;
-        const HRESULT hr = LoadBitmapForSide(PreviewDecodeSide());
-        if (FAILED(hr)) return hr;
+        // El host suele llamar a SetWindow (que ya maqueta y dispara WM_SIZE)
+        // antes que a DoPreview: si el mapa actual ya cubre el tamaño del panel
+        // no se vuelve a decodificar el archivo.
+        const UINT side = PreviewDecodeSide();
+        if (!m_bitmap || m_decodeSide < side) {
+            const HRESULT hr = LoadBitmapForSide(side);
+            if (FAILED(hr)) return hr;
+        }
         if (m_pane && IsWindow(m_pane)) InvalidateRect(m_pane, nullptr, FALSE);
         return S_OK;
     }
@@ -725,6 +739,7 @@ public:
             m_bitmap = nullptr;
         }
         m_bitmapW = m_bitmapH = 0;
+        m_decodeSide = 0;
         if (m_stream) {
             m_stream->Release();
             m_stream = nullptr;
