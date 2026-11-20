@@ -11,10 +11,10 @@
 // · La instalación, la desinstalación y la actualización corren en un hilo
 //   secundario (std::thread) y publican el progreso con PostMessage: la
 //   interfaz NUNCA se bloquea ni muestra "No responde".
-// · Duración simulada EXACTA de 34 s (instalación/actualización): cada hito
-//   ejecuta su operación real y el planificador ajusta el ritmo para que el
-//   proceso completo dure 34.0 s, con fases técnicas en vivo y consola de
-//   log central.
+// · Duración objetivo de 8 s (instalación/actualización) y 4 s
+//   (desinstalación): cada hito ejecuta su operación real y el planificador
+//   solo espera lo que falte para su marca, con fases técnicas en vivo y
+//   consola de log central.
 // · Payload AUTOCONTENIDO: artpicst.exe, el icono, version.json, README.md y
 //   artpicst_updater.exe viajan incrustados como recursos RCDATA y se extraen
 //   al instalar (ver installer/artpicst_installer.rc).
@@ -109,11 +109,18 @@ const wchar_t APP_URL[]        = L"https://github.com/LiebeBlack/Pic";
 // ============================================================================
 
 // Tamaño de diseño (unidades lógicas 96 DPI); la ventana se escala por g_scale
-// y es REDIMENSIONABLE entre 760x560 y tamaños arbitrarios.
+// y es REDIMENSIONABLE a partir del tamaño de diseño.
+//
+// MIN_DESIGN_H era 560 y el contenido inferior (pista de la bienvenida, fila
+// de opciones de la licencia y botones) se solapaba al reducir la ventana. A
+// 620 px el bloque más alto —licencia: 3 filas que acaban en 522— deja 30 px
+// libres sobre los botones (552), así que 620 es el mínimo que el diseño
+// soporta sin colisiones. Se aplica sobre el ÁREA CLIENTE, no sobre el marco:
+// ver WM_GETMINMAXINFO.
 const float DESIGN_W = 880.0f;
 const float DESIGN_H = 620.0f;
 const float MIN_DESIGN_W = 760.0f;
-const float MIN_DESIGN_H = 560.0f;
+const float MIN_DESIGN_H = 620.0f;
 float g_scale = 1.0f;
 
 // Márgenes del nuevo diseño (sin barra lateral): el contenido ocupa todo el
@@ -139,9 +146,18 @@ int g_shortcutsCreated = 0;
 int g_paintedTenth = -1;      // décimas de segundo ya pintadas en la UI
 int g_paintedLogSize = -1;    // líneas de log ya pintadas en la consola
 
-// Duración exacta de la simulación de instalación/actualización y desinstalación.
-constexpr double kInstallDurationSeconds = 34.0;
-constexpr double kUninstallDurationSeconds = 14.0;
+// Duración del recorrido de instalación/actualización y desinstalación.
+//
+// El pipeline real (verificar SHA-256, extraer el payload de recursos,
+// registrar asociaciones y miniaturas) tarda del orden de 1-3 s en un equipo
+// normal. Antes se estiraba hasta 34 s por diseño, y eso es lo que se percibía
+// como lentitud: 30 de esos segundos eran espera artificial. Ahora la duración
+// objetivo es 8 s (4 s la desinstalación) y los hitos de las tablas —que están
+// escritos sobre la duración de diseño— se escalan en RunPipeline.
+constexpr double kInstallDurationSeconds = 8.0;
+constexpr double kUninstallDurationSeconds = 4.0;
+constexpr double kInstallDesignSeconds = 34.0;    // base de kInstallTasks
+constexpr double kUninstallDesignSeconds = 14.0;  // base de kUninstallTasks
 
 // ============================================================================
 // Estado global del asistente
@@ -874,7 +890,7 @@ void RemoveAppShortcutsIn(const std::wstring& folder) {
 }
 
 // ============================================================================
-// Hilo trabajador: planificador de 34 s exactos + publicación a la UI
+// Hilo trabajador: planificador de duración objetivo + publicación a la UI
 // ============================================================================
 
 struct PipeUi {
@@ -918,8 +934,8 @@ struct PipeUi {
 };
 
 // Reloj del planificador: cada hito duerme lo justo para alcanzar su marca
-// temporal objetivo, de modo que el proceso completo dura EXACTAMENTE 34.0 s
-// (la espera final absorbe cualquier desviación; nunca termina antes).
+// temporal objetivo, de modo que el proceso completo dura exactamente la
+// duración configurada (la espera final absorbe cualquier desviación).
 struct Pacer {
     std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
     double Elapsed() const {
@@ -1602,19 +1618,27 @@ void RunPipeline(AppMode mode) {
         taskCount = kInstallTaskCount;
     }
 
+    // Las tablas están escritas sobre la duración de diseño (34 s / 14 s). Si
+    // la duración real es menor, se escala cada hito para que porcentaje,
+    // cronómetro y pausas sigan cuadrando entre sí.
+    const double designTotal = (mode == AppMode::Uninstall) ? kUninstallDesignSeconds
+                                                            : kInstallDesignSeconds;
+    const double targetScale = total / designTotal;
+
     bool ok = true;
     std::wstring error;
     for (int i = 0; ok && i < taskCount; ++i) {
-        ui.Progress(static_cast<int>(tasks[i].target / total * 100.0),
+        const double target = tasks[i].target * targetScale;
+        ui.Progress(static_cast<int>(target / total * 100.0),
                     clock.Elapsed(), tasks[i].phase);
         ok = tasks[i].run(ui, job, clock, error);
         if (!ok) break;
-        if (job.pacing) clock.SleepUntil(tasks[i].target);
+        if (job.pacing) clock.SleepUntil(target);
     }
 
     if (ok && job.pacing) {
-        // La marca final garantiza una duración EXACTA de 34.0 s (o 14 s en
-        // desinstalación): nunca termina antes, aunque todo fuera rápido.
+        // La marca final garantiza una duración EXACTA de kInstallDurationSeconds
+        // (o kUninstallDurationSeconds): nunca termina antes, aunque todo fuera rápido.
         while (clock.Elapsed() < total) {
             const double remain = total - clock.Elapsed();
             ui.Progress(static_cast<int>((total - remain) / total * 99.0),
@@ -1633,8 +1657,8 @@ void RunPipeline(AppMode mode) {
         ui.Log(LogKind::Error, clock.Elapsed(), L"[ER] %ls", error.c_str());
     }
 
-    // La marca final garantiza una duración EXACTA de 34.0 s (o 14 s en
-    // desinstalación) cuando hay pacing; en --silent se completa al momento.
+    // La marca final garantiza la duración objetivo cuando hay pacing; en
+    // --silent se completa al momento.
     g_lastRunSucceeded = ok;
     g_lastError = ok ? std::wstring() : error;
     // FIX: sin UI también se refleja el tiempo trabajado (lo pide la consola
@@ -1846,7 +1870,11 @@ static void DrawPageHeader(Graphics& g, const Fonts& fonts, float W, const wchar
             FillRound(g, dot, dotR, Color(255, 18, 22, 27));
             StrokeRound(g, dot, dotR, Color(255, 42, 51, 61), 1.0f);
         }
-        RectF labelRect(cx - 70.0f, trackY + 12.0f, 140.0f, 16.0f);
+        // El ancho de la etiqueta se deriva del hueco real entre puntos: con
+        // 140 px fijos, a 760 px de ancho las etiquetas contiguas se solapaban
+        // 23 px (dos textos centrados peleando por el mismo espacio).
+        const float labelW = std::max(64.0f, gap - 6.0f);
+        RectF labelRect(cx - labelW * 0.5f, trackY + 12.0f, labelW, 16.0f);
         DrawTextIn(g, steps[i].label, labelRect, fonts.fTiny,
                    active ? COL_TEXT : (done ? COL_TEXT_SOFT : COL_TEXT_DIM), true, true);
     }
@@ -2111,7 +2139,7 @@ void RenderWelcome(Graphics& g, const Fonts& fonts, float W, float H, const Layo
     StrokeRound(g, card, 16.0f, COL_PANEL_BORDER, 1.0f);
 
     const wchar_t* features[] = {
-        L"Más de 30 formatos: PNG, WebP, HEIC, AVIF, GIF, RAW y más",
+        L"51 formatos: PNG, WebP, HEIC, AVIF, JXL, GIF, PSD, RAW y más",
         L"Zoom fluido por GPU, píxel perfecto al 100% y Ultra-Claridad HDR",
         L"Instalación tradicional: Program Files, menú Inicio y desinstalador",
         L"Módulo inteligente de actualización automática integrado",
@@ -2127,7 +2155,8 @@ void RenderWelcome(Graphics& g, const Fonts& fonts, float W, float H, const Layo
         fy += 29.0f;
     }
 
-    RectF hint(contentX, 500.0f, CW, 18.0f);
+    // La pista se ancla sobre la fila de botones (nunca debajo de ella).
+    RectF hint(contentX, std::min(500.0f, layout.next.Y - 24.0f), CW, 18.0f);
     DrawTextIn(g, (g_machineWide
                        ? L"Se instalará para todos los usuarios (requiere administrador)."
                        : L"Se instalará para tu usuario, sin permisos de administrador."),
@@ -2138,6 +2167,7 @@ void RenderWelcome(Graphics& g, const Fonts& fonts, float W, float H, const Layo
 // libre real, tamaño del payload y detección de instalaciones previas.
 void RenderDestination(Graphics& g, const Fonts& fonts, float W, float H, const LayoutRects& layout) {
     (void)W;
+    (void)H;   // la geometría vertical se ancla a layout.next, no al alto
     const float contentX = layout.back.X;
     const float CW = layout.next.X + layout.next.Width - contentX;
 
@@ -2196,7 +2226,10 @@ void RenderDestination(Graphics& g, const Fonts& fonts, float W, float H, const 
     DrawTextIn(g, L"Recomendado: al menos 100 MB libres. ARTPICST no instala servicios ni procesos en segundo plano.",
                note, fonts.fTiny, COL_TEXT_DIM, false, true, StringTrimmingEllipsisCharacter, true);
 
-    RectF destRect(contentX, H - 92.0f, CW, 18.0f);
+    // Anclado a la fila de botones en lugar de a "H - 92": con la ventana más
+    // alta el texto flotaba lejos y con la más baja se montaba sobre los
+    // botones.
+    RectF destRect(contentX, layout.next.Y - 26.0f, CW, 18.0f);
     std::wstring dest = L"Se instalará en:  " + g_state.installPath;
     DrawTextIn(g, dest.c_str(), destRect, fonts.fTiny, COL_TEXT_DIM, false, true,
                StringTrimmingEllipsisCharacter, true);
@@ -2204,6 +2237,7 @@ void RenderDestination(Graphics& g, const Fonts& fonts, float W, float H, const 
 
 void RenderLicense(Graphics& g, const Fonts& fonts, float W, float H, const LayoutRects& layout) {
     (void)W;
+    (void)H;   // el pie de ruta se movió a la página de destino
     const float contentX = layout.back.X;
     const float CW = layout.next.X + layout.next.Width - contentX;
 
@@ -2261,11 +2295,9 @@ void RenderLicense(Graphics& g, const Fonts& fonts, float W, float H, const Layo
         DrawOptionRow(g, fonts, layout.rows[i], rows[i].label, *rows[i].value,
                       g_state.hoverZone == rows[i].hover);
     }
-
-    RectF destRect(contentX, H - 92.0f, CW, 18.0f);
-    std::wstring dest = L"Se instalará en:  " + g_state.installPath;
-    DrawTextIn(g, dest.c_str(), destRect, fonts.fTiny, COL_TEXT_DIM, false, true,
-               StringTrimmingEllipsisCharacter, true);
+    // El pie "Se instalará en:" se repetía aquí y en la página de destino; en
+    // esta pantalla empujaba las tres filas de opciones contra los botones.
+    // La ruta ya se elige y se muestra en el paso siguiente.
 }
 
 void RenderUninstallConfirm(Graphics& g, const Fonts& fonts, float W, float H, const LayoutRects& layout) {
@@ -2830,8 +2862,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_GETMINMAXINFO: {
             auto* info = reinterpret_cast<LPMINMAXINFO>(lParam);
             if (info) {
-                info->ptMinTrackSize.x = static_cast<LONG>(MIN_DESIGN_W * g_scale + 0.5f);
-                info->ptMinTrackSize.y = static_cast<LONG>(MIN_DESIGN_H * g_scale + 0.5f);
+                // ptMinTrackSize se mide sobre el MARCO de la ventana, no sobre
+                // el área cliente. Fijar ahí 760x620 dejaba un cliente de
+                // ~744x581: los botones subían sobre la pista de bienvenida y
+                // sobre la última fila de opciones (superposición visible al
+                // reducir la ventana). Se convierte el mínimo de diseño a
+                // tamaño de marco con el estilo real de la ventana.
+                RECT frame{};
+                frame.right = static_cast<LONG>(MIN_DESIGN_W * g_scale + 0.5f);
+                frame.bottom = static_cast<LONG>(MIN_DESIGN_H * g_scale + 0.5f);
+                AdjustWindowRectEx(&frame, WS_OVERLAPPEDWINDOW, FALSE, WS_EX_APPWINDOW);
+                info->ptMinTrackSize.x = frame.right - frame.left;
+                info->ptMinTrackSize.y = frame.bottom - frame.top;
             }
             return 0;
         }

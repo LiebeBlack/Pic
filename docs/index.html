@@ -3,6 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#F4F2EC">
+<meta name="color-scheme" content="light">
 <title>ARTPICST — Visor de imágenes para Windows</title>
 <meta name="description" content="Visor de imágenes nativo para Windows 10 y 11. Renderizado Direct2D, gestión de color ICC, escalado multihilo, 51 formatos y actualizaciones verificadas. Sin cuentas ni telemetría.">
 <link rel="icon" href="artpicst.ico">
@@ -41,6 +43,9 @@
 
   *,*::before,*::after{box-sizing:border-box;}
   html{-webkit-text-size-adjust:100%;scroll-behavior:smooth;}
+  /* La cabecera es fija: sin esto, al saltar a una sección el título queda
+     debajo de ella. */
+  section[id]{scroll-margin-top:84px;}
   body{
     margin:0;
     background:var(--paper);
@@ -129,7 +134,7 @@
   h2{font-size:clamp(30px,3.6vw,46px);line-height:1.04;letter-spacing:-.03em;font-weight:600;text-wrap:balance;}
   .split{display:grid;grid-template-columns:1fr 1.05fr;gap:72px;align-items:start;
     padding-bottom:84px;border-bottom:1px solid var(--line);}
-  .prose p{color:var(--ink-2);max-width:58ch;}
+  .prose p{color:var(--ink-2);max-width:58ch;text-wrap:pretty;}
   .prose p + p{margin-top:16px;}
   .prose strong{color:var(--ink);font-weight:600;}
 
