@@ -68,7 +68,7 @@ cd ..
 > justificación en un comentario.
 
 ```cmd
-cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /GL /Gy /guard:cf /arch:SSE4.2 /DARTPICST_TARGET_SSE42=1 /utf-8 /W4 /permissive- /wd4324 /I. /Iinclude /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /DSTBI_WINDOWS_UTF8 /DSTBIR_NO_AVX /DSTBIR_NO_AVX2 /D_WIN32_WINNT=0x0601 /D_CRT_SECURE_NO_WARNINGS /Fe:"build\artpicst.exe" src\main.cpp build\artpicst.res /link gdiplus.lib user32.lib kernel32.lib shell32.lib shlwapi.lib gdi32.lib msimg32.lib ole32.lib oleaut32.lib uuid.lib dwmapi.lib windowscodecs.lib comdlg32.lib d2d1.lib dwrite.lib advapi32.lib /MANIFEST:EMBED /MANIFESTINPUT:artpicst.manifest /SUBSYSTEM:WINDOWS /LTCG /OPT:REF /OPT:ICF /GUARD:CF /DYNAMICBASE /HIGHENTROPYVA /NXCOMPAT
+cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /GL /Gy /guard:cf /arch:SSE4.2 /DARTPICST_TARGET_SSE42=1 /utf-8 /W4 /permissive- /wd4324 /I. /Iinclude /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /DSTBI_WINDOWS_UTF8 /DSTBIR_NO_AVX /DSTBIR_NO_AVX2 /D_WIN32_WINNT=0x0601 /D_CRT_SECURE_NO_WARNINGS /Fe:"build\artpicst.exe" src\main.cpp build\artpicst.res /link gdiplus.lib user32.lib kernel32.lib shell32.lib shlwapi.lib gdi32.lib msimg32.lib ole32.lib oleaut32.lib uuid.lib dwmapi.lib windowscodecs.lib comdlg32.lib d2d1.lib dwrite.lib winmm.lib dxgi.lib advapi32.lib /MANIFEST:EMBED /MANIFESTINPUT:artpicst.manifest /SUBSYSTEM:WINDOWS /LTCG /OPT:REF /OPT:ICF /GUARD:CF /DYNAMICBASE /HIGHENTROPYVA /NXCOMPAT
 ```
 
 Endurecimiento del enlace (los tres objetivos): `/GUARD:CF` (Control Flow Guard),
