@@ -15,6 +15,8 @@ Visor de imágenes premium nativo para Windows (C++ / Win32) con interfaz acríl
 - **Navegación Avanzada**: Flechas ↑↓ para zoom, ←→ para imágenes, arrastrar para pan
 - **Instalador Autocontenido**: Wizard GDI+ con tema "Aurora Carbon", stepper de etapas y consola de log en vivo; payload incrustado (un solo `.exe` distribuible)
 - **Miniaturas y Vista Previa del Explorador**: `artpicst_shell.dll` (COM nativo) muestra la imagen en Iconos grandes, Mosaicos y Contenido y en el panel de vista previa (Alt+P), conservando la transparencia y sin quitarle el manejador a los formatos que Windows ya miniaturiza
+- **Calidad HQ 4K**: textura remuestreada en CPU con Catmull-Rom (ampliar) y Mitchell (reducir) repartida entre núcleos, para mostrar 1:1 real y evitar la blandura del bilineal de la GPU; perfiles ICC convertidos a sRGB
+- **Asociaciones de Archivo Completas**: ARTPICST aparece en «Abrir con» de los **51 formatos soportados**, sin cambiar el programa predeterminado del usuario; desregistrar retira solo las entradas propias
 - **Auto-Actualizador Integrado**: Comprueba GitHub Releases una vez al día en segundo plano, notifica con una ventana flotante y actualiza con un clic (descarga verificada por SHA-256)
 - **Consumo Ultra-Ligero**: Huella de memoria optimizada (RAM < 80 MB, CPU ~0%)
 
@@ -23,6 +25,11 @@ Visor de imágenes premium nativo para Windows (C++ / Win32) con interfaz acríl
 1. **stb_image**: JPG, PNG, BMP, GIF, TGA, PSD, HDR, PIC, PNM/PPM/PGM
 2. **WIC (Windows Imaging Component)**: TIFF, ICO, WebP, HEIC/HEIF, AVIF, JPEG-XR/WDP y RAW (CR2, NEF, ARW, DNG, etc.)
 3. **GDI+**: TIFF, EMF, WMF y códecs del sistema
+
+La lista canónica de extensiones vive en `include/artpicst_formats.hpp` (51
+formatos) y alimenta el visor (escaneo de carpetas, diálogo «Abrir» y
+`--register`), las asociaciones del instalador y la extensión de shell, así que
+no puede haber formatos reconocidos por un componente y olvidados por otro.
 
 ## ⌨️ Controles y Atajos
 
@@ -125,6 +132,11 @@ artpicst.exe --fullscreen "C:\Fotos"
 artpicst.exe --register
 artpicst.exe --unregister
 ```
+
+`--register` da de alta a ARTPICST en «Abrir con» de **todos** los formatos
+soportados (y en «Valores predeterminados» vía `Capabilities`) sin tocar el
+programa predeterminado de cada extensión; `--unregister` retira únicamente las
+entradas escritas por ARTPICST.
 
 El módulo de actualización también se puede usar directamente:
 

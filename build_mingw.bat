@@ -83,7 +83,7 @@ echo [2/5] Building main program with MinGW...
 :: ningun tipo: el gate tests/check_simd_policy.py los rechaza y el header
 :: image_core.hpp falla con #error si detecta AVX. STBIR_NO_AVX/STBIR_NO_AVX2
 :: son el cinturon de seguridad para stb_image_resize2.
-g++ -std=c++23 -O3 -funroll-loops -fno-math-errno %SIMD_FLAG% %SIMD_DEFINE% -Wall -Wextra -static -static-libgcc -static-libstdc++ -municode -DUNICODE -D_UNICODE -DNOMINMAX -DWIN32_LEAN_AND_MEAN -DSTBI_WINDOWS_UTF8 -DSTBIR_NO_AVX -DSTBIR_NO_AVX2 -D_WIN32_WINNT=0x0601 -I. -Iinclude -o build\artpicst.exe src\main.cpp %RES_OBJ% -lgdiplus -luser32 -lkernel32 -lshell32 -lshlwapi -lgdi32 -lmsimg32 -lole32 -loleaut32 -luuid -ldwmapi -lwindowscodecs -lcomdlg32 -ld2d1 -ldwrite -mwindows
+g++ -std=c++23 -O3 -funroll-loops -fno-math-errno %SIMD_FLAG% %SIMD_DEFINE% -Wall -Wextra -static -static-libgcc -static-libstdc++ -municode -DUNICODE -D_UNICODE -DNOMINMAX -DWIN32_LEAN_AND_MEAN -DSTBI_WINDOWS_UTF8 -DSTBIR_NO_AVX -DSTBIR_NO_AVX2 -D_WIN32_WINNT=0x0601 -I. -Iinclude -o build\artpicst.exe src\main.cpp %RES_OBJ% -lgdiplus -luser32 -lkernel32 -lshell32 -lshlwapi -lgdi32 -lmsimg32 -lole32 -loleaut32 -luuid -ldwmapi -lwindowscodecs -lcomdlg32 -ld2d1 -ldwrite -lwinmm -ldxgi -mwindows
 
 if %ERRORLEVEL% NEQ 0 (
     echo Error building main program

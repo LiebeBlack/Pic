@@ -22,6 +22,11 @@
 // aritmética de tamaños a prueba de desbordamiento.
 #include "image_core.hpp"
 
+// Lista única de formatos soportados: la comparten el instalador (asociaciones
+// y «Abrir con»), este visor (escaneo de carpetas y --register) y la extensión
+// de shell (miniaturas y vista previa).
+#include "artpicst_formats.hpp"
+
 // stb_image y stb_image_resize2 pasan por el asignador alineado del núcleo:
 // TODOS los búferes de píxeles del programa quedan alineados a línea de caché
 // (64 B) y se liberan con la MISMA pareja asignar/liberar, así que es imposible
@@ -45,10 +50,12 @@
 #include <shlwapi.h>
 #include <commdlg.h>
 #include <dwmapi.h>
+#include <mmsystem.h>   // timeBeginPeriod: la animación de zoom necesita 1 ms real
 #include <wincodec.h>
 #include <propvarutil.h>
 #include <gdiplus.h>
 #include <d2d1.h>
+#include <dxgi.h>      // enumeración de adaptadores (detección de GPU integrada/dedicada)
 #include <dwrite.h>
 #include "../resource.h"
 #include "updater_client.hpp"
@@ -262,6 +269,23 @@ constexpr UINT ZOOM_ANIM_PERIOD_MS = 8;   // ~120 Hz de actualización
 constexpr float ZOOM_ANIM_LOG_FULL_SPAN = 0.6f;  // |Δ ln zoom| con duración máxima
 const DWORD ZOOM_ANIM_MS_MIN = 90;               // salto pequeño (1 muesca ≈ 108 ms)
 const DWORD ZOOM_ANIM_MS_MAX = 140;              // salto grande (encadenado)
+
+// RESOLUCIÓN DEL TEMPORIZADOR: con la resolución por omisión de Windows
+// (~15,6 ms) un SetTimer de 8 ms dispara a ~64 Hz, no a 120: la animación de
+// zoom pedía el doble de frames de los que recibía y se veía a escalones. Se
+// sube la resolución a 1 ms SOLO mientras dura la animación y se restaura al
+// terminar (o al cancelarla), para no dejar el consumo energético elevado de
+// forma permanente. Es idempotente: dos adquisiciones no suben dos veces.
+static bool g_timerResolutionRaised = false;
+static void TimerResolutionAcquire() {
+    if (g_timerResolutionRaised) return;
+    if (timeBeginPeriod(1) == TIMERR_NOERROR) g_timerResolutionRaised = true;
+}
+static void TimerResolutionRelease() {
+    if (!g_timerResolutionRaised) return;
+    timeEndPeriod(1);
+    g_timerResolutionRaised = false;
+}
 
 template <typename T>
 struct ComPtr {
@@ -835,6 +859,7 @@ void NextImage();
 void PreviousImage();
 void OpenPath(const std::wstring& path);
 void UpdateWindowTitle();
+std::wstring GpuSummaryText();   // definido tras el estado GPU (se usa en la guía F1)
 void EnableDarkTitleBar(HWND hwnd, bool dark = true);
 void StopGifTimer();
 void StartGifTimer();
@@ -879,6 +904,30 @@ static bool SafePixelBytes(int width, int height, size_t& outBytes) {
                                       static_cast<uint32_t>(height), outBytes);
 }
 
+// Presupuesto de DECODIFICACIÓN, distinto del de visualización. Con
+// SafePixelBytes (límite por LADO de 5000 px) una panorámica de 12000x3000
+// (144 MB, perfectamente decodificable) se rechazaba en los tres decodificadores
+// y nunca llegaba a DownscaleImageIfTooLarge, que era código muerto: el visor
+// no abría panorámicas ni fotos de más de 5000 px por lado.
+// Aquí se acepta todo lo que quepa en el pico transitorio de memoria y cuyo lado
+// no pase del techo global; después el remuestreo multihilo la reduce al límite
+// de carga. Así el límite de 100 MB se aplica al resultado, no a la entrada.
+constexpr size_t kDecodeHardBudgetBytes = 256ull * 1024ull * 1024ull;
+
+static bool DecodePixelBytes(int width, int height, size_t& outBytes) {
+    if (width <= 0 || height <= 0) return false;
+    if (width > kMaxDimensionCeil || height > kMaxDimensionCeil) return false;
+    if (!artpicst::CheckedBgraBytes(static_cast<uint32_t>(width),
+                                    static_cast<uint32_t>(height), outBytes)) {
+        return false;
+    }
+    return outBytes <= kDecodeHardBudgetBytes;
+}
+
+// Remuestreo BGRA de alta calidad y multihilo (definido junto a la ruta GPU).
+static unsigned char* ResampleBgraMultiThread(const unsigned char* src, int sw, int sh,
+                                              int dw, int dh);
+
 // Libera páginas de memoria física no utilizadas devolviéndolas al sistema operativo
 static void TrimProcessMemory() {
     // Recortar el working set es costoso y puede forzar a Windows a volver a
@@ -902,10 +951,10 @@ static void DownscaleImageIfTooLarge(unsigned char*& pixels, int& width, int& he
     const int newWidth = std::max(1, static_cast<int>(width * scale + 0.5f));
     const int newHeight = std::max(1, static_cast<int>(height * scale + 0.5f));
 
-    unsigned char* resized = stbir_resize_uint8_srgb(
-        pixels, width, height, 0,
-        nullptr, newWidth, newHeight, 0,
-        STBIR_BGRA);
+    // Mismo remuestreo de alta calidad que la ruta GPU, repartido entre núcleos:
+    // reducir una panorámica de 200 MP para que quepa en memoria era el paso
+    // más lento de la carga y se hacía en un solo hilo.
+    unsigned char* resized = ResampleBgraMultiThread(pixels, width, height, newWidth, newHeight);
     if (!resized) return;
 
     FreePixels(pixels);
@@ -979,10 +1028,13 @@ void LogWrite(LogLevel level, const std::wstring& message) {
         const std::wstring path = LogPath();
         RotateLogIfNeeded(path);
 
-        // .c_str() explícito: en C++23 el constructor de basic_ofstream con
-        // std::wstring ya no es viable (la sobrecarga de std::filesystem::path
-        // la oculta) y GCC/Clang lo rechazan. MSVC lo aceptaba por extensión.
-        std::wofstream logFile(path.c_str(), std::ios::app);
+        // Se escribe UTF-8 REAL (ofstream binario + WideToUtf8). wofstream
+        // convierte wchar_t con la faceta "C": los acentos y cualquier carácter
+        // fuera de ASCII se pierden o rompen el flujo (en libstdc++/MinGW puede
+        // lanzar y dejar la línea solo en el depurador), justo en los mensajes
+        // en español del log. Se usa CRLF para que el Bloc de notas lo muestre
+        // línea a línea sin depender de la detección de fin de línea.
+        std::ofstream logFile(path.c_str(), std::ios::app | std::ios::binary);
         if (!logFile.is_open()) {
             OutputDebugStringW((L"[ARTPICST] " + std::wstring(LogLevelName(level)) + L" " + message + L"\n").c_str());
             return;
@@ -992,8 +1044,11 @@ void LogWrite(LogLevel level, const std::wstring& message) {
         wchar_t stamp[64];
         swprintf_s(stamp, L"%04u-%02u-%02u %02u:%02u:%02u",
                    st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
-        logFile << L"[" << stamp << L"] [" << LogLevelName(level) << L"] [hilo "
-                << GetCurrentThreadId() << L"] " << message << L"\n";
+        const std::wstring line = std::wstring(L"[") + stamp + L"] [" + LogLevelName(level) +
+                                  L"] [hilo " + std::to_wstring(GetCurrentThreadId()) + L"] " +
+                                  message + L"\r\n";
+        const std::string utf8Line = WideToUtf8(line);
+        logFile.write(utf8Line.data(), static_cast<std::streamsize>(utf8Line.size()));
         if (level == LogLevel::Error) logFile.flush();
     } catch (...) {
         // Registrar NUNCA debe tumbar la aplicación: se degrada a la salida de
@@ -2185,7 +2240,7 @@ void ShowAboutDialog(HWND hwnd) {
     about += L"Arquitectura: Nativo C++23 para Windows (x64) — Direct2D + GDI+ + WIC\n\n";
     about += L"Características principales:\n";
     about += L"  • Motores de descodificación: stb_image, WIC y GDI+.\n";
-    about += L"  • Soporte para más de 30 formatos: PNG, JPG, BMP, GIF,\n";
+    about += L"  • Soporte para más de 50 formatos: PNG, JPG, BMP, GIF,\n";
     about += L"    WebP, TIFF, AVIF, HEIC, RAW, HDR, PSD, ICO, etc.\n";
     about += L"  • Render por GPU (Direct2D) con fallback GDI+ automático.\n";
     about += L"  • Caché LRU inteligente y liberación dinámica de recursos.\n";
@@ -2238,35 +2293,22 @@ void ShowProgramInfoDialog(HWND hwnd) {
     info += L"PANEL FLOTANTE (DOCK):\n";
     info += L"  Ajustar / 1:1 / Claridad / Rotar / Voltear /\n";
     info += L"  Fondo / Guardar / Pantalla / Abrir\n\n";
+    info += L"RENDERIZADO:\n";
+    info += GpuSummaryText();
+    info += L"\n";
     info += L"FORMATOS COMPATIBLES:\n";
     info += L"  JPG, PNG, WebP, HEIC, AVIF, BMP, GIF, TIFF,\n";
-    info += L"  ICO, TGA, PSD, HDR, RAW y más de 30 formatos.";
+    info += L"  ICO, TGA, PSD, HDR, RAW y más de 50 formatos.";
 
     ShowThemedMessageBox(hwnd, L"Guía de Funciones y Atajos — ARTPICST", info.c_str(), MB_OK, MB_ICONINFORMATION);
 }
 
 bool IsSupportedImageExtension(const std::wstring& extLower) {
-    static const wchar_t* supported[] = {
-        L"jpg", L"jpeg", L"jpe", L"jfif", L"jif",
-        L"png", L"apng",
-        L"bmp", L"dib", L"rle",
-        L"gif",
-        L"tif", L"tiff",
-        L"webp",
-        L"heic", L"heif", L"hif",
-        L"avif",
-        L"jxl", L"jxr", L"wdp", L"hdp",
-        L"ico", L"cur", L"icon",
-        L"tga", L"tpic",
-        L"psd",
-        L"hdr", L"pic",
-        L"pnm", L"ppm", L"pgm", L"pbm",
-        L"jp2", L"j2k", L"jpx",
-        L"emf", L"wmf", L"exif",
-        L"dng", L"cr2", L"cr3", L"nef", L"arw", L"orf", L"rw2", L"raf", L"sr2", L"kdc", L"raw"
-    };
-    for (const wchar_t* item : supported) {
-        if (extLower == item) return true;
+    // Lista única compartida con el instalador y la extensión de shell
+    // (include/artpicst_formats.hpp). Se compara sin el punto inicial, el mismo
+    // formato que devuelve GetExtensionLower().
+    for (const auto& format : artpicst::kImageFormats) {
+        if (extLower == format.extension + 1) return true;
     }
     return false;
 }
@@ -2358,7 +2400,11 @@ void ConvertRGBAtoBGRA(unsigned char* pixels, int width, int height, bool& outHa
     outHasAlpha = false;
     if (!pixels || width <= 0 || height <= 0) return;
     size_t count = 0;
-    if (!SafePixelBytes(width, height, count)) return;
+    // DecodePixelBytes, no SafePixelBytes: este paso corre sobre búferes de
+    // DECODIFICACIÓN. Con el límite de visualización, una panorámica de más de
+    // 5000 px se decodificaba y se quedaba con R y B sin intercambiar (colores
+    // cambiados) porque el barrido salía por el return sin hacer nada.
+    if (!DecodePixelBytes(width, height, count)) return;
     outHasAlpha = artpicst::SwapRbDetectAlpha(pixels, count / 4u);
 }
 
@@ -2402,7 +2448,7 @@ unsigned char* DecodeWithStb(const std::wstring& filepath, int& width, int& heig
 
         if (gifData && frameCount > 1 && tempWidth > 0 && tempHeight > 0) {
             size_t frameBytes = 0;
-            if (!SafePixelBytes(tempWidth, tempHeight, frameBytes)) {
+            if (!DecodePixelBytes(tempWidth, tempHeight, frameBytes)) {
                 stbi_image_free(gifData);
                 if (delays) artpicst::AlignedPixelFree(delays);   // lo asigna stbi__malloc
                 return nullptr;
@@ -2450,11 +2496,22 @@ unsigned char* DecodeWithStb(const std::wstring& filepath, int& width, int& heig
         if (delays) artpicst::AlignedPixelFree(delays);
     }
 
+    // Pre-chequeo de dimensiones: stb asigna ancho*alto*4 de una sola vez. Sin
+    // esto, un PNG/JPEG "bomba" de 30000x30000 intentaba reservar 3,6 GB antes
+    // de que nadie mirase el tamaño (el fallo de malloc lo salvaba, pero con
+    // thrashing del sistema de archivos y de la memoria).
+    int probeW = 0, probeH = 0, probeChannels = 0;
+    size_t probeBytes = 0;
+    if (stbi_info(utf8.c_str(), &probeW, &probeH, &probeChannels) &&
+        !DecodePixelBytes(probeW, probeH, probeBytes)) {
+        return nullptr;
+    }
+
     unsigned char* pixels = stbi_load(utf8.c_str(), &width, &height, &channels, 4);
     if (!pixels) return nullptr;
 
     size_t bytes = 0;
-    if (!SafePixelBytes(width, height, bytes)) {
+    if (!DecodePixelBytes(width, height, bytes)) {
         stbi_image_free(pixels);
         width = height = channels = 0;
         return nullptr;
@@ -2542,24 +2599,59 @@ unsigned char* DecodeWithWic(const std::wstring& filepath, int& width, int& heig
         }
     }
 
+    // El FlipRotator con transformación identidad que había aquí obligaba a WIC
+    // a recorrer el fotograma ENTERO para devolverlo igual: un pase completo de
+    // más por cada JPEG/HEIC/AVIF/TIFF/RAW abierto. La orientación EXIF la aplica
+    // el visor con autoRotateDeg/outFlipH/outFlipV, así que el frame se usa tal
+    // cual y el convertidor de formato lee directamente de él.
     ComPtr<IWICBitmapSource> source;
-    ComPtr<IWICBitmapFlipRotator> rotator;
-    if (SUCCEEDED(factory->CreateBitmapFlipRotator(&rotator)) && rotator) {
-        if (SUCCEEDED(rotator->Initialize(frame.get(), WICBitmapTransformRotate0))) {
-            source.p = rotator.p;
-            rotator.p->AddRef();
+    source.p = frame.get();
+    frame.p->AddRef();
+
+    // --- Gestión de color (ICC) ---
+    // Las fotos de móviles modernos suelen venir en Display P3 o Adobe RGB. Sin
+    // convertir el perfil, el visor las mostraba sobresaturadas respecto a su
+    // apariencia real: no es «más calidad», es color equivocado. Si el archivo
+    // trae un perfil ICC se transforma a sRGB aquí, en la decodificación, una
+    // sola vez. Cualquier fallo (perfil corrupto, códec sin soporte) se ignora
+    // y se sigue con el origen sin transformar: el color nunca impide abrir.
+    ComPtr<IWICColorTransform> colorManaged;
+    {
+        IWICColorContext* sourceContext = nullptr;
+        UINT contextCount = 0;
+        if (SUCCEEDED(frame->GetColorContexts(1, &sourceContext, &contextCount)) &&
+            contextCount >= 1 && sourceContext) {
+            WICColorContextType contextType = WICColorContextUninitialized;
+            if (SUCCEEDED(sourceContext->GetType(&contextType)) &&
+                contextType == WICColorContextProfile) {
+                IWICColorContext* sRgbContext = nullptr;
+                if (SUCCEEDED(factory->CreateColorContext(&sRgbContext)) && sRgbContext) {
+                    // 1 = sRGB según EXIF ColorSpace.
+                    if (SUCCEEDED(sRgbContext->InitializeFromExifColorSpace(1))) {
+                        IWICColorTransform* transform = nullptr;
+                        if (SUCCEEDED(factory->CreateColorTransformer(&transform)) && transform) {
+                            if (SUCCEEDED(transform->Initialize(source.p, sourceContext, sRgbContext,
+                                                               GUID_WICPixelFormat32bppBGRA))) {
+                                colorManaged.p = transform;
+                            } else {
+                                transform->Release();
+                            }
+                        }
+                    }
+                    sRgbContext->Release();
+                }
+            }
+            sourceContext->Release();
         }
-    }
-    if (!source) {
-        source.p = frame.get();
-        frame.p->AddRef();
     }
 
     ComPtr<IWICFormatConverter> converter;
     hr = factory->CreateFormatConverter(&converter);
     if (FAILED(hr) || !converter) return nullptr;
 
-    hr = converter->Initialize(source.get(), GUID_WICPixelFormat32bppBGRA,
+    IWICBitmapSource* converterInput = source.p;
+    if (colorManaged.p) converterInput = colorManaged.p;
+    hr = converter->Initialize(converterInput, GUID_WICPixelFormat32bppBGRA,
                                WICBitmapDitherTypeNone, nullptr, 0.0,
                                WICBitmapPaletteTypeCustom);
     if (FAILED(hr)) return nullptr;
@@ -2569,7 +2661,7 @@ unsigned char* DecodeWithWic(const std::wstring& filepath, int& width, int& heig
     if (FAILED(hr)) return nullptr;
 
     size_t bytes = 0;
-    if (!SafePixelBytes(static_cast<int>(w), static_cast<int>(h), bytes)) return nullptr;
+    if (!DecodePixelBytes(static_cast<int>(w), static_cast<int>(h), bytes)) return nullptr;
 
     unsigned char* pixels = static_cast<unsigned char*>(artpicst::AlignedPixelAlloc(bytes));
     if (!pixels) return nullptr;
@@ -2610,6 +2702,10 @@ unsigned char* DecodeWithGdiplus(const std::wstring& filepath, int& width, int& 
                 propSize - static_cast<size_t>(valueStart - bufferStart) >= sizeof(short);
             short orientation = 1;
             if (valueIsInBuffer) memcpy(&orientation, prop->value, sizeof(orientation));
+            // Tabla PROPIA, no TransformFromOrientation: GDI+ RotateFlip rota
+            // y después voltea, al revés que TransformBgra/WIC (volteo y luego
+            // rotación). Aquí 5 es Rotate90FlipX; no «unificar» las tablas sin
+            // cambiar antes el orden de composición, o 5 y 7 se intercambian.
             switch (valueIsInBuffer ? orientation : 1) {
                 case 2: bmp.RotateFlip(RotateNoneFlipX); break;
                 case 3: bmp.RotateFlip(Rotate180FlipNone); break;
@@ -2618,6 +2714,9 @@ unsigned char* DecodeWithGdiplus(const std::wstring& filepath, int& width, int& 
                 case 6: bmp.RotateFlip(Rotate90FlipNone); break;
                 case 7: bmp.RotateFlip(Rotate270FlipX); break;
                 case 8: bmp.RotateFlip(Rotate270FlipNone); break;
+                // 5 y 7 quedan como Rotate90FlipX / Rotate270FlipX (rotación
+                // primero); la ruta principal (TransformBgra) usa 270/90 con el
+                // espejo delante. Ambas producen la MISMA imagen final.
                 default: break;
             }
         }
@@ -2627,7 +2726,7 @@ unsigned char* DecodeWithGdiplus(const std::wstring& filepath, int& width, int& 
     const int w = static_cast<int>(bmp.GetWidth());
     const int h = static_cast<int>(bmp.GetHeight());
     size_t bytes = 0;
-    if (!SafePixelBytes(w, h, bytes)) return nullptr;
+    if (!DecodePixelBytes(w, h, bytes)) return nullptr;
 
     Rect rect(0, 0, w, h);
     BitmapData data{};
@@ -2641,10 +2740,17 @@ unsigned char* DecodeWithGdiplus(const std::wstring& filepath, int& width, int& 
     const UINT dstStride = static_cast<UINT>(w * 4);
     auto* src = static_cast<unsigned char*>(data.Scan0);
     const INT srcStride = data.Stride;
-    for (int y = 0; y < h; ++y) {
-        memcpy(pixels + static_cast<size_t>(y) * dstStride,
-               src + static_cast<ptrdiff_t>(y) * static_cast<ptrdiff_t>(srcStride),
-               dstStride);
+    if (srcStride == static_cast<INT>(dstStride)) {
+        // Caso habitual (32bpp sin relleno): una sola copia contigua en vez de
+        // h memcpy de una fila. Para una foto de 24 MP son ~24 000 llamadas
+        // menos por imagen.
+        memcpy(pixels, src, static_cast<size_t>(dstStride) * static_cast<size_t>(h));
+    } else {
+        for (int y = 0; y < h; ++y) {
+            memcpy(pixels + static_cast<size_t>(y) * dstStride,
+                   src + static_cast<ptrdiff_t>(y) * static_cast<ptrdiff_t>(srcStride),
+                   dstStride);
+        }
     }
     bmp.UnlockBits(&data);
     width = w;
@@ -2656,26 +2762,47 @@ unsigned char* DecodeWithGdiplus(const std::wstring& filepath, int& width, int& 
     return pixels;
 }
 
+// Orden de decodificadores. WIC va PRIMERO en los formatos que llevan perfil
+// ICC, porque stb_image no lee perfiles de color: con el orden anterior (stb
+// primero) la conversión a sRGB del bloque ICC de DecodeWithWic solo se aplicaba
+// a los formatos que stb no entiende (HEIC/AVIF/TIFF/RAW), es decir, casi nunca
+// a un JPEG o PNG de móvil, que es justo donde el perfil importa. Ahora un JPEG
+// en Display P3 sale con el color correcto y stb sigue siendo el primero para
+// GIF animado y los contenedores que WIC no decodifica.
+static bool PreferStbDecoder(const std::wstring& ext) {
+    return ext == L"gif" || ext == L"tga" || ext == L"tpic" || ext == L"psd" ||
+           ext == L"hdr" || ext == L"pic" || ext == L"pnm" || ext == L"ppm" ||
+           ext == L"pgm" || ext == L"pbm" || ext == L"ico" || ext == L"cur" ||
+           ext == L"icon";
+}
+
 unsigned char* DecodeImageFile(const std::wstring& filepath, int& width, int& height, int& channels, bool& hasAlpha, int& autoRotateDeg, bool& outFlipH, bool& outFlipV, std::wstring& decoder, GifAnimation* outGif, bool decodeAnimation, bool allowGdiPlus) {
     decoder.clear();
     autoRotateDeg = 0;
     outFlipH = false;
     outFlipV = false;
-    unsigned char* pixels = DecodeWithStb(filepath, width, height, channels, hasAlpha, autoRotateDeg, outFlipH, outFlipV, outGif, decodeAnimation);
-    if (pixels) {
-        decoder = L"stb";
-    } else {
+    const std::wstring ext = GetExtensionLower(filepath);
+    unsigned char* pixels = nullptr;
+    if (!PreferStbDecoder(ext)) {
         pixels = DecodeWithWic(filepath, width, height, channels, hasAlpha,
                                autoRotateDeg, outFlipH, outFlipV);
         if (pixels) {
             decoder = L"WIC";
-        } else if (allowGdiPlus) {
-            // GDI+ no es seguro entre hilos: solo se usa desde el hilo de la UI
-            // (el hilo de prefetch pasa allowGdiPlus=false).
-            pixels = DecodeWithGdiplus(filepath, width, height, channels, hasAlpha);
-            if (pixels) {
-                decoder = L"GDI+";
-            }
+        }
+    }
+    if (!pixels) {
+        pixels = DecodeWithStb(filepath, width, height, channels, hasAlpha,
+                               autoRotateDeg, outFlipH, outFlipV, outGif, decodeAnimation);
+        if (pixels) {
+            decoder = L"stb";
+        }
+    }
+    if (!pixels && allowGdiPlus) {
+        // GDI+ no es seguro entre hilos: solo se usa desde el hilo de la UI
+        // (el hilo de prefetch pasa allowGdiPlus=false).
+        pixels = DecodeWithGdiplus(filepath, width, height, channels, hasAlpha);
+        if (pixels) {
+            decoder = L"GDI+";
         }
     }
     if (pixels) {
@@ -3032,6 +3159,7 @@ void ActualSize() {
 void CancelZoomAnimation() {
     if (!g_state.zoomAnimActive) return;
     g_state.zoomAnimActive = false;
+    TimerResolutionRelease();
     if (g_state.hwnd) KillTimer(g_state.hwnd, TIMER_ZOOM);
 }
 
@@ -3172,6 +3300,7 @@ void ZoomAt(float factor, int pivotX, int pivotY) {
     g_state.zoomAnimStartTime = GetTickCount();
     g_state.zoomAnimHadEmptyState = !hadImage;
     g_state.zoomAnimLastImageRect = prevImageRect;
+    if (!g_state.zoomAnimActive) TimerResolutionAcquire();
     g_state.zoomAnimActive = true;
     SetTimer(g_state.hwnd, TIMER_ZOOM, ZOOM_ANIM_PERIOD_MS, nullptr);
     InvalidateZoomStep(prevImageRect, hadImage);
@@ -3701,6 +3830,16 @@ struct GpuState {
     bool enabled = false;          // target activo y funcionando
     bool attemptFailed = false;    // se desactivó tras un fallo permanente
     bool retryRequested = false;   // reintentar tras un cambio de ventana
+    bool retryTimerArmed = false;  // TIMER_GPU_RETRY armado (evita KillTimer por frame)
+
+    // Adaptador detectado por DXGI: decide el tipo de render target y el
+    // presupuesto de textura, y se muestra en la guía (F1).
+    bool adapterProbed = false;
+    bool hasHardwareAdapter = false;
+    bool adapterIntegrated = false;   // iGPU/APU (VRAM dedicada < 512 MB)
+    std::wstring adapterName;
+    unsigned long long adapterDedicatedVram = 0;
+    unsigned int adapterVendorId = 0;
 
     ID2D1Factory* factory = nullptr;
     IDWriteFactory* dwrite = nullptr;
@@ -3741,16 +3880,19 @@ struct GpuState {
     float lastUploadScale = 1.0f;
     DWORD themeKey = 0;
 
+    // Tras crear o redimensionar el target, el back-buffer no está definido
+    // (documentado por Microsoft, incluso con RETAIN_CONTENTS). El siguiente
+    // frame debe cubrir TODO el cliente: si se pintara solo la región sucia
+    // quedarían bandas sin dibujar durante un frame.
+    bool needsFullRedraw = false;
+
     // Formatos de texto DirectWrite (solo dependen de la fábrica)
     IDWriteTextFormat* fmtHud = nullptr;
     IDWriteTextFormat* fmtOsd = nullptr;
     IDWriteTextFormat* fmtTitle = nullptr;
     IDWriteTextFormat* fmtHint = nullptr;
 
-    // DPI del monitor en el que se creó el target (0 = sin crear aún). Con el
-    // manifiesto PerMonitorV2 la ventana puede moverse entre monitores al
-    // 100 % y al 150 %: al cambiar, el target se recrea con el DPI nuevo.
-    UINT createdDpi = 0;
+
 };
 
 GpuState g_gpu;
@@ -3763,6 +3905,78 @@ static D2D1_COLOR_F GpuColorRef(COLORREF c, BYTE alpha = 255) {
     return D2D1::ColorF(GetRValue(c) / 255.0f, GetGValue(c) / 255.0f, GetBValue(c) / 255.0f, alpha / 255.0f);
 }
 
+// Detección de gráficas por DXGI (una vez por ejecución, antes de crear nada de
+// Direct2D). No se crea ningún dispositivo D3D aquí: solo se enumeran los
+// adaptadores y se elige el mejor. Se usa para:
+//   · saber si existe hardware real (si no, DEFAULT/WARP en vez de HARDWARE);
+//   · distinguir integrada de dedicada por VRAM dedicada (una iGPU/APU reserva
+//     0-512 MB del sistema; una dedicada arranca en 1-2 GB);
+//   · ajustar el presupuesto de la textura remuestreada y mostrar la GPU en F1.
+static void GpuProbeAdapters() {
+    if (g_gpu.adapterProbed) return;
+    g_gpu.adapterProbed = true;
+
+    IDXGIFactory1* factory = nullptr;
+    if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))) || !factory) {
+        LogWarn(L"DXGI no disponible: no se pueden enumerar los adaptadores gráficos");
+        return;
+    }
+    IDXGIAdapter1* best = nullptr;
+    DXGI_ADAPTER_DESC1 bestDesc{};
+    for (UINT i = 0;; ++i) {
+        IDXGIAdapter1* adapter = nullptr;
+        if (factory->EnumAdapters1(i, &adapter) == DXGI_ERROR_NOT_FOUND || !adapter) break;
+        DXGI_ADAPTER_DESC1 desc{};
+        if (SUCCEEDED(adapter->GetDesc1(&desc)) &&
+            (desc.Flags & static_cast<UINT>(DXGI_ADAPTER_FLAG_SOFTWARE)) == 0) {
+            if (!best || desc.DedicatedVideoMemory > bestDesc.DedicatedVideoMemory) {
+                if (best) best->Release();
+                best = adapter;
+                bestDesc = desc;
+                continue;
+            }
+        }
+        adapter->Release();
+    }
+    factory->Release();
+
+    if (!best) {
+        LogWarn(L"Sin adaptador gráfico hardware: Direct2D usará WARP (software) si está disponible");
+        return;
+    }
+    g_gpu.hasHardwareAdapter = true;
+    g_gpu.adapterName = bestDesc.Description;
+    g_gpu.adapterDedicatedVram = static_cast<unsigned long long>(bestDesc.DedicatedVideoMemory);
+    g_gpu.adapterVendorId = bestDesc.VendorId;
+    g_gpu.adapterIntegrated = g_gpu.adapterDedicatedVram < (512ull * 1024ull * 1024ull);
+    best->Release();
+
+    wchar_t line[320];
+    swprintf_s(line, L"GPU detectada: %ls (%ls, %llu MB de VRAM dedicada, vendor 0x%04X)",
+               g_gpu.adapterName.c_str(),
+               g_gpu.adapterIntegrated ? L"integrada" : L"dedicada",
+               g_gpu.adapterDedicatedVram / (1024ull * 1024ull),
+               g_gpu.adapterVendorId);
+    LogMessage(line);
+}
+
+std::wstring GpuSummaryText() {
+    std::wstring text;
+    if (!g_gpu.adapterProbed) {
+        text += L"  GPU: sin detectar (se sondea al crear el render target)\n";
+    } else if (g_gpu.hasHardwareAdapter) {
+        text += L"  GPU: " + g_gpu.adapterName +
+                (g_gpu.adapterIntegrated ? L" (integrada)" : L" (dedicada)") + L"\n";
+        text += L"  VRAM dedicada: " +
+                std::to_wstring(g_gpu.adapterDedicatedVram / (1024ull * 1024ull)) + L" MB\n";
+    } else {
+        text += L"  GPU: sin adaptador hardware; WARP (software)\n";
+    }
+    text += g_gpu.enabled ? L"  Aceleración: Direct2D por hardware\n"
+                          : L"  Aceleración: GDI+ (reserva)\n";
+    return text;
+}
+
 static bool GpuTryInitFactory() {
     if (g_gpu.factoryCreated) return g_gpu.factory != nullptr;
     g_gpu.factoryCreated = true;
@@ -3773,6 +3987,9 @@ static bool GpuTryInitFactory() {
     if (envLen > 0 && envLen < 8 && env[0] == L'1') {
         return false; // factoryCreated=true y factory=null: GDI+ queda fijo
     }
+
+    // Detección de adaptadores ANTES de elegir el tipo de render target.
+    GpuProbeAdapters();
 
     HRESULT hr = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, IID_ID2D1Factory,
                                    nullptr, reinterpret_cast<void**>(&g_gpu.factory));
@@ -3871,6 +4088,7 @@ static void GpuReleaseTargetAssets() {
     g_gpu.lastUploadFrame = -1;
     g_gpu.lastUploadEffects = 0;
     g_gpu.lastUploadAlpha = false;
+    g_gpu.lastUploadScale = 1.0f;
     g_gpu.themeKey = 0;
 }
 
@@ -3894,7 +4112,6 @@ void GpuShutdown() {
     GpuSafeRelease(g_gpu.fmtTitle);
     GpuSafeRelease(g_gpu.fmtOsd);
     GpuSafeRelease(g_gpu.fmtHud);
-    g_gpu.createdDpi = 0;
     if (g_gpu.dwrite) {
         g_gpu.dwrite->Release();
         g_gpu.dwrite = nullptr;
@@ -3906,35 +4123,51 @@ void GpuShutdown() {
     g_gpu.enabled = false;
     g_gpu.factoryCreated = false;
     g_gpu.attemptFailed = false;
+    g_gpu.retryTimerArmed = false;
 }
 
-// DPI actual del monitor que contiene la ventana (PerMonitorV2). Devuelve 96
-// si la API no está disponible (Windows 7) o si la ventana está minimizada.
-static UINT GpuWindowDpi() {
-    if (!g_state.hwnd) return 96;
-    using PFN = UINT(WINAPI*)(HWND);
-    static PFN fn = nullptr;
-    static bool resolved = false;
-    if (!resolved) {
-        resolved = true;
-        if (HMODULE user32 = GetModuleHandleW(L"user32.dll")) {
-            if (FARPROC raw = GetProcAddress(user32, "GetDpiForWindow")) {
-                memcpy(&fn, &raw, sizeof(fn));
-            }
-        }
+// Fallo de GPU que no debe reintentarse en cada frame. Antes, un
+// CreateHwndRenderTarget / CreateBitmap / CopyFromMemory que fallaba se volvía a
+// intentar en CADA WM_PAINT, con su remuestreo multihilo incluido: el visor
+// quedaba a tirones sobre GDI+ y gastaba CPU sin poder arreglarlo. Ahora se
+// marca el intento como fallido y se arma el reintento de 1,5 s que ya existía
+// para la pérdida de dispositivo.
+static void GpuFailAndScheduleRetry(const wchar_t* what, bool releaseTarget = true) {
+    static int failuresLogged = 0;
+    if (failuresLogged < 3) {
+        ++failuresLogged;
+        wchar_t msg[192];
+        swprintf_s(msg, L"%ls fallo; se usa GDI+ y se reintenta la GPU en 1,5 s", what);
+        LogWarn(msg);
     }
-    UINT dpi = 96;
-    if (fn) {
-        dpi = fn(g_state.hwnd);
+    if (releaseTarget) {
+        GpuReleaseAll();
     } else {
-        HDC dc = GetDC(g_state.hwnd);
-        if (dc) {
-            const int px = GetDeviceCaps(dc, LOGPIXELSX);
-            ReleaseDC(g_state.hwnd, dc);
-            if (px >= 48) dpi = static_cast<UINT>(px);
+        // Fallo de CONTENIDO (VRAM/staging): el target y los pinceles siguen
+        // siendo válidos. Recrear todo el contexto cada 1,5 s provocaba un
+        // parpadeo completo; basta con descartar el bitmap de la imagen y
+        // forzar su re-subida en el siguiente intento.
+        GpuSafeRelease(g_gpu.image);
+        g_gpu.lastUploadW = -1;
+        g_gpu.lastUploadH = -1;
+        g_gpu.lastUploadGeneration = 0;
+        g_gpu.lastUploadPath.clear();
+        g_gpu.lastUploadFrame = -1;
+        g_gpu.lastUploadEffects = 0;
+        g_gpu.lastUploadAlpha = false;
+        g_gpu.lastUploadScale = 1.0f;
+        g_gpu.enabled = false;
+    }
+    g_gpu.attemptFailed = true;
+    g_gpu.retryRequested = false;
+    if (g_state.hwnd) {
+        // El frame que se estaba componiendo puede haber quedado a medias: hay
+        // que repintar TODO el cliente con GDI+, no solo la región sucia.
+        InvalidateRect(g_state.hwnd, nullptr, FALSE);
+        if (SetTimer(g_state.hwnd, TIMER_GPU_RETRY, 1500, nullptr)) {
+            g_gpu.retryTimerArmed = true;
         }
     }
-    return (dpi >= 48 && dpi <= 4800) ? dpi : 96u;
 }
 
 // (Re)crea el render target del tamaño del cliente. Devuelve true si quedó listo.
@@ -3947,13 +4180,9 @@ static bool GpuEnsureTarget() {
     const UINT h = static_cast<UINT>(std::max(0L, client.bottom - client.top));
     if (w == 0 || h == 0) return false;
 
-    // Cambio de DPI (arrastre entre monitores o cambio de escala): el target
-    // se recrea para que el texto y el OSD vuelvan a escalar con nitidez.
-    const UINT dpi = GpuWindowDpi();
-    if (g_gpu.target && g_gpu.createdDpi != 0 && g_gpu.createdDpi != dpi) {
-        GpuReleaseAll();
-    }
-
+    // El target vive en píxeles (DPI 96), así que mover la ventana entre
+    // monitores con escalas distintas NO exige recrearlo: antes se destruía en
+    // cada cambio de DPI y la ventana pintaba un frame por GDI+ (parpadeo).
     D2D1_SIZE_U size = D2D1::SizeU(w, h);
     if (g_gpu.target) {
         const D2D1_SIZE_U cur = g_gpu.target->GetPixelSize();
@@ -3965,33 +4194,66 @@ static bool GpuEnsureTarget() {
         // pintado en curso pisaba la destrucción. Si Resize falla (dispositivo
         // perdido), ahí sí se libera todo para recrear.
         if (SUCCEEDED(g_gpu.target->Resize(size))) {
-            g_gpu.createdDpi = dpi;
+            // Resize deja el back-buffer indefinido: forzar un frame completo.
+            g_gpu.needsFullRedraw = true;
             return true;
         }
         GpuReleaseAll();   // dispositivo perdido: recreación completa
     }
 
+    // HARDWARE solo si DXGI enumeró un adaptador real; si no (VM, escritorio
+    // remoto, driver roto) DEFAULT deja a Direct2D elegir WARP.
     D2D1_RENDER_TARGET_PROPERTIES rtProps = D2D1::RenderTargetProperties(
-        D2D1_RENDER_TARGET_TYPE_HARDWARE,
+        g_gpu.hasHardwareAdapter ? D2D1_RENDER_TARGET_TYPE_HARDWARE
+                                 : D2D1_RENDER_TARGET_TYPE_DEFAULT,
         D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE),
-        96.0f, 96.0f,                       // campo informativo: el DPI real se aplica con SetDpi
+        96.0f, 96.0f,                       // píxeles: 1 unidad D2D = 1 píxel (ver SetDpi abajo)
         D2D1_RENDER_TARGET_USAGE_NONE,
         D2D1_FEATURE_LEVEL_DEFAULT);
 
+    // RETAIN_CONTENTS, no NONE: el repintado incremental de WM_PAINT dibuja SOLO
+    // la región sucia y cuenta con que el resto del fotograma siga ahí. Con
+    // PRESENT_OPTIONS_NONE Direct2D «descarta el fotograma al presentar»
+    // (documentado), así que el back-buffer queda indefinido y el repintado
+    // parcial puede dejar bandas con contenido viejo o basura al mover el ratón
+    // por el dock, mostrar el OSD o cambiar de estado. Retener el contenido es
+    // lo que hace correcto (y suave) el repintado por regiones.
+    const D2D1_PRESENT_OPTIONS presentOptions = D2D1_PRESENT_OPTIONS_RETAIN_CONTENTS;
     HRESULT hr = g_gpu.factory->CreateHwndRenderTarget(
         rtProps,
-        D2D1::HwndRenderTargetProperties(g_state.hwnd, size, D2D1_PRESENT_OPTIONS_NONE),
+        D2D1::HwndRenderTargetProperties(g_state.hwnd, size, presentOptions),
         &g_gpu.target);
+    if ((FAILED(hr) || !g_gpu.target) &&
+        rtProps.type != D2D1_RENDER_TARGET_TYPE_DEFAULT) {
+        // HARDWARE puede fallar aunque DXGI enumere un adaptador (RDP, VM,
+        // driver antiguo). Se reintenta UNA vez con DEFAULT (WARP permitido).
+        LogWarn(L"Render target HARDWARE no disponible; se reintenta con DEFAULT (WARP)");
+        rtProps.type = D2D1_RENDER_TARGET_TYPE_DEFAULT;
+        GpuSafeRelease(g_gpu.target);   // si quedó un target a medias, sin fugas
+        hr = g_gpu.factory->CreateHwndRenderTarget(
+            rtProps,
+            D2D1::HwndRenderTargetProperties(g_state.hwnd, size, presentOptions),
+            &g_gpu.target);
+    }
     if (FAILED(hr) || !g_gpu.target) {
-        g_gpu.target = nullptr;
+        GpuSafeRelease(g_gpu.target);
+        // Sin target no se reintenta en cada frame: se marca el fallo y se arma
+        // el reintento de 1,5 s (antes cada WM_PAINT volvía a crearlo).
+        GpuFailAndScheduleRetry(L"CreateHwndRenderTarget");
         return false;
     }
-    // DPI real del monitor: 1 unidad D2D = 1 píxel físico en cualquier escala.
-    // (Antes se fijaba 96 siempre: en monitores al 125/150 % el texto DirectWrite
-    // y el OSD se veían pequeños y con submuestreo borroso.)
-    const FLOAT dpiF = static_cast<FLOAT>(dpi);
-    g_gpu.target->SetDpi(dpiF, dpiF);
-    g_gpu.createdDpi = dpi;
+    // DPI 96 A PROPÓSITO: 1 unidad D2D = 1 píxel físico.
+    //
+    // Toda la geometría de esta ruta (destino de la imagen, dock, OSD y los
+    // rectángulos de hit-test de WM_MOUSEMOVE) está en PÍXELES de cliente, y un
+    // visor debe mostrar 1 píxel de imagen = 1 píxel de pantalla al 100 %.
+    // Con SetDpi(dpi real) Direct2D multiplica cada unidad por dpi/96 (144 ppp
+    // => x1.5): en monitores al 125/150 % la foto se dibujaba AMPLIADA y
+    // recortada por el borde de la ventana, y el dock aparecía desplazado
+    // respecto de su zona clicable. El texto sigue siendo nítido porque
+    // ClearType rasteriza directamente en píxeles físicos.
+    g_gpu.target->SetDpi(96.0f, 96.0f);
+    g_gpu.needsFullRedraw = true;   // target nuevo: contenido sin definir
     return true;
 }
 
@@ -4090,8 +4352,14 @@ static uint32_t GpuEffectBits(int effects) {
 //   · con efecto -> pasada de color (LUT constexpr) + pasada SIMD de alfa,
 //   · sin nada que transformar -> copia directa (ni se toca el búfer).
 static unsigned char* GpuBakePixels(unsigned char* src, int w, int h, bool hasAlpha, int effects) {
+    // CheckedBgraBytes y no SafePixelBytes: este búfer es de SUBIDA, no de
+    // decodificación. Con el límite de carga (5000 px por defecto) una imagen
+    // ampliada a 4K/8K para mostrarla a tamaño de pantalla fallaba aquí y el
+    // fotograma se descartaba.
     size_t bytes = 0;
-    if (!SafePixelBytes(w, h, bytes)) return nullptr;
+    if (!artpicst::CheckedBgraBytes(static_cast<uint32_t>(w), static_cast<uint32_t>(h), bytes)) {
+        return nullptr;
+    }
     const size_t pixels = bytes / 4u;
 
     if (bytes > g_gpu.stagingBytes) {
@@ -4119,7 +4387,74 @@ static unsigned char* GpuBakePixels(unsigned char* src, int w, int h, bool hasAl
 }
 
 // ---------------------------------------------------------------------------
-// Escala de MINIFICACIÓN de la subida (calidad de reducción en la ruta GPU)
+// Remuestreo BGRA de alta calidad, repartido entre núcleos
+// ---------------------------------------------------------------------------
+// stb_image_resize2 elige por defecto Catmull-Rom al AMPLIAR y Mitchell al
+// REDUCIR, y trabaja en espacio lineal cuando se le pide UINT8_SRGB: detalle
+// sin halos artificiales y sin aclarar los medios tonos (fidelidad).
+//
+// `stbir_build_samplers_with_splits` calcula los coeficientes UNA vez y cada
+// hilo escribe una banda disjunta de la salida: no hay búfer compartido ni
+// bloqueos. El número de hilos se acota para no ahogar al hilo de UI, y si
+// alguno no se puede crear su banda se hace en el hilo actual (nunca se pierde
+// una fila de la imagen).
+static unsigned char* ResampleBgraMultiThread(const unsigned char* src, int sw, int sh,
+                                              int dw, int dh) {
+    if (!src || sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) return nullptr;
+    size_t bytes = 0;
+    if (!artpicst::CheckedBgraBytes(static_cast<uint32_t>(dw), static_cast<uint32_t>(dh), bytes)) {
+        return nullptr;
+    }
+    unsigned char* dst = static_cast<unsigned char*>(artpicst::AlignedPixelAlloc(bytes));
+    if (!dst) return nullptr;
+
+    STBIR_RESIZE resize;
+    stbir_resize_init(&resize, src, sw, sh, 0, dst, dw, dh, 0,
+                      STBIR_BGRA, STBIR_TYPE_UINT8_SRGB);
+
+    // Reparto ADAPTATIVO al trabajo: crear 7 hilos para ampliar una miniatura
+    // cuesta más que el propio remuestreo (cada hilo son ~0,5 ms de creación y
+    // su pila). Se pide un hilo por cada 400 000 píxeles de salida, con techo en
+    // los núcleos y en 8; con 1 no se crea ningún hilo (todo en el actual).
+    unsigned cores = std::thread::hardware_concurrency();
+    if (cores == 0) cores = 2;
+    const double outputPixels = static_cast<double>(dw) * static_cast<double>(dh);
+    const int byWork = static_cast<int>(outputPixels / 400000.0) + 1;
+    int wanted = static_cast<int>((std::min)(cores, 8u));
+    if (byWork < wanted) wanted = byWork;
+    if (wanted < 1) wanted = 1;
+    const int splits = stbir_build_samplers_with_splits(&resize, wanted);
+    if (splits < 1) {
+        stbir_free_samplers(&resize);
+        artpicst::AlignedPixelFree(dst);
+        return nullptr;
+    }
+
+    std::atomic<int> failures{0};
+    std::vector<std::thread> workers;
+    workers.reserve(static_cast<size_t>(splits - 1));
+    for (int i = 1; i < splits; ++i) {
+        try {
+            workers.emplace_back([&resize, i, &failures]() {
+                if (!stbir_resize_extended_split(&resize, i, 1)) failures.fetch_add(1);
+            });
+        } catch (...) {
+            if (!stbir_resize_extended_split(&resize, i, 1)) failures.fetch_add(1);
+        }
+    }
+    if (!stbir_resize_extended_split(&resize, 0, 1)) failures.fetch_add(1);
+    for (auto& worker : workers) worker.join();
+    stbir_free_samplers(&resize);
+
+    if (failures.load() != 0) {
+        artpicst::AlignedPixelFree(dst);
+        return nullptr;
+    }
+    return dst;
+}
+
+// ---------------------------------------------------------------------------
+// Escala de SUBIDA de la textura (calidad en la ruta GPU)
 // ---------------------------------------------------------------------------
 // Direct2D sobre ID2D1HwndRenderTarget solo puede interpolar LINEAR (bilineal)
 // o NEAREST_NEIGHBOR: no expone ningún filtro bicúbico. En reducciones —el caso
@@ -4135,24 +4470,57 @@ static unsigned char* GpuBakePixels(unsigned char* src, int w, int h, bool hasAl
 // GPU disponible aquí y además elimina el aliasing/shimmer del minificado
 // profundo.
 //
+// Ahora también se AMPLÍA en CPU: por debajo de 1:1 Direct2D solo ofrece
+// bilineal, que deja las imágenes pequeñas mostradas a 4K visiblemente blandas.
+// Catmull-Rom reconstruye con detalle y sin halos, y se dibuja a ~1:1.
+//
 // Límites, deliberados:
-//   · solo en REPOSO: durante el arrastre o la animación de zoom sigue el camino
-//     rápido de siempre, así que el remuestreo nunca compite con el framerate;
-//   · solo si REDUCE (zoom < 1): al ampliar no hay aliasing que corregir;
+//   · solo en REPOSO: durante el arrastre o la animación de zoom se reutiliza la
+//     textura ya subida, así que el remuestreo nunca compite con el framerate;
+//   · no se remuestrea cerca de 1:1 (0,98–1,25): la textura nativa ya es óptima;
 //   · solo si el resultado cabe en el presupuesto de píxeles, para acotar el
 //     coste de CPU de cada cambio de escala y el pico de memoria.
-constexpr size_t kGpuResampleBudgetPixels = 12ull * 1024ull * 1024ull;
+// Presupuesto de píxeles de la textura remuestreada. En una GPU dedicada la
+// VRAM sobra y se apura a 12 MP (más que 4K); en una integrada/APU, que comparte
+// RAM y tiene mucho menos ancho de banda de relleno, 8 MP bastan y evitan una
+// textura de 48 MB compitiendo con el resto del sistema.
+static size_t GpuResampleBudgetPixels() {
+    return g_gpu.adapterIntegrated ? (8ull * 1024ull * 1024ull) : (12ull * 1024ull * 1024ull);
+}
 
-float GpuMinificationScale() {
-    if (g_state.isDragging || g_state.zoomAnimActive) return 1.0f;
+float GpuUploadScale() {
+    // INTERACCIÓN: se conserva la textura que ya está en la GPU.
+    // Antes se devolvía 1.0 al arrastrar o animar el zoom, lo que forzaba una
+    // subida a resolución completa (hasta 64 MB con el límite de carga por
+    // defecto) sincrónica en el hilo de UI justo al empezar el gesto: un tirón
+    // al iniciar cualquier pan y otro al soltar, cuando volvía el remuestreo.
+    // Mantener el LOD ya subido elimina ambos tirones y no gasta un byte más de
+    // VRAM; al terminar el gesto el remuestreo exacto deja el fotograma nítido.
+    if (g_state.isDragging || g_state.zoomAnimActive) {
+        if (g_gpu.image && g_gpu.lastUploadScale > 0.0f) return g_gpu.lastUploadScale;
+        return 1.0f;
+    }
     const float zoom = g_state.zoom;
-    if (!(zoom < 0.98f)) return 1.0f;               // sin reducción apreciable
+    if (!(zoom > 0.0f) || !std::isfinite(zoom)) return 1.0f;
     if (g_state.imageWidth <= 0 || g_state.imageHeight <= 0) return 1.0f;
-    const double dw = static_cast<double>(g_state.imageWidth) * zoom;
-    const double dh = static_cast<double>(g_state.imageHeight) * zoom;
+    // Cerca de 1:1 no se remuestrea: la textura nativa es lo mejor posible y
+    // hacerlo por un 5-25 % solo costaría CPU y una subida extra.
+    if (zoom >= 0.98f && zoom <= 1.25f) return 1.0f;
+
+    // LOD CUANTIZADO a 1/8 de octava (~9 %, es decir ±4,5 %). Con la identidad
+    // exacta por float, cada muesca de rueda reconstruía y subía la textura
+    // entera (hasta 12 MP con 8 hilos) aunque el tamaño solo hubiera cambiado un
+    // 2 %; con estos escalones la textura se REUTILIZA entre muescas y la
+    // diferencia de escala la absorbe el bilineal de la GPU (invisible a ±4,5 %).
+    const float lod = static_cast<float>(
+        std::exp2(std::round(std::log2(static_cast<double>(zoom)) * 8.0) / 8.0));
+    if (!(lod > 0.0f) || !std::isfinite(lod)) return 1.0f;
+
+    const double dw = static_cast<double>(g_state.imageWidth) * lod;
+    const double dh = static_cast<double>(g_state.imageHeight) * lod;
     if (dw < 1.0 || dh < 1.0) return 1.0f;
-    if (dw * dh > static_cast<double>(kGpuResampleBudgetPixels)) return 1.0f;
-    return zoom;   // el bitmap se remuestrea exactamente al tamaño de pantalla
+    if (dw * dh > static_cast<double>(GpuResampleBudgetPixels())) return 1.0f;
+    return lod;   // textura remuestreada al tamaño de pantalla (LOD cuantizado)
 }
 
 // Sube (o actualiza) el bitmap del fotograma actual solo cuando cambia algo
@@ -4193,16 +4561,34 @@ static bool GpuUpdateImage() {
     // es la RUTA del archivo (+ índice de fotograma en GIF): dos cargas de la
     // misma ruta producen contenido idéntico, así que saltarse la subida
     // sigue siendo válido; una ruta distinta fuerza la subida siempre.
-    // Escala de minificación: se calcula ANTES de la comprobación de caché
-    // porque forma parte de la identidad del bitmap subido.
-    float scale = GpuMinificationScale();
+    // Escala de remuestreo (reduce o amplía): se calcula ANTES de la
+    // comprobación de caché porque forma parte de la identidad del bitmap
+    // subido. Con escala 1 se usa la textura nativa sin tocar los píxeles.
+    float scale = GpuUploadScale();
     int bw = w;
     int bh = h;
-    if (scale < 1.0f) {
+    if (scale != 1.0f) {
         bw = (std::max)(1, static_cast<int>(std::lround(static_cast<double>(w) * scale)));
         bh = (std::max)(1, static_cast<int>(std::lround(static_cast<double>(h) * scale)));
-    } else {
-        scale = 1.0f;
+    }
+
+    // Límite real de textura del adaptador (RX 580: 16384 px por lado; otras
+    // GPU, 8192). Sin este ajuste, una imagen mayor hace fallar CreateBitmap en
+    // CADA frame: GpuRenderFrame devuelve false, el visor cae a GDI+ (mucho más
+    // lento) y vuelve a intentarlo en el siguiente repintado, con su
+    // remuestreo incluido. Se reduce una sola vez y se mantiene en GPU.
+    const UINT maxTextureSide = g_gpu.target->GetMaximumBitmapSize();
+    if (maxTextureSide > 0) {
+        const int limit = static_cast<int>(maxTextureSide);
+        if (bw > limit || bh > limit) {
+            const float fit = (std::min)(static_cast<float>(limit) / static_cast<float>(bw),
+                                         static_cast<float>(limit) / static_cast<float>(bh));
+            scale *= fit;
+            bw = (std::max)(1, (std::min)(limit, static_cast<int>(
+                std::lround(static_cast<double>(w) * scale))));
+            bh = (std::max)(1, (std::min)(limit, static_cast<int>(
+                std::lround(static_cast<double>(h) * scale))));
+        }
     }
 
     // Reutilizar la textura GPU si no cambió ningún componente del contenido.
@@ -4215,10 +4601,10 @@ static bool GpuUpdateImage() {
         return true; // nada cambió: el bitmap de vídeo sigue siendo válido
     }
 
-    // Reducción de alta calidad EN CPU antes de subir. Se hace ANTES del
-    // horneado por dos razones: el remuestreo trabaja sobre los mismos datos
-    // (BGRA sin premultiplicar) que ya trata la reducción de carga, y el
-    // horneado posterior cuesta proporcionalmente menos píxeles.
+    // Remuestreo de alta calidad EN CPU antes de subir (multihilo). Se hace
+    // ANTES del horneado por dos razones: trabaja sobre los mismos datos (BGRA
+    // sin premultiplicar) que ya trata la reducción de carga, y el horneado
+    // posterior cuesta proporcionalmente menos píxeles.
     unsigned char* resampled = nullptr;
     auto freeResampled = [&]() {
         if (resampled) {
@@ -4227,13 +4613,13 @@ static bool GpuUpdateImage() {
         }
     };
     if (bw != w || bh != h) {
-        resampled = stbir_resize_uint8_srgb(src, w, h, 0, nullptr, bw, bh, 0, STBIR_BGRA);
+        resampled = ResampleBgraMultiThread(src, w, h, bw, bh);
         if (resampled) {
             src = resampled;
         } else {
-            // Sin memoria para el remuestreo: se sube el original (la GPU hará
-            // lo que pueda) en lugar de fallar el fotograma.
-            LogWarn(L"Sin memoria para el remuestreo de minificado; se usa la ruta GPU directa");
+            // Sin memoria (o sin hilos) para el remuestreo: se sube el original
+            // y la GPU hace lo que pueda, en lugar de perder el fotograma.
+            LogWarn(L"Sin memoria para el remuestreo de la textura; se usa la ruta GPU directa");
             bw = w;
             bh = h;
             scale = 1.0f;
@@ -4367,6 +4753,10 @@ static bool GpuImageBounds(D2D1_RECT_F& out) {
 static bool GpuRectsIntersect(const D2D1_RECT_F& a, const RECT& b) {
     return !(a.right < static_cast<float>(b.left) || a.left > static_cast<float>(b.right) ||
              a.bottom < static_cast<float>(b.top) || a.top > static_cast<float>(b.bottom));
+}
+
+static bool GpuRectTouches(const RECT& a, const RECT& b) {
+    return a.right > b.left && a.left < b.right && a.bottom > b.top && a.top < b.bottom;
 }
 
 // Dibuja el fotograma actual con su transformación (zoom, rotación, volteos)
@@ -4512,9 +4902,23 @@ bool GpuRenderFrame(const RECT* clipRect) {
     g_gpu.retryRequested = false;
 
     if (!GpuEnsureTarget()) return false;
-    if (!GpuCreateTextFormats()) return false;
-    if (!GpuEnsureThemeAssets()) return false;
-    if (!GpuUpdateImage()) return false;
+    if (!GpuCreateTextFormats()) {
+        // Sin formatos de texto no hay HUD ni OSD: si falla (DirectWrite roto)
+        // se degrada a GDI+ una sola vez, no en cada frame.
+        GpuFailAndScheduleRetry(L"GpuCreateTextFormats");
+        return false;
+    }
+    if (!GpuEnsureThemeAssets()) {
+        GpuFailAndScheduleRetry(L"GpuEnsureThemeAssets");
+        return false;
+    }
+    if (!GpuUpdateImage()) {
+        // Fallo al remuestrear/subir la textura (VRAM o staging): sin esto se
+        // repetía el trabajo completo en cada frame mientras GDI+ pintaba. No se
+        // destruye el target: el fallo es del contenido, no del contexto.
+        GpuFailAndScheduleRetry(L"GpuUpdateImage", false);
+        return false;
+    }
 
     ID2D1RenderTarget* rt = g_gpu.target;
     RECT client{};
@@ -4527,17 +4931,26 @@ bool GpuRenderFrame(const RECT* clipRect) {
     // cambio de estado ya no reescala la fotografía 4K (fuente principal de
     // tirones y de parpadeo en WARP/equipos sin GPU).
     RECT dirty = client;
-    if (clipRect && clipRect->right > clipRect->left && clipRect->bottom > clipRect->top) {
+    if (!g_gpu.needsFullRedraw && clipRect &&
+        clipRect->right > clipRect->left && clipRect->bottom > clipRect->top) {
         dirty.left = (clipRect->left > client.left) ? clipRect->left : client.left;
         dirty.top = (clipRect->top > client.top) ? clipRect->top : client.top;
         dirty.right = (clipRect->right < client.right) ? clipRect->right : client.right;
         dirty.bottom = (clipRect->bottom < client.bottom) ? clipRect->bottom : client.bottom;
     }
     if (dirty.right <= dirty.left || dirty.bottom <= dirty.top) return false;
+    // Ya sea porque el target es nuevo o porque se redimensionó, este frame
+    // cubre el cliente entero; el siguiente vuelve a ser incremental.
+    g_gpu.needsFullRedraw = false;
 
     rt->BeginDraw();
     rt->SetTransform(D2D1::Matrix3x2F::Identity());
     rt->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);   // texto nítido
+    // Bordes de las formas (dock, píldoras del HUD, esquinas redondeadas) con
+    // suavizado real: el modo por omisión deja los arcos escalonados y la ruta
+    // GDI+ sí usa SmoothingModeAntiAlias, así que sin esto el dock cambiaba de
+    // aspecto según el trazador activo.
+    rt->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
     rt->PushAxisAlignedClip(
         D2D1::RectF(static_cast<float>(dirty.left), static_cast<float>(dirty.top),
                     static_cast<float>(dirty.right), static_cast<float>(dirty.bottom)),
@@ -4557,44 +4970,41 @@ bool GpuRenderFrame(const RECT* clipRect) {
         GpuDrawEmptyState(rt, client);
     }
 
-    GpuDrawOsd(rt, client);
-    GpuDrawDock(rt, client);
+    // OSD y dock solo si la región sucia los toca: Direct2D recortaba el
+    // dibujo, pero se seguían preparando las píldoras y los glifos en cada
+    // frame de arrastre/zoom, donde la franja sucia es solo la foto. El dock se
+    // cachea con LayoutHud (solo recalcula si cambian tamaño, modo o etiqueta).
+    LayoutHud(client);
+    if (GpuRectTouches(dirty, RECT{ 0, 8, client.right, 56 })) {
+        GpuDrawOsd(rt, client);
+    }
+    if (GpuRectTouches(dirty, g_state.dockRect)) {
+        GpuDrawDock(rt, client);
+    }
     rt->PopAxisAlignedClip();
 
     HRESULT hr = rt->EndDraw();
     if (hr == D2DERR_RECREATE_TARGET) {
-        GpuReleaseAll();
-        g_gpu.attemptFailed = true;
-        // Solo se registran los primeros fallos: si el dispositivo muere de
-        // forma permanente, el reintento periódico inundaría el log.
-        static int deviceLostLogs = 0;
-        if (deviceLostLogs < 3) {
-            ++deviceLostLogs;
-            LogWarn(L"Dispositivo Direct2D perdido (D2DERR_RECREATE_TARGET); reintentando en 1,5 s");
-        }
-        // Recuperación automática: si el dispositivo GPU se perdió (cambio de
-        // monitor, controlador, TDR...) se reintenta en 1,5 s sin necesidad de
-        // redimensionar la ventana; antes quedaba en GDI+ hasta el próximo WM_SIZE.
-        if (g_state.hwnd && !SetTimer(g_state.hwnd, TIMER_GPU_RETRY, 1500, nullptr)) {
-            LogError(L"SetTimer(TIMER_GPU_RETRY) fallo; la GPU no se reintentara sola");
-        }
+        // Pérdida de dispositivo (cambio de monitor, controlador, TDR): mismo
+        // tratamiento que cualquier fallo, con repintado completo y reintento
+        // automático a 1,5 s sin necesidad de redimensionar la ventana.
+        GpuFailAndScheduleRetry(L"D2DERR_RECREATE_TARGET (dispositivo perdido)");
         return false;
     }
     if (FAILED(hr)) {
-        static int renderFailLogs = 0;
-        if (renderFailLogs < 3) {
-            ++renderFailLogs;
-            wchar_t msg[128];
-            swprintf_s(msg, L"GpuRenderFrame fallo (hr=0x%08lX): se degrada a GDI+",
-                       static_cast<unsigned long>(hr));
-            LogWarn(msg);
-        }
-        GpuReleaseAll();
+        wchar_t what[64];
+        swprintf_s(what, L"EndDraw (hr=0x%08lX)", static_cast<unsigned long>(hr));
+        GpuFailAndScheduleRetry(what);
         return false;
     }
 
-    // GPU operativo: cancelar cualquier reintento pendiente
-    if (g_state.hwnd) KillTimer(g_state.hwnd, TIMER_GPU_RETRY);
+    // GPU operativo: cancelar el reintento pendiente. Antes se llamaba a
+    // KillTimer en CADA frame pintado (~60-165 veces/s) aunque no hubiera
+    // ningún reintento armado: una llamada al kernel por frame a cambio de nada.
+    if (g_gpu.retryTimerArmed) {
+        if (g_state.hwnd) KillTimer(g_state.hwnd, TIMER_GPU_RETRY);
+        g_gpu.retryTimerArmed = false;
+    }
 
     if (!g_gpu.enabled) {
         g_gpu.enabled = true;
@@ -4811,8 +5221,14 @@ bool CopyPathToClipboard() {
 // remuestreo bilineal, que además degradaba la nitidez al 100%).
 bool CopyImageToClipboard() {
     if (!g_state.imageData) return false;
+    // CheckedBgraBytes y no SafePixelBytes: el portapapeles no es el búfer de
+    // visualización. Con el límite por lado, una panorámica de 12000 px que ya
+    // se puede abrir fallaba aquí en silencio al copiar.
     size_t srcBytes = 0;
-    if (!SafePixelBytes(g_state.imageWidth, g_state.imageHeight, srcBytes)) return false;
+    if (!artpicst::CheckedBgraBytes(static_cast<uint32_t>(g_state.imageWidth),
+                                    static_cast<uint32_t>(g_state.imageHeight), srcBytes)) {
+        return false;
+    }
 
     const bool transformed = (g_state.currentRotation != 0) ||
                              g_state.currentFlipH || g_state.currentFlipV;
@@ -5124,8 +5540,22 @@ bool OpenImageFileDialog(HWND hwnd) {
     HRESULT hr = CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
                                   IID_PPV_ARGS(&dialog.p));
     if (FAILED(hr) || !dialog) return false;
+    // El filtro se genera desde la lista única de formatos: antes era una
+    // cadena escrita a mano que solo cubría 23 de los 51 formatos soportados
+    // (faltaban APNG, DIB, RLE, PNM/PPM/PGM/PBM, JP2/J2K/JPX, CR3, ORF, RW2,
+    // RAF, SR2, KDC, EXIF…), así que esas imágenes no se podían elegir en el
+    // diálogo aunque el visor sí las abre.
+    static const std::wstring allImagePatterns = [] {
+        std::wstring patterns;
+        for (const auto& format : artpicst::kImageFormats) {
+            if (!patterns.empty()) patterns += L';';
+            patterns += L'*';
+            patterns += format.extension;
+        }
+        return patterns;
+    }();
     COMDLG_FILTERSPEC filters[] = {
-        { L"Todas las imágenes soportadas", L"*.jpg;*.jpeg;*.jpe;*.jfif;*.png;*.bmp;*.gif;*.tif;*.tiff;*.webp;*.heic;*.heif;*.avif;*.jxl;*.jxr;*.wdp;*.ico;*.cur;*.tga;*.psd;*.hdr;*.jp2;*.dng;*.cr2;*.nef;*.arw;*.raw;*.emf;*.wmf" },
+        { L"Todas las imágenes soportadas", allImagePatterns.c_str() },
         { L"Todos los archivos (*.*)", L"*.*" }
     };
     dialog->SetFileTypes(2, filters);
@@ -5434,12 +5864,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 }
             }
             g_gpu.retryRequested = true; // nuevo tamaño: reintentar GPU si falló
-            // Cambio de DPI (arrastre entre monitores): recrear el target para
-            // reescalar texto y OSD con el DPI nuevo y sin borrosidad.
-            if (g_gpu.enabled && g_gpu.createdDpi != 0 && g_gpu.createdDpi != GpuWindowDpi()) {
-                GpuReleaseAll();
-            }
             KillTimer(hwnd, TIMER_GPU_RETRY);
+            g_gpu.retryTimerArmed = false;
             const int width = LOWORD(lParam);
             const int height = HIWORD(lParam);
             if (g_gpu.enabled) {
@@ -5486,6 +5912,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (g_gpu.attemptFailed) {
                 g_gpu.retryRequested = true;
                 KillTimer(hwnd, TIMER_GPU_RETRY);
+                g_gpu.retryTimerArmed = false;
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
             return 0;
@@ -5721,23 +6148,27 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 s_trackingMouse = true;
             }
             
-            // Dock proximity detection
-            RECT client{};
-            GetClientRect(hwnd, &client);
-            const int distanceFromBottom = client.bottom - y;
-            
-            if (distanceFromBottom < DOCK_PROXIMITY_THRESHOLD) {
-                const bool wasHidden = !DockShouldShow();
-                g_state.dockLastActivity = GetTickCount();
-                if (wasHidden) InvalidateDockRegion();
-                KillTimer(hwnd, TIMER_DOCK_HIDE);
-                SetTimer(hwnd, TIMER_DOCK_HIDE, DOCK_HIDE_MS, nullptr);
-            }
-            
-            const HudId hot = HitTestHud(x, y);
-            if (hot != g_state.hudHot) {
-                g_state.hudHot = hot;
-                InvalidateDockRegion();
+            // Dock: mientras se arrastra la foto no hay hover que atender (el
+            // dock está oculto). Además SetTimer REEMPLAZA al temporizador ya
+            // armado, así que el KillTimer previo era una llamada al kernel de
+            // más por cada evento del ratón (hasta 1000/s en ratones modernos).
+            if (!g_state.isDragging) {
+                RECT client{};
+                GetClientRect(hwnd, &client);
+                const int distanceFromBottom = client.bottom - y;
+
+                if (distanceFromBottom < DOCK_PROXIMITY_THRESHOLD) {
+                    const bool wasHidden = !DockShouldShow();
+                    g_state.dockLastActivity = GetTickCount();
+                    if (wasHidden) InvalidateDockRegion();
+                    SetTimer(hwnd, TIMER_DOCK_HIDE, DOCK_HIDE_MS, nullptr);
+                }
+
+                const HudId hot = HitTestHud(x, y);
+                if (hot != g_state.hudHot) {
+                    g_state.hudHot = hot;
+                    InvalidateDockRegion();
+                }
             }
             if (g_state.isDragging) {
                 // FIX RENDIMIENTO: el arrastre invalidaba la ventana COMPLETA en
@@ -5775,6 +6206,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 NextImage();
             } else if (wParam == TIMER_GPU_RETRY) {
                 KillTimer(hwnd, TIMER_GPU_RETRY);
+                g_gpu.retryTimerArmed = false;
                 g_gpu.retryRequested = true;
                 InvalidateRect(hwnd, nullptr, FALSE);
             } else if (wParam == TIMER_DOCK_HIDE) {
@@ -5793,7 +6225,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     KillTimer(hwnd, TIMER_DOCK_HIDE);
                     if (wasVisible) InvalidateDockRegion();
                 } else {
+                    // Sigue en la franja inferior: se reprograma la comprobación.
+                    // Antes no se re-armaba y, con el puntero quieto abajo, el
+                    // dock no volvía a evaluarse nunca: quedaba dibujado hasta
+                    // que otro motivo forzara un repintado.
                     g_state.dockLastActivity = GetTickCount();
+                    SetTimer(hwnd, TIMER_DOCK_HIDE, DOCK_HIDE_MS, nullptr);
                 }
             } else if (wParam == TIMER_GIF) {
                 if (g_state.gif.animated() && !g_state.gifPaused) {
@@ -5862,6 +6299,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         g_state.offsetX = g_state.zoomAnimStartOffsetX + g_state.zoomAnimImageX * (g_state.zoomAnimStart - g_state.zoom);
                         g_state.offsetY = g_state.zoomAnimStartOffsetY + g_state.zoomAnimImageY * (g_state.zoomAnimStart - g_state.zoom);
                         g_state.zoomAnimActive = false;
+                        TimerResolutionRelease();
                         KillTimer(hwnd, TIMER_ZOOM);
                         wchar_t zoomText[64];
                         swprintf_s(zoomText, L"Zoom: %d%%", static_cast<int>(g_state.zoom * 100.0f + 0.5f));
@@ -5911,6 +6349,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             KillTimer(hwnd, TIMER_GIF);
             KillTimer(hwnd, TIMER_ZOOM);
             KillTimer(hwnd, TIMER_GPU_RETRY);
+            g_gpu.retryTimerArmed = false;
+            TimerResolutionRelease();
             StopPrefetchThread();
             FreeCurrentImage();
             FreeDoubleBuffer();
@@ -5944,56 +6384,121 @@ bool SetRegStringValue(HKEY root, const std::wstring& key, const std::wstring& n
     return ok;
 }
 
+// Borra `name` de `key` solo si su valor actual coincide con `expected`.
+// Que no exista no es un error: desregistrar dos veces debe funcionar.
+bool DeleteRegValueIfEquals(HKEY root, const std::wstring& key, const std::wstring& name,
+                            const std::wstring& expected) {
+    HKEY hKey = nullptr;
+    if (RegOpenKeyExW(root, key.c_str(), 0, KEY_READ | KEY_SET_VALUE, &hKey) != ERROR_SUCCESS) {
+        return true;
+    }
+    const wchar_t* valueName = name.empty() ? nullptr : name.c_str();
+    wchar_t buffer[1024] = {};
+    DWORD type = 0;
+    DWORD size = static_cast<DWORD>(sizeof(buffer) - sizeof(wchar_t));
+    const LSTATUS status = RegQueryValueExW(hKey, valueName, nullptr, &type,
+                                            reinterpret_cast<LPBYTE>(buffer), &size);
+    bool ok = true;
+    if (status == ERROR_SUCCESS && (type == REG_SZ || type == REG_EXPAND_SZ) &&
+        lstrcmpiW(buffer, expected.c_str()) == 0) {
+        ok = RegDeleteValueW(hKey, valueName) == ERROR_SUCCESS;
+    }
+    RegCloseKey(hKey);
+    return ok;
+}
+
 bool RegisterFileAssociationForCurrentUser() {
-    std::wstring exePath = GetExecutablePath();
+    const std::wstring exePath = GetExecutablePath();
     if (exePath.empty()) return false;
+
+    const HKEY root = HKEY_CURRENT_USER;
     const std::wstring fileType = L"ARTPICST.Image";
     const std::wstring command = L"\"" + exePath + L"\" \"%1\"";
-    const std::vector<std::wstring> extensions = {
-        L".png", L".jpg", L".jpeg", L".bmp", L".gif", L".tif", L".tiff",
-        L".webp", L".ico", L".heic", L".heif", L".avif", L".jfif"
-    };
+    const std::wstring base = L"Software\\Classes\\" + fileType;
+    const std::wstring appKey = L"Software\\Classes\\Applications\\artpicst.exe";
+    const std::wstring appPaths =
+        L"Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\artpicst.exe";
+    const std::wstring caps = L"Software\\ARTPICST\\Capabilities";
+    const std::wstring capsFiles = caps + L"\\FileAssociations";
 
     bool ok = true;
-    ok = ok && SetRegStringValue(HKEY_CURRENT_USER, L"Software\\Classes\\" + fileType, L"", L"ARTPICST Image");
-    ok = ok && SetRegStringValue(HKEY_CURRENT_USER, L"Software\\Classes\\" + fileType, L"Content Type", L"image/*");
-    ok = ok && SetRegStringValue(HKEY_CURRENT_USER, L"Software\\Classes\\" + fileType, L"FriendlyTypeName", L"ARTPICST Image");
-    ok = ok && SetRegStringValue(HKEY_CURRENT_USER, L"Software\\Classes\\" + fileType + L"\\DefaultIcon", L"", L"\"" + exePath + L"\",0");
-    ok = ok && SetRegStringValue(HKEY_CURRENT_USER, L"Software\\Classes\\" + fileType + L"\\shell\\open\\command", L"", command);
-    ok = ok && SetRegStringValue(HKEY_CURRENT_USER, L"Software\\Classes\\" + fileType + L"\\shell\\open", L"MuiVerb", L"Abrir");
-    ok = ok && SetRegStringValue(HKEY_CURRENT_USER, L"Software\\Classes\\" + fileType + L"\\shell\\open", L"Icon", L"\"" + exePath + L"\",0");
-    ok = ok && SetRegStringValue(HKEY_CURRENT_USER, L"Software\\Classes\\Applications\\artpicst.exe", L"FriendlyAppName", L"ARTPICST");
-    ok = ok && SetRegStringValue(HKEY_CURRENT_USER, L"Software\\Classes\\Applications\\artpicst.exe\\shell\\open\\command", L"", command);
-    ok = ok && SetRegStringValue(HKEY_CURRENT_USER, L"Software\\Classes\\Applications\\artpicst.exe\\shell\\open", L"MuiVerb", L"Abrir");
-    for (const auto& ext : extensions) {
-        ok = ok && SetRegStringValue(HKEY_CURRENT_USER, L"Software\\Classes\\" + ext, L"", fileType);
+    ok = ok && SetRegStringValue(root, base, L"", L"Imagen de ARTPICST");
+    ok = ok && SetRegStringValue(root, base, L"Content Type", L"image/*");
+    ok = ok && SetRegStringValue(root, base, L"FriendlyTypeName", L"Imagen de ARTPICST");
+    ok = ok && SetRegStringValue(root, base + L"\\DefaultIcon", L"", L"\"" + exePath + L"\",0");
+    ok = ok && SetRegStringValue(root, base + L"\\shell\\open\\command", L"", command);
+    ok = ok && SetRegStringValue(root, base + L"\\shell\\open", L"MuiVerb", L"Abrir con ARTPICST");
+    ok = ok && SetRegStringValue(root, base + L"\\shell\\open", L"Icon", L"\"" + exePath + L"\",0");
+
+    ok = ok && SetRegStringValue(root, appKey, L"FriendlyAppName", L"ARTPICST");
+    ok = ok && SetRegStringValue(root, appKey + L"\\shell\\open\\command", L"", command);
+    ok = ok && SetRegStringValue(root, appKey + L"\\shell\\open", L"MuiVerb", L"Abrir con ARTPICST");
+    ok = ok && SetRegStringValue(root, appKey + L"\\shell\\open", L"Icon", L"\"" + exePath + L"\",0");
+    ok = ok && SetRegStringValue(root, appPaths, L"", exePath);
+    const std::wstring exeDir = GetExecutableFolder();
+    if (!exeDir.empty()) {
+        ok = ok && SetRegStringValue(root, appPaths, L"Path", exeDir);
     }
+
+    // «Valores predeterminados» de Windows 10/11 se alimenta de Capabilities y
+    // RegisteredApplications: sin ellas el visor no aparece entre las
+    // aplicaciones con las que abrir imágenes.
+    ok = ok && SetRegStringValue(root, caps, L"ApplicationName", L"ARTPICST");
+    ok = ok && SetRegStringValue(root, caps, L"ApplicationDescription",
+                                 L"Visor de imagenes ARTPICST: maxima calidad y fluidez");
+    ok = ok && SetRegStringValue(root, L"Software\\RegisteredApplications", L"ARTPICST", caps);
+
+    // Se anuncia en «Abrir con» de TODOS los formatos de la lista única. El
+    // valor predeterminado de cada extensión queda INTACTO: ARTPICST no
+    // secuestra el visor que el usuario ya tenía (misma política que el
+    // instalador); el formato se elige en Windows > Valores predeterminados.
+    // Cada formato se intenta SIEMPRE: con `ok = ok && ...` una sola escritura
+    // fallida (política de grupo, clave bloqueada) impediría asociar todas las
+    // demás, que es precisamente lo que no debe pasar.
+    for (const auto& format : artpicst::kImageFormats) {
+        const std::wstring ext = format.extension;
+        const bool openWith = SetRegStringValue(
+            root, L"Software\\Classes\\" + ext + L"\\OpenWithProgids", fileType, L"");
+        const bool supported = SetRegStringValue(root, appKey + L"\\SupportedTypes", ext, L"");
+        const bool capability = SetRegStringValue(root, capsFiles, ext, fileType);
+        ok = ok && openWith && supported && capability;
+    }
+
+    if (ok) SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
     return ok;
 }
 
 bool UnregisterFileAssociationForCurrentUser() {
-    std::vector<std::wstring> keys = {
-        L"Software\\Classes\\ARTPICST.Image",
-        L"Software\\Classes\\Applications\\artpicst.exe",
-        L"Software\\Classes\\.png",
-        L"Software\\Classes\\.jpg",
-        L"Software\\Classes\\.jpeg",
-        L"Software\\Classes\\.bmp",
-        L"Software\\Classes\\.gif",
-        L"Software\\Classes\\.tif",
-        L"Software\\Classes\\.tiff",
-        L"Software\\Classes\\.webp",
-        L"Software\\Classes\\.ico",
-        L"Software\\Classes\\.heic",
-        L"Software\\Classes\\.heif",
-        L"Software\\Classes\\.avif",
-        L"Software\\Classes\\.jfif"
-    };
+    const HKEY root = HKEY_CURRENT_USER;
+    const std::wstring fileType = L"ARTPICST.Image";
     bool ok = true;
-    for (const auto& key : keys) {
-        const LSTATUS status = RegDeleteTreeW(HKEY_CURRENT_USER, key.c_str());
+
+    auto deleteOwnTree = [&](const std::wstring& key) {
+        const LSTATUS status = RegDeleteTreeW(root, key.c_str());
         ok = ok && (status == ERROR_SUCCESS || status == ERROR_FILE_NOT_FOUND);
+    };
+
+    // Claves que solo pueden ser nuestras: se eliminan completas.
+    deleteOwnTree(L"Software\\Classes\\ARTPICST.Image");
+    deleteOwnTree(L"Software\\Classes\\Applications\\artpicst.exe");
+    deleteOwnTree(L"Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\artpicst.exe");
+    deleteOwnTree(L"Software\\ARTPICST\\Capabilities");
+
+    // En las extensiones SOLO se retira lo que escribió ARTPICST. Borrar la
+    // clave .ext completa (como hacía antes) arrasaba con la lista de «Abrir
+    // con» de otros programas y con la asociación predeterminada del usuario.
+    for (const auto& format : artpicst::kImageFormats) {
+        const std::wstring extKey = L"Software\\Classes\\" + std::wstring(format.extension);
+        DeleteRegValueIfEquals(root, extKey + L"\\OpenWithProgids", fileType, L"");
+        // Valor predeterminado heredado de versiones que sí lo escribían: solo
+        // se borra si sigue apuntando a ARTPICST.
+        DeleteRegValueIfEquals(root, extKey, L"", fileType);
     }
+
+    DeleteRegValueIfEquals(root, L"Software\\RegisteredApplications", L"ARTPICST",
+                           L"Software\\ARTPICST\\Capabilities");
+
+    SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
     return ok;
 }
 

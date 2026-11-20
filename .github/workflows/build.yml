@@ -54,6 +54,8 @@ jobs:
       run: |
         if not exist build mkdir build
         rc /nologo /fo build\artpicst.res artpicst.rc || exit /b 1
+        cd updater
+        rc /nologo /fo ..\build\artpicst_updater.res artpicst_updater.rc || exit /b 1
 
     - name: Compilar ARTPICST (C++23)
       shell: cmd
@@ -65,7 +67,7 @@ jobs:
           /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /DSTBI_WINDOWS_UTF8 /DSTBIR_NO_AVX /DSTBIR_NO_AVX2 /D_WIN32_WINNT=0x0601 /D_CRT_SECURE_NO_WARNINGS ^
           /Fe:"..\build\artpicst.exe" main.cpp ..\build\artpicst.res ^
           /link gdiplus.lib user32.lib kernel32.lib shell32.lib shlwapi.lib gdi32.lib msimg32.lib ^
-                ole32.lib oleaut32.lib uuid.lib dwmapi.lib windowscodecs.lib comdlg32.lib d2d1.lib dwrite.lib ^
+                ole32.lib oleaut32.lib uuid.lib dwmapi.lib windowscodecs.lib comdlg32.lib d2d1.lib dwrite.lib winmm.lib dxgi.lib ^
                 advapi32.lib ^
           /MANIFEST:EMBED /MANIFESTINPUT:..\artpicst.manifest /SUBSYSTEM:WINDOWS /LTCG /OPT:REF /OPT:ICF ^
           /GUARD:CF /DYNAMICBASE /HIGHENTROPYVA /NXCOMPAT || exit /b 1
@@ -82,19 +84,34 @@ jobs:
                 gdi32.lib msimg32.lib advapi32.lib ^
           /OPT:REF /OPT:ICF /GUARD:CF /DYNAMICBASE /HIGHENTROPYVA /NXCOMPAT || exit /b 1
 
+    # El updater es un binario propio (consulta WinHTTP, comparador de versiones
+    # y SHA-256). Antes este workflow copiaba artpicst.exe con el nombre de
+    # "artpicst_updater.exe" como placeholder: el instalador publicado desde CI
+    # llevaba un auto-actualizador que NO era el updater. Ahora se compila de
+    # verdad y su selftest actúa como gate antes de empaquetar.
+    - name: Compilar y validar updater (C++23, asInvoker)
+      shell: cmd
+      run: |
+        cd updater
+        cl /nologo /EHsc /std:c++latest /O2 /Ob3 /Oi /guard:cf %SIMD_FLAG% %SIMD_DEFINE% /utf-8 /W4 /WX- /wd4324 /I. /I..\installer ^
+          /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0601 /D_CRT_SECURE_NO_WARNINGS ^
+          /Fe:"..\build\artpicst_updater.exe" artpicst_updater.cpp ..\build\artpicst_updater.res ^
+          /link winhttp.lib gdiplus.lib shell32.lib shlwapi.lib user32.lib advapi32.lib ^
+                gdi32.lib ole32.lib uuid.lib dwmapi.lib ^
+          /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF /GUARD:CF /DYNAMICBASE /HIGHENTROPYVA /NXCOMPAT || exit /b 1
+        cd ..
+        build\artpicst_updater.exe --selftest || exit /b 1
+
+    # collect_app_payload.py copia los cuatro binarios, el icono, version.json y
+    # README a resources/app/ y genera installer/payload_manifest.hpp con el
+    # SHA-256 de cada archivo: el instalador verifica esos hashes contra los
+    # recursos incrustados antes de extraer nada a disco.
     - name: Preparar payload del instalador
       shell: powershell
       run: |
         $root = $env:GITHUB_WORKSPACE
-        $payload = Join-Path $root "resources\app"
-        New-Item -ItemType Directory -Force -Path $payload | Out-Null
-        Copy-Item "build\artpicst.exe" (Join-Path $payload "artpicst.exe") -Force
-        Copy-Item "resources\artpicst.ico" (Join-Path $payload "artpicst.ico") -Force
-        Copy-Item "version.json" (Join-Path $payload "version.json") -Force
-        Copy-Item "README.md" (Join-Path $payload "README.md") -Force
-        # build.yml no compila updater: copiamos el exe principal como placeholder
-        Copy-Item "build\artpicst.exe" (Join-Path $payload "artpicst_updater.exe") -Force
-        Copy-Item "build\artpicst_shell.dll" (Join-Path $payload "artpicst_shell.dll") -Force
+        python "$root\scripts\collect_app_payload.py" --root $root
+        if ($LASTEXITCODE -ne 0) { throw "collect_app_payload.py failed" }
 
     - name: Compilar recursos del instalador
       shell: cmd

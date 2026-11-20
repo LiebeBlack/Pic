@@ -1,19 +1,17 @@
-<!DOCTYPE html>
-<html lang="es" data-theme="auto">
+<!doctype html>
+<html lang="es">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>ARTPICST — Visor de imágenes premium para Windows</title>
-<meta name="description" content="ARTPICST: visor de imágenes nativo premium para Windows 10/11. Renderizado GPU, zoom logarítmico ultra suave, consumo ultra-ligero (RAM ≤ 80 MB), instalador autocontenido y auto-actualización integrada con verificación SHA-256.">
-<link rel="icon" href="../resources/artpicst.ico">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ARTPICST — Visor de imágenes para Windows</title>
+<meta name="description" content="Visor de imágenes nativo para Windows 10 y 11. Renderizado Direct2D, gestión de color ICC, escalado multihilo, 51 formatos y actualizaciones verificadas. Sin cuentas ni telemetría.">
+<link rel="icon" href="artpicst.ico">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="ARTPICST">
-<meta property="og:title" content="ARTPICST — Visor de imágenes premium para Windows">
-<meta property="og:description" content="Visor de imágenes nativo y ultraligero: renderizado GPU, zoom ultra suave de 0.5× a 512×, 30+ formatos, RAM ≤ 80 MB y auto-actualización integrada.">
+<meta property="og:title" content="ARTPICST — Visor de imágenes para Windows">
+<meta property="og:description" content="Renderizado nativo, color exacto, 51 formatos. Aplicación Win32 en C++23 sin cuentas ni telemetría.">
 <meta property="og:url" content="https://github.com/LiebeBlack/Pic">
 <meta name="twitter:card" content="summary">
-<meta name="twitter:title" content="ARTPICST — Visor de imágenes premium para Windows">
-<meta name="twitter:description" content="Visor de imágenes nativo y ultraligero: renderizado GPU, zoom ultra suave, 30+ formatos, RAM ≤ 80 MB y auto-actualización integrada.">
 <script type="application/ld+json">
 {
   "@context": "https://schema.org",
@@ -22,981 +20,446 @@
   "operatingSystem": "Windows 10, Windows 11",
   "applicationCategory": "MultimediaApplication",
   "softwareVersion": "1.2.1",
-  "description": "Visor de imágenes nativo premium para Windows: renderizado GPU Direct2D, zoom logarítmico ultra suave, más de 30 formatos, consumo ultra-ligero y auto-actualización integrada.",
+  "description": "Visor de imágenes nativo para Windows con renderizado Direct2D, gestión de color ICC, escalado multihilo y 51 formatos.",
   "url": "https://github.com/LiebeBlack/Pic"
 }
 </script>
 <style>
-  /* ================= Paleta (consistente con la app y el instalador) ================= */
   :root{
-    --acc-a:#00D8F0; --acc-b:#7000FF;
-    --bg:#0B0E15; --bg2:#090C12; --panel:#121724; --panel2:#171D2D;
-    --border:#232B3E; --border2:#2E3A55;
-    --text:#E9EDF5; --text-soft:#AAB4C8; --text-dim:#7C879C;
-    --shadow:0 18px 50px rgba(0,0,0,.5);
-    --code-bg:#0A0D15;
-    --grad:linear-gradient(135deg,var(--acc-a),var(--acc-b));
-    --glow-a:rgba(0,216,240,.16); --glow-b:rgba(112,0,255,.18);
+    --paper:#F4F2EC;
+    --paper-2:#EDEAE2;
+    --ink:#141518;
+    --ink-2:#3D4045;
+    --muted:#6E6E68;
+    --line:rgba(20,21,24,.14);
+    --line-strong:rgba(20,21,24,.32);
+    --accent:#8E3B28;
+    --sans:"Segoe UI Variable Display","Segoe UI",Inter,-apple-system,"Helvetica Neue",Arial,sans-serif;
+    --mono:"Cascadia Mono","SFMono-Regular",Consolas,"Liberation Mono",monospace;
+    --wrap:1240px;
   }
-  [data-theme="light"]{
-    --bg:#F4F6FB; --bg2:#EBEFF7; --panel:#FFFFFF; --panel2:#F6F8FD;
-    --border:#D9DFEC; --border2:#C6CFE2;
-    --text:#18202F; --text-soft:#46536B; --text-dim:#75829A;
-    --acc-a:#0089B0; --acc-b:#6C00E8;
-    --shadow:0 14px 40px rgba(30,50,90,.12);
-    --code-bg:#F1F4FA;
-    --glow-a:rgba(0,137,176,.12); --glow-b:rgba(108,0,232,.10);
-  }
-  @media (prefers-reduced-motion: reduce){
-    *,*::before,*::after{animation:none !important; transition:none !important; scroll-behavior:auto !important;}
-  }
-  *{box-sizing:border-box; margin:0; padding:0;}
-  html{scroll-behavior:smooth;}
+
+  *,*::before,*::after{box-sizing:border-box;}
+  html{-webkit-text-size-adjust:100%;scroll-behavior:smooth;}
   body{
-    font-family:"Segoe UI",system-ui,-apple-system,Roboto,sans-serif;
-    background:var(--bg); color:var(--text); line-height:1.6;
-    transition:background .3s ease,color .3s ease;
-    overflow-x:hidden;
+    margin:0;
+    background:var(--paper);
+    color:var(--ink);
+    font-family:var(--sans);
+    font-size:16.5px;
+    line-height:1.6;
+    -webkit-font-smoothing:antialiased;
+    text-rendering:optimizeLegibility;
   }
-  ::selection{background:rgba(0,216,240,.30);}
-  a{color:var(--acc-a); text-decoration:none;}
-  a:hover{text-decoration:underline;}
-  :focus-visible{outline:2px solid var(--acc-a); outline-offset:2px; border-radius:6px;}
-  .wrap{max-width:1120px; margin:0 auto; padding:0 24px;}
-  section[id], div[id="inicio"]{scroll-margin-top:84px;}
-  .grad-text{background:var(--grad); -webkit-background-clip:text; background-clip:text; color:transparent;}
+  ::selection{background:rgba(142,59,40,.18);}
+  :focus-visible{outline:2px solid var(--accent);outline-offset:3px;}
+  a{color:inherit;text-decoration:none;}
+  h1,h2,h3,p,dl,dd,dt,ol,ul,figure{margin:0;padding:0;}
+  ol,ul{list-style:none;}
+  svg{display:block;}
 
-  /* ================= Botones ================= */
-  .btn{
-    display:inline-flex; align-items:center; gap:10px; padding:14px 28px; border-radius:14px;
-    font-weight:700; font-size:15px; cursor:pointer; border:1px solid transparent;
-    transition:transform .15s ease, box-shadow .2s ease, filter .2s ease, background .2s ease;
-  }
-  .btn:hover{transform:translateY(-2px); text-decoration:none;}
-  .btn-primary{background:var(--grad); color:#fff; box-shadow:0 8px 24px rgba(0,190,225,.35);}
-  .btn-primary:hover{filter:brightness(1.08); box-shadow:0 12px 32px rgba(0,190,225,.45);}
-  .btn-ghost{background:transparent; border-color:var(--border2); color:var(--text);}
-  .btn-ghost:hover{background:var(--panel2);}
-  .btn-sm{padding:10px 20px; font-size:14px; border-radius:11px;}
+  .wrap{max-width:var(--wrap);margin:0 auto;padding:0 40px;}
+  .skip{position:absolute;left:12px;top:-48px;background:var(--ink);color:var(--paper);
+    padding:10px 14px;font:500 12px/1 var(--mono);letter-spacing:.08em;text-transform:uppercase;z-index:100;}
+  .skip:focus{top:12px;}
 
-  /* ================= Barra superior ================= */
-  header.nav{
-    position:sticky; top:0; z-index:50;
-    background:color-mix(in srgb, var(--bg) 80%, transparent);
-    backdrop-filter:blur(16px); -webkit-backdrop-filter:blur(16px);
-    border-bottom:1px solid var(--border);
-  }
-  .nav-inner{display:flex; align-items:center; gap:22px; height:64px;}
-  .brand{display:flex; align-items:center; gap:11px; font-weight:800; font-size:17px; letter-spacing:.2px; color:var(--text);}
-  .brand:hover{text-decoration:none;}
-  .logo-tile{
-    width:36px; height:36px; border-radius:10px; background:var(--grad);
-    display:grid; place-items:center; color:#fff; font-weight:800; font-size:18px;
-    box-shadow:0 4px 14px rgba(0,190,225,.4);
-  }
-  .nav-links{display:flex; gap:6px; margin-left:auto; background:var(--panel); border:1px solid var(--border); border-radius:999px; padding:5px;}
-  .nav-links a{color:var(--text-soft); font-size:13.5px; font-weight:600; padding:6px 13px; border-radius:999px; transition:background .2s, color .2s;}
-  .nav-links a:hover{color:var(--text); text-decoration:none; background:var(--panel2);}
-  .nav-links a.active{color:#fff; background:var(--grad);}
-  [data-theme="light"] .nav-links a.active{color:#fff;}
-  #themeBtn{
-    background:var(--panel); border:1px solid var(--border2); color:var(--text);
-    width:40px; height:40px; border-radius:12px; cursor:pointer; font-size:16px;
-    display:grid; place-items:center; transition:background .2s, transform .2s;
-  }
-  #themeBtn:hover{background:var(--panel2); transform:rotate(12deg);}
-  @media(max-width:900px){ .nav-links{display:none;} }
+  /* ---------- header ---------- */
+  .site-header{position:sticky;top:0;z-index:40;background:var(--paper);border-bottom:1px solid var(--line);}
+  .hdr{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:24px;height:68px;}
+  .brand{display:inline-flex;align-items:center;gap:10px;font:600 13px/1 var(--mono);
+    letter-spacing:.18em;}
+  .brand-mark{width:9px;height:9px;background:var(--ink);display:inline-block;}
+  .brand-ver{font:400 11px/1 var(--mono);color:var(--muted);letter-spacing:.08em;margin-left:2px;}
+  .nav{display:flex;gap:26px;justify-self:center;}
+  .nav a{font:500 11px/1 var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--ink-2);
+    padding:6px 0;border-bottom:1px solid transparent;}
+  .nav a:hover{color:var(--ink);border-bottom-color:var(--line-strong);}
 
-  /* ================= Hero ================= */
-  .hero{position:relative; padding:84px 0 40px; overflow:hidden;}
-  .hero .blob{position:absolute; border-radius:50%; filter:blur(90px); pointer-events:none; opacity:.8;}
-  .hero .blob.a{width:520px; height:520px; left:-140px; top:-180px; background:var(--glow-a); animation:drift 16s ease-in-out infinite alternate;}
-  .hero .blob.b{width:620px; height:620px; right:-200px; top:-120px; background:var(--glow-b); animation:drift 20s ease-in-out infinite alternate-reverse;}
-  @keyframes drift{from{transform:translate(0,0) scale(1);} to{transform:translate(60px,40px) scale(1.12);}}
-  .hero::after{
-    content:""; position:absolute; inset:0; pointer-events:none;
-    background-image:
-      linear-gradient(rgba(140,160,210,.055) 1px, transparent 1px),
-      linear-gradient(90deg, rgba(140,160,210,.055) 1px, transparent 1px);
-    background-size:44px 44px;
-    -webkit-mask-image:radial-gradient(760px 460px at 50% 0%, #000 30%, transparent 78%);
-    mask-image:radial-gradient(760px 460px at 50% 0%, #000 30%, transparent 78%);
-  }
-  .hero-grid{position:relative; z-index:1; display:grid; grid-template-columns:1.02fr .98fr; gap:52px; align-items:center;}
-  @media(max-width:980px){ .hero-grid{grid-template-columns:1fr; gap:44px;} .hero{padding-top:64px;} }
-  .hero-badge{
-    display:inline-flex; align-items:center; gap:8px; padding:7px 16px; border-radius:999px;
-    background:var(--panel); border:1px solid var(--border2);
-    font-size:13px; color:var(--text-soft); font-weight:600; margin-bottom:22px;
-  }
-  .hero-badge .dot{width:8px; height:8px; border-radius:50%; background:var(--grad); box-shadow:0 0 10px rgba(112,0,255,.8);}
-  .hero h1{font-size:clamp(38px,5.6vw,60px); font-weight:800; line-height:1.07; letter-spacing:-1.2px;}
-  .hero .tagline{margin:18px 0 30px; font-size:clamp(16px,2vw,18.5px); color:var(--text-soft); max-width:560px;}
-  .hero-actions{display:flex; gap:14px; flex-wrap:wrap;}
-  .hero-meta{margin-top:24px; font-size:13.5px; color:var(--text-dim);}
+  /* ---------- buttons ---------- */
+  .btn{display:inline-flex;align-items:center;justify-content:center;gap:10px;
+    height:46px;padding:0 22px;border:1px solid var(--ink);border-radius:2px;
+    background:var(--ink);color:var(--paper);
+    font:600 11px/1 var(--mono);letter-spacing:.11em;text-transform:uppercase;
+    transition:background .15s ease,color .15s ease;}
+  .btn:hover{background:transparent;color:var(--ink);}
+  .btn-sm{height:36px;padding:0 14px;font-size:10px;justify-self:end;}
+  .link-arrow{display:inline-flex;align-items:center;gap:8px;padding:4px 0;
+    font:500 12px/1 var(--mono);letter-spacing:.08em;text-transform:uppercase;
+    border-bottom:1px solid var(--line-strong);}
+  .link-arrow:hover{color:var(--accent);border-bottom-color:var(--accent);}
+  .actions{display:flex;flex-wrap:wrap;align-items:center;gap:26px;margin-top:34px;}
 
-  /* --- Mockup de la app (solo CSS) --- */
-  .appwin{
-    position:relative; border-radius:18px; border:1px solid transparent;
-    background:
-      linear-gradient(180deg, color-mix(in srgb, var(--panel) 94%, transparent), var(--panel)) padding-box,
-      linear-gradient(135deg, rgba(0,216,240,.55), rgba(112,0,255,.55)) border-box;
-    box-shadow:var(--shadow);
-    animation:floaty 7s ease-in-out infinite alternate;
-  }
-  @keyframes floaty{from{transform:translateY(-6px);} to{transform:translateY(8px);}}
-  .appwin-head{
-    display:flex; align-items:center; gap:10px; padding:11px 14px;
-    border-bottom:1px solid var(--border); font-size:12.5px; color:var(--text-dim);
-  }
-  .win-dots{display:flex; gap:6px;}
-  .win-dots i{width:10px; height:10px; border-radius:3px; background:var(--border2);}
-  .win-dots i:last-child{background:color-mix(in srgb, #ff5f57 55%, var(--border2));}
-  .win-title{flex:1; text-align:center; font-weight:600; letter-spacing:.2px;}
-  .win-glyphs{display:flex; gap:12px; color:var(--text-dim); font-size:12px; line-height:1;}
-  .appwin-body{position:relative; aspect-ratio:16/9.6; overflow:hidden; border-radius:0 0 18px 18px;}
-  .photo{
-    position:absolute; inset:0;
-    background:
-      radial-gradient(120% 90% at 18% 12%, #8a3ff8 0%, transparent 55%),
-      radial-gradient(120% 100% at 88% 18%, #00d8f0 0%, transparent 52%),
-      radial-gradient(90% 70% at 55% 105%, #2b1e5e 0%, transparent 60%),
-      linear-gradient(180deg, #131a2e 0%, #0b0e15 100%);
-  }
-  .photo::after{
-    content:""; position:absolute; inset:0;
-    background:linear-gradient(180deg, transparent 55%, rgba(6,8,14,.55) 100%);
-  }
-  .osd-chip{
-    position:absolute; top:12px; left:50%; transform:translateX(-50%); z-index:2;
-    background:rgba(10,12,20,.82); border:1px solid rgba(140,160,210,.25); color:#eef2fa;
-    font-size:11.5px; font-weight:700; padding:5px 14px; border-radius:999px; backdrop-filter:blur(6px);
-  }
-  .float-chip{
-    position:absolute; z-index:2; display:inline-flex; align-items:center; gap:6px;
-    background:rgba(10,12,20,.78); border:1px solid rgba(140,160,210,.22); color:#dfe6f2;
-    font-size:11px; font-weight:700; padding:5px 11px; border-radius:999px; backdrop-filter:blur(6px);
-  }
-  .float-chip .k{color:#7de8ff;}
-  .chip-gpu{top:12px; left:12px;} .chip-ram{top:12px; right:12px;}
-  .checker-patch{
-    position:absolute; left:14px; bottom:52px; z-index:2; width:92px; height:56px; border-radius:10px;
-    border:1px solid rgba(140,160,210,.28);
-    background:conic-gradient(#1d2130 25%, #12151f 0 50%, #1d2130 0 75%, #12151f 0) 0 0/16px 16px;
-  }
-  .checker-patch::after{
-    content:"PNG · alfa"; position:absolute; left:50%; top:50%; transform:translate(-50%,-50%);
-    font-size:9.5px; font-weight:700; color:#cdd6e6; background:rgba(10,12,20,.7);
-    padding:2px 8px; border-radius:999px; white-space:nowrap;
-  }
-  .app-dock{
-    position:absolute; left:50%; bottom:12px; transform:translateX(-50%); z-index:3;
-    display:flex; gap:4px; align-items:center; padding:6px; border-radius:12px;
-    background:rgba(10,12,20,.85); border:1px solid rgba(140,160,210,.25); backdrop-filter:blur(8px);
-    box-shadow:0 10px 26px rgba(0,0,0,.45);
-  }
-  .app-dock span{
-    font-size:10.5px; font-weight:700; color:#dfe6f2; padding:5px 9px; border-radius:8px;
-    border:1px solid transparent; white-space:nowrap;
-  }
-  .app-dock span.hot{background:rgba(0,216,240,.14); border-color:rgba(0,216,240,.45); color:#aef0ff;}
-  .app-dock span.grad{background:linear-gradient(135deg,#00bef0,#7a2bff); color:#fff;}
-  @media(max-width:520px){ .app-dock span:nth-child(n+6){display:none;} .checker-patch{display:none;} }
+  /* ---------- hero ---------- */
+  .hero{padding-top:96px;}
+  .hero-grid{display:grid;grid-template-columns:repeat(12,1fr);column-gap:32px;row-gap:56px;}
+  .hero-copy{grid-column:1 / span 7;}
+  .eyebrow{font:500 11px/1.4 var(--mono);letter-spacing:.13em;text-transform:uppercase;color:var(--muted);}
+  .eyebrow b{color:var(--accent);font-weight:500;}
+  h1{font-size:clamp(40px,5.6vw,70px);line-height:.96;letter-spacing:-.035em;font-weight:600;
+    margin-top:22px;text-wrap:balance;}
+  .lede{margin-top:28px;max-width:52ch;color:var(--ink-2);font-size:18px;line-height:1.62;text-wrap:pretty;}
 
-  /* ================= Franja de estadísticas ================= */
-  .stats{
-    position:relative; z-index:1;
-    display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin:54px auto 0;
-  }
-  @media(max-width:760px){ .stats{grid-template-columns:repeat(2,1fr);} }
-  .stat{
-    background:linear-gradient(180deg, color-mix(in srgb, var(--panel) 92%, transparent), var(--panel));
-    border:1px solid var(--border); border-radius:18px; padding:22px 18px; text-align:center;
-    transition:transform .18s ease, border-color .2s ease;
-  }
-  .stat:hover{transform:translateY(-3px); border-color:var(--border2);}
-  .stat b{display:block; font-size:clamp(24px,3vw,32px); background:var(--grad); -webkit-background-clip:text; background-clip:text; color:transparent; font-weight:800; letter-spacing:-.5px;}
-  .stat span{font-size:12px; color:var(--text-dim); font-weight:700; text-transform:uppercase; letter-spacing:.8px;}
+  .hero-side{grid-column:9 / span 4;align-self:start;border:1px solid var(--line);
+    background:var(--paper-2);padding:24px 24px 20px;}
+  .panel-title{font:500 10.5px/1 var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--muted);}
+  .pipeline{margin-top:16px;}
+  .pipeline li{display:grid;grid-template-columns:34px 1fr;gap:12px;padding:11px 0;
+    border-top:1px solid var(--line);}
+  .pipeline li:first-child{border-top:0;}
+  .pipeline .n{font:400 11px/1.5 var(--mono);color:var(--accent);font-variant-numeric:tabular-nums;}
+  .pipeline strong{display:block;font:600 13.5px/1.35 var(--sans);letter-spacing:-.01em;}
+  .pipeline span span{display:block;font:400 11.5px/1.5 var(--mono);color:var(--muted);margin-top:2px;}
+  .panel-note{margin-top:16px;padding-top:14px;border-top:1px solid var(--line);
+    font:400 12px/1.55 var(--sans);color:var(--muted);}
 
-  /* ================= Secciones ================= */
-  section.block{padding:70px 0;}
-  section.block.alt{background:var(--bg2); border-top:1px solid var(--border); border-bottom:1px solid var(--border);}
-  .kicker{
-    display:inline-flex; align-items:center; gap:8px;
-    font-size:12px; font-weight:800; letter-spacing:1.6px; text-transform:uppercase;
-    color:var(--acc-a); background:color-mix(in srgb, var(--acc-a) 10%, transparent);
-    border:1px solid color-mix(in srgb, var(--acc-a) 30%, transparent);
-    padding:6px 14px; border-radius:999px; margin-bottom:14px;
+  /* ---------- metrics ---------- */
+  .metrics{display:grid;grid-template-columns:repeat(4,1fr);margin-top:84px;
+    border-top:1px solid var(--line);border-bottom:1px solid var(--line);}
+  .metric{padding:24px 28px 26px;border-left:1px solid var(--line);}
+  .metric:first-child{border-left:0;padding-left:0;}
+  .metric dt{font:500 27px/1 var(--mono);letter-spacing:-.02em;font-variant-numeric:tabular-nums;}
+  .metric dd{margin-top:9px;font:500 10.5px/1.5 var(--mono);letter-spacing:.1em;
+    text-transform:uppercase;color:var(--muted);}
+
+  /* ---------- sections ---------- */
+  .sec{padding:0 0 8px;}
+  .sec-head{display:grid;grid-template-columns:88px 1fr;gap:32px;align-items:baseline;
+    padding:84px 0 40px;}
+  .sec-num{font:500 12px/1 var(--mono);letter-spacing:.1em;color:var(--accent);}
+  h2{font-size:clamp(30px,3.6vw,46px);line-height:1.04;letter-spacing:-.03em;font-weight:600;text-wrap:balance;}
+  .split{display:grid;grid-template-columns:1fr 1.05fr;gap:72px;align-items:start;
+    padding-bottom:84px;border-bottom:1px solid var(--line);}
+  .prose p{color:var(--ink-2);max-width:58ch;}
+  .prose p + p{margin-top:16px;}
+  .prose strong{color:var(--ink);font-weight:600;}
+
+  /* ---------- spec table ---------- */
+  .spec{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums;}
+  .spec caption{text-align:left;font:500 10.5px/1 var(--mono);letter-spacing:.14em;
+    text-transform:uppercase;color:var(--muted);padding-bottom:12px;}
+  .spec tr{border-top:1px solid var(--line);}
+  .spec tr:last-child{border-bottom:1px solid var(--line);}
+  .spec th{width:44%;text-align:left;vertical-align:top;padding:15px 24px 15px 0;
+    font:500 10.5px/1.6 var(--mono);letter-spacing:.09em;text-transform:uppercase;color:var(--muted);}
+  .spec td{padding:15px 0;font-size:15px;color:var(--ink-2);vertical-align:top;}
+
+  /* ---------- steps ---------- */
+  .steps{margin-bottom:32px;}
+  .steps li{display:grid;grid-template-columns:64px 200px 1fr;gap:24px;align-items:baseline;
+    padding:19px 0;border-top:1px solid var(--line);}
+  .steps li:last-child{border-bottom:1px solid var(--line);}
+  .steps .n{font:500 11px/1.6 var(--mono);color:var(--accent);}
+  .steps strong{font:600 14.5px/1.4 var(--sans);letter-spacing:-.01em;}
+  .steps span{font-size:14.5px;line-height:1.6;color:var(--ink-2);}
+  .steps code{font:400 13px/1 var(--mono);color:var(--ink);background:var(--paper-2);
+    padding:2px 5px;border:1px solid var(--line);border-radius:2px;}
+  .fineprint{font:400 13px/1.65 var(--sans);color:var(--muted);max-width:74ch;padding-bottom:84px;}
+
+  /* ---------- formats ---------- */
+  .format-intro{display:grid;grid-template-columns:1fr 1fr;gap:72px;padding-bottom:40px;}
+  .formats{display:grid;grid-template-columns:repeat(auto-fill,minmax(112px,1fr));
+    border-top:1px solid var(--line);border-left:1px solid var(--line);}
+  .formats li{border-right:1px solid var(--line);border-bottom:1px solid var(--line);
+    padding:13px 12px;font:400 12.5px/1 var(--mono);color:var(--ink-2);
+    font-variant-numeric:tabular-nums;}
+  .formats li:hover{background:var(--paper-2);color:var(--accent);}
+
+  /* ---------- integrity ---------- */
+  .cols-2{display:grid;grid-template-columns:1fr 1fr;gap:72px 88px;padding-bottom:24px;}
+  .list li{padding:16px 0;border-top:1px solid var(--line);}
+  .list li:last-child{border-bottom:1px solid var(--line);}
+  .list h3{font:600 14.5px/1.4 var(--sans);letter-spacing:-.01em;}
+  .list p{margin-top:5px;font-size:14px;line-height:1.6;color:var(--muted);max-width:46ch;}
+
+  /* ---------- download ---------- */
+  .cta{margin-top:84px;background:#121316;color:#EDEAE2;padding:88px 0 84px;}
+  .cta-grid{display:grid;grid-template-columns:1.25fr .75fr;gap:88px;align-items:start;}
+  .eyebrow-invert{color:rgba(237,234,226,.58);}
+  .eyebrow-invert b{color:#E2866B;}
+  .cta h2{font-size:clamp(32px,4.2vw,54px);margin-top:18px;}
+  .cta p.lede{color:rgba(237,234,226,.72);font-size:16.5px;margin-top:20px;max-width:46ch;}
+  .cta .actions{margin-top:32px;gap:14px;}
+  .btn-paper{background:#EDEAE2;border-color:#EDEAE2;color:#121316;}
+  .btn-paper:hover{background:transparent;color:#EDEAE2;}
+  .btn-line{background:transparent;border-color:rgba(237,234,226,.34);color:#EDEAE2;}
+  .btn-line:hover{background:#EDEAE2;color:#121316;border-color:#EDEAE2;}
+  .cta .meta{margin-top:26px;font:400 11.5px/1.6 var(--mono);letter-spacing:.03em;
+    color:rgba(237,234,226,.52);}
+  .req{border-top:1px solid rgba(237,234,226,.18);padding-top:18px;}
+  .req .panel-title{color:rgba(237,234,226,.52);}
+  .req dl{margin-top:6px;}
+  .req .row{display:flex;justify-content:space-between;gap:24px;padding:12px 0;
+    border-bottom:1px solid rgba(237,234,226,.14);}
+  .req dt{font:400 11px/1.6 var(--mono);letter-spacing:.07em;text-transform:uppercase;
+    color:rgba(237,234,226,.5);}
+  .req dd{font:400 13px/1.6 var(--mono);color:#EDEAE2;text-align:right;}
+
+  /* ---------- footer ---------- */
+  .site-footer{background:#121316;color:rgba(237,234,226,.72);
+    border-top:1px solid rgba(237,234,226,.16);padding:56px 0 40px;}
+  .foot-grid{display:grid;grid-template-columns:1.4fr repeat(3,auto);gap:56px;}
+  .foot-brand{display:flex;align-items:center;gap:10px;font:600 12px/1 var(--mono);
+    letter-spacing:.18em;color:#EDEAE2;}
+  .site-footer p{margin-top:14px;font-size:13px;line-height:1.65;max-width:34ch;
+    color:rgba(237,234,226,.52);}
+  .foot-col h3{font:500 10px/1 var(--mono);letter-spacing:.14em;text-transform:uppercase;
+    color:rgba(237,234,226,.46);}
+  .foot-col ul{margin-top:14px;display:grid;gap:9px;}
+  .foot-col a{font-size:13.5px;color:rgba(237,234,226,.78);border-bottom:1px solid transparent;}
+  .foot-col a:hover{color:#EDEAE2;border-bottom-color:rgba(237,234,226,.4);}
+  .foot-base{display:flex;flex-wrap:wrap;justify-content:space-between;gap:16px;
+    margin-top:56px;padding-top:20px;border-top:1px solid rgba(237,234,226,.16);
+    font:400 11px/1.6 var(--mono);letter-spacing:.03em;color:rgba(237,234,226,.42);}
+
+  @media (max-width:1080px){
+    .hero-copy{grid-column:1 / -1;}
+    .hero-side{grid-column:1 / -1;max-width:560px;}
+    .split{grid-template-columns:1fr;gap:48px;}
+    .format-intro{grid-template-columns:1fr;gap:24px;}
+    .cols-2{grid-template-columns:1fr;gap:0;}
+    .cta-grid{grid-template-columns:1fr;gap:48px;}
+    .foot-grid{grid-template-columns:1fr 1fr;gap:40px;}
   }
-  h2.sec-title{font-size:clamp(26px,3.6vw,38px); font-weight:800; letter-spacing:-.6px; margin-bottom:14px;}
-  .sec-sub{color:var(--text-soft); max-width:720px; margin-bottom:40px; font-size:15.5px;}
-
-  .grid{display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); gap:18px;}
-  .card{
-    position:relative;
-    background:linear-gradient(180deg, color-mix(in srgb, var(--panel) 94%, transparent), var(--panel));
-    border:1px solid var(--border); border-radius:20px; padding:26px 24px;
-    transition:transform .18s ease, border-color .2s ease, box-shadow .25s ease;
-    overflow:hidden;
+  @media (max-width:820px){
+    .wrap{padding:0 22px;}
+    .nav{display:none;}
+    .hdr{grid-template-columns:1fr auto;}
+    .hdr .btn-sm{width:auto;}
+    .hero{padding-top:64px;}
+    .metrics{grid-template-columns:1fr 1fr;margin-top:56px;}
+    .metric{padding:20px 20px 22px;}
+    .metric:nth-child(3){border-left:0;padding-left:0;}
+    .sec-head{grid-template-columns:1fr;gap:10px;padding:64px 0 30px;}
+    .steps li{grid-template-columns:44px 1fr;gap:8px 16px;}
+    .steps span{grid-column:2;}
+    .spec th{width:46%;}
+    .foot-grid{grid-template-columns:1fr;}
+    .cta{padding:64px 0;}
+    .cta .actions{gap:12px;}
+    .btn{width:100%;}
+    .actions .link-arrow{width:auto;}
   }
-  .card::before{
-    content:""; position:absolute; inset:0 0 auto 0; height:1px;
-    background:linear-gradient(90deg, transparent, rgba(0,216,240,.5), rgba(112,0,255,.5), transparent);
-    opacity:0; transition:opacity .25s ease;
+  @media (max-width:520px){
+    .formats{grid-template-columns:repeat(auto-fill,minmax(88px,1fr));}
+    .metrics{grid-template-columns:1fr;}
+    .metric{border-left:0;padding-left:0;border-top:1px solid var(--line);}
+    .metric:first-child{border-top:0;}
   }
-  .card:hover{transform:translateY(-5px); border-color:var(--border2); box-shadow:var(--shadow);}
-  .card:hover::before{opacity:1;}
-  .card .ico{
-    width:46px; height:46px; border-radius:13px; display:grid; place-items:center; font-size:21px;
-    background:color-mix(in srgb, var(--acc-a) 14%, transparent);
-    border:1px solid color-mix(in srgb, var(--acc-a) 35%, transparent);
-    margin-bottom:16px;
+  @media (prefers-reduced-motion:reduce){
+    html{scroll-behavior:auto;}
+    *{transition:none !important;}
   }
-  .card:nth-child(even) .ico{
-    background:color-mix(in srgb, var(--acc-b) 14%, transparent);
-    border-color:color-mix(in srgb, var(--acc-b) 35%, transparent);
-  }
-  .card h3{font-size:17px; font-weight:700; margin-bottom:7px;}
-  .card p{font-size:14.2px; color:var(--text-soft);}
-
-  .two-col{display:grid; grid-template-columns:1.05fr .95fr; gap:44px; align-items:center;}
-  @media(max-width:860px){ .two-col{grid-template-columns:1fr; gap:34px;} }
-
-  .perf-list{display:flex; flex-direction:column; gap:14px;}
-  .perf-item{
-    display:flex; gap:15px; background:var(--panel); border:1px solid var(--border);
-    border-radius:16px; padding:17px 18px; transition:border-color .2s ease;
-  }
-  .perf-item:hover{border-color:var(--border2);}
-  .perf-item .tag{flex:0 0 auto; width:42px; height:42px; border-radius:12px; display:grid; place-items:center; font-size:18px; background:var(--grad); color:#fff;}
-  .perf-item .tag.outline{background:none; border:1px solid var(--border2); color:var(--acc-a); font-size:12.5px; font-weight:800;}
-  .perf-item h4{font-size:15.5px;}
-  .perf-item p{font-size:13.5px; color:var(--text-soft);}
-  .perf-item code{background:var(--code-bg); border:1px solid var(--border); padding:1px 6px; border-radius:6px; font-size:12.5px;}
-
-  .bar{height:9px; border-radius:999px; background:var(--panel2); overflow:hidden; margin:9px 0 4px; border:1px solid var(--border);}
-  .bar i{display:block; height:100%; width:0; border-radius:999px; background:var(--grad); transition:width 1.2s cubic-bezier(.22,1,.36,1) .2s;}
-  .on .bar i{width:var(--w,0%);}
-
-  /* ================= Formatos ================= */
-  .fmt-grid{display:grid; grid-template-columns:repeat(auto-fit,minmax(250px,1fr)); gap:16px;}
-  .fmt-card{background:var(--panel); border:1px solid var(--border); border-radius:18px; padding:20px 20px 12px; transition:border-color .2s, transform .18s;}
-  .fmt-card:hover{border-color:var(--border2); transform:translateY(-3px);}
-  .fmt-card h3{font-size:14px; font-weight:800; letter-spacing:.3px; margin-bottom:12px; color:var(--acc-a);}
-  .fmt-card:nth-child(even) h3{color:var(--acc-b);}
-  .fmt-card ul{list-style:none; display:flex; flex-wrap:wrap; gap:6px 0; margin-bottom:6px;}
-  .fmt-card li{font-size:13px; color:var(--text-soft); padding:0 9px; border-right:1px solid var(--border2); line-height:1.9;}
-  .fmt-card li:last-child{border-right:none;}
-
-  /* ================= Atajos ================= */
-  .table-scroll{border:1px solid var(--border); border-radius:18px; overflow:hidden; background:var(--panel);}
-  .table-scroll > div{overflow-x:auto;}
-  table.shortcuts{width:100%; min-width:560px; border-collapse:collapse;}
-  table.shortcuts th, table.shortcuts td{padding:12px 18px; text-align:left; font-size:14.2px; border-bottom:1px solid var(--border);}
-  table.shortcuts thead th{background:var(--panel2); font-size:11.5px; text-transform:uppercase; letter-spacing:1.2px; color:var(--text-dim);}
-  table.shortcuts tbody tr:nth-child(even){background:color-mix(in srgb, var(--panel2) 55%, transparent);}
-  table tbody tr:last-child td{border-bottom:none;}
-  table tbody tr{transition:background .15s ease;}
-  table tbody tr:hover{background:color-mix(in srgb, var(--acc-a) 6%, transparent);}
-  table.shortcuts td:first-child{color:var(--text-soft); white-space:nowrap;}
-  kbd{
-    display:inline-block; padding:2px 9px; border-radius:6px; font-family:inherit; font-size:12.5px; font-weight:600;
-    background:var(--panel2); border:1px solid var(--border2); border-bottom-width:2.5px; color:var(--text); margin:1px 0;
-  }
-
-  /* ================= Descarga ================= */
-  .dl-panel{
-    position:relative; border-radius:24px; border:1px solid transparent;
-    background:
-      linear-gradient(180deg, color-mix(in srgb, var(--panel) 94%, transparent), var(--panel)) padding-box,
-      linear-gradient(135deg, rgba(0,216,240,.6), rgba(112,0,255,.6)) border-box;
-    padding:38px 34px; text-align:center; margin-bottom:26px;
-    box-shadow:var(--shadow);
-  }
-  .dl-panel h3{font-size:clamp(21px,2.6vw,27px); font-weight:800; letter-spacing:-.4px; margin-bottom:8px;}
-  .dl-panel p{color:var(--text-soft); font-size:14.5px; max-width:620px; margin:0 auto 22px;}
-  .dl-actions{display:flex; gap:14px; justify-content:center; flex-wrap:wrap; margin-bottom:18px;}
-  .dl-checks{display:flex; gap:18px; justify-content:center; flex-wrap:wrap; font-size:12.5px; color:var(--text-dim); font-weight:600;}
-  .dl-checks b{color:var(--acc-a);}
-
-  .chip{display:inline-block; padding:4px 12px; border-radius:999px; border:1px solid var(--border2); font-size:12.5px; color:var(--text-soft); background:var(--panel); margin:0 6px 8px 0;}
-  .chip b{color:var(--text); font-weight:700;}
-
-  /* ================= Bloques de código ================= */
-  .codebox{border:1px solid var(--border); border-radius:14px; overflow:hidden; background:var(--code-bg); margin-bottom:16px;}
-  .codehead{
-    display:flex; align-items:center; justify-content:space-between; gap:10px;
-    padding:8px 14px; background:var(--panel2); border-bottom:1px solid var(--border);
-    font-size:12px; font-weight:700; color:var(--text-dim); letter-spacing:.4px;
-  }
-  .codehead .lang{display:inline-flex; align-items:center; gap:7px;}
-  .codehead .lang::before{content:""; width:8px; height:8px; border-radius:50%; background:var(--grad);}
-  .copy-btn{
-    background:var(--panel); border:1px solid var(--border2); color:var(--text-soft);
-    font-size:12px; padding:4px 12px; border-radius:8px; cursor:pointer; transition:color .15s, border-color .15s;
-  }
-  .copy-btn:hover{color:var(--text); border-color:var(--acc-a);}
-  pre{
-    margin:0; padding:18px 20px; overflow-x:auto; font-size:13.3px; line-height:1.7;
-    font-family:Consolas,"Cascadia Mono",Menlo,monospace;
-  }
-  pre .c{color:var(--text-dim);}
-  .inline-code{background:var(--code-bg); border:1px solid var(--border); border-radius:6px; padding:1px 7px; font-size:13px; font-family:Consolas,Menlo,monospace;}
-
-  .steps{counter-reset:step; display:flex; flex-direction:column;}
-  .step{display:flex; gap:16px; padding:14px 0;}
-  .step::before{
-    counter-increment:step; content:counter(step);
-    flex:0 0 auto; width:34px; height:34px; border-radius:11px;
-    background:var(--grad); color:#fff; font-weight:800; font-size:15px;
-    display:grid; place-items:center; margin-top:2px;
-  }
-  .step h4{font-size:15.5px;}
-  .step p{font-size:14px; color:var(--text-soft);}
-
-  /* ================= FAQ ================= */
-  details.faq-item{background:var(--panel); border:1px solid var(--border); border-radius:15px; padding:2px 22px; margin-bottom:12px; transition:border-color .2s;}
-  details.faq-item[open]{border-color:var(--border2);}
-  details.faq-item summary{cursor:pointer; padding:15px 0; font-weight:700; font-size:15.5px; list-style:none; display:flex; justify-content:space-between; align-items:center; gap:14px;}
-  details.faq-item summary::-webkit-details-marker{display:none;}
-  details.faq-item summary::after{content:"+"; color:var(--acc-a); font-size:20px; font-weight:800; line-height:1; transition:transform .2s ease;}
-  details.faq-item[open] summary::after{transform:rotate(45deg);}
-  details.faq-item p{padding:0 0 18px; color:var(--text-soft); font-size:14.3px;}
-
-  /* ================= Pie ================= */
-  footer{border-top:1px solid var(--border); padding:42px 0; color:var(--text-dim); font-size:13.5px; background:var(--bg2);}
-  .foot-flex{display:flex; justify-content:space-between; gap:16px; flex-wrap:wrap; align-items:center;}
-  .foot-flex a{color:var(--text-soft); font-weight:600;}
-  .foot-flex a:hover{color:var(--acc-a);}
-
-  /* ================= Volver arriba ================= */
-  #topBtn{
-    position:fixed; right:22px; bottom:22px; z-index:60;
-    width:44px; height:44px; border-radius:13px; border:1px solid var(--border2);
-    background:var(--panel); color:var(--text); font-size:17px; cursor:pointer;
-    display:grid; place-items:center; box-shadow:var(--shadow);
-    opacity:0; transform:translateY(12px); pointer-events:none;
-    transition:opacity .25s ease, transform .25s ease, background .2s ease;
-  }
-  #topBtn.show{opacity:1; transform:none; pointer-events:auto;}
-  #topBtn:hover{background:var(--panel2);}
-
-  /* Animaciones al hacer scroll */
-  .reveal{opacity:0; transform:translateY(22px); transition:opacity .55s ease, transform .55s ease;}
-  .reveal.on{opacity:1; transform:none;}
-  @media (prefers-reduced-motion:reduce){.reveal{opacity:1; transform:none;} .bar i{width:var(--w,0%);}}
 </style>
 </head>
 <body>
+<a class="skip" href="#main">Saltar al contenido</a>
 
-<header class="nav">
-  <div class="wrap nav-inner">
-    <a class="brand" href="#inicio"><span class="logo-tile">A</span> ARTPICST</a>
-    <nav class="nav-links" aria-label="Secciones de la página">
-      <a href="#caracteristicas">Características</a>
-      <a href="#rendimiento">Rendimiento</a>
-      <a href="#formatos">Formatos</a>
-      <a href="#atajos">Atajos</a>
-      <a href="#descargar">Descargar</a>
-      <a href="#actualizar">Actualizaciones</a>
-      <a href="#faq">FAQ</a>
+<header class="site-header">
+  <div class="wrap hdr">
+    <a class="brand" href="#top" aria-label="ARTPICST, inicio">
+      <span class="brand-mark" aria-hidden="true"></span>ARTPICST<span class="brand-ver">1.2.1</span>
+    </a>
+    <nav class="nav" aria-label="Principal">
+      <a href="#render">Renderizado</a>
+      <a href="#decode">Decodificación</a>
+      <a href="#formats">Formatos</a>
+      <a href="#integrity">Integridad</a>
     </nav>
-    <button id="themeBtn" type="button" aria-label="Cambiar tema" title="Cambiar tema claro/oscuro">🌙</button>
+    <a class="btn btn-sm" href="#download">Descargar</a>
   </div>
 </header>
 
-<!-- ============================ HERO ============================ -->
-<div class="hero" id="inicio">
-  <div class="blob a"></div>
-  <div class="blob b"></div>
-  <div class="wrap hero-grid">
-    <div>
-      <span class="hero-badge"><span class="dot"></span> v1.2.1 · Windows 10 / 11 · Con auto-actualización</span>
-      <h1>El visor de imágenes<br><span class="grad-text">premium y ultraligero</span> para Windows</h1>
-      <p class="tagline">
-        Navega tus fotos a máxima fidelidad con renderizado GPU, zoom logarítmico ultra suave sin saltos,
-        soporte completo de formatos y una huella de memoria mínima. Hecho en C++ nativo — sin Electron, sin peso.
-      </p>
-      <div class="hero-actions">
-        <a class="btn btn-primary" href="#descargar">⬇ Descargar ARTPICST</a>
-        <a class="btn btn-ghost" href="#compilar">Compilar desde el código</a>
-      </div>
-      <p class="hero-meta">Instalador autocontenido · Auto-actualización integrada · Portable disponible · Open source en GitHub</p>
-    </div>
+<main id="main">
 
-    <div class="appwin" role="img" aria-label="Vista previa de la interfaz de ARTPICST con dock flotante y zoom al 100%">
-      <div class="appwin-head">
-        <span class="win-dots"><i></i><i></i><i></i></span>
-        <span class="win-title">ARTPICST — atardecer_4k.png</span>
-        <span class="win-glyphs"><span>—</span><span>▢</span><span>✕</span></span>
-      </div>
-      <div class="appwin-body">
-        <div class="photo"></div>
-        <span class="float-chip chip-gpu"><span class="k">GPU</span> Direct2D · 60 FPS</span>
-        <span class="osd-chip">Zoom: 100%</span>
-        <span class="float-chip chip-ram"><span class="k">RAM</span> 42 MB</span>
-        <div class="checker-patch" aria-hidden="true"></div>
-        <div class="app-dock" aria-hidden="true">
-          <span>◀</span><span>▶</span>
-          <span class="hot">Ajustar</span><span>1:1</span><span class="grad">Claridad</span>
-          <span>Rotar</span><span>Voltear</span><span>Fondo</span><span>Guardar</span>
+  <section class="hero" id="top">
+    <div class="wrap hero-grid">
+      <div class="hero-copy">
+        <p class="eyebrow"><b>●</b>&nbsp; Visor de imágenes · Windows 10 y 11 · x64</p>
+        <h1>Renderizado nativo.<br>Color exacto.</h1>
+        <p class="lede">Aplicación Win32 en C++23 con renderizado Direct2D, decodificación WIC y stb_image, gestión de color ICC y escalado de alta calidad repartido entre núcleos. Sin cuentas, sin telemetría y sin dependencias en tiempo de ejecución.</p>
+        <div class="actions">
+          <a class="btn" href="#download">Descargar <span aria-hidden="true">→</span></a>
+          <a class="link-arrow" href="#render">Especificaciones <span aria-hidden="true">→</span></a>
         </div>
       </div>
-    </div>
-  </div>
 
-  <div class="wrap">
-    <div class="stats">
-      <div class="stat"><b>≤ 80 MB</b><span>RAM típica</span></div>
-      <div class="stat"><b>~0%</b><span>CPU en reposo</span></div>
-      <div class="stat"><b>30+</b><span>formatos</span></div>
-      <div class="stat"><b>512×</b><span>zoom máximo</span></div>
+      <aside class="hero-side" aria-label="Ruta de renderizado">
+        <p class="panel-title">Ruta de renderizado</p>
+        <ol class="pipeline">
+          <li><span class="n">01</span><div><strong>Decodificación</strong><span>WIC · stb_image · GDI+</span></div></li>
+          <li><span class="n">02</span><div><strong>Perfil de color</strong><span>ICC → sRGB en origen</span></div></li>
+          <li><span class="n">03</span><div><strong>Escalado</strong><span>Catmull–Rom / Mitchell</span></div></li>
+          <li><span class="n">04</span><div><strong>Textura</strong><span>Direct2D · LOD de pantalla</span></div></li>
+          <li><span class="n">05</span><div><strong>Presentación</strong><span>vsync · región sucia</span></div></li>
+        </ol>
+        <p class="panel-note">Un fotograma en reposo no vuelve a tocar los píxeles que no han cambiado.</p>
+      </aside>
     </div>
-  </div>
-</div>
 
-<!-- ============================ CARACTERÍSTICAS ============================ -->
-<section class="block" id="caracteristicas">
-  <div class="wrap">
-    <span class="kicker">Características premium</span>
-    <h2 class="sec-title">Todo lo que un visor de fotos debería ser</h2>
-    <p class="sec-sub">Una interfaz acrílica moderna sobre un motor de imagen serio: calidad de estudio con el tacto y la velocidad de una app nativa.</p>
-
-    <div class="grid">
-      <div class="card reveal">
-        <div class="ico">🎨</div>
-        <h3>Interfaz Glassmorphism</h3>
-        <p>Estética acrílica inspirada en Windows 11 con dock flotante compacto, tema claro/oscuro automático según el sistema y ventana redondeada.</p>
-      </div>
-      <div class="card reveal">
-        <div class="ico">🖥️</div>
-        <h3>Renderizado GPU Direct2D</h3>
-        <p>Escena dibujada por hardware a 60 FPS con CPU ~0%. Si Direct2D no está disponible, se vuelca automáticamente al trazador GDI+ clásico.</p>
-      </div>
-      <div class="card reveal">
-        <div class="ico">🔍</div>
-        <h3>Zoom ultra suave y libre</h3>
-        <p>Animación logarítmica sin saltos con el punto bajo el cursor clavado, sin recentrado ni límites prácticos: rango libre de 0.5× a 512×. Nitidez de vecino más próximo en escalas enteras y bicúbica fotográfica en las intermedias.</p>
-      </div>
-      <div class="card reveal">
-        <div class="ico">✨</div>
-        <h3>Ultra-Claridad HDR</h3>
-        <p>Modo de realce de micro-contraste y detalles finos, horneado una sola vez por cambio — cero coste por fotograma.</p>
-      </div>
-      <div class="card reveal">
-        <div class="ico">🧊</div>
-        <h3>Transparencia clara</h3>
-        <p>Fondo ajedrezado inteligente (una sola llamada de textura en vez de miles de rectángulos) para PNG, WebP, ICO y GIF.</p>
-      </div>
-      <div class="card reveal">
-        <div class="ico">📷</div>
-        <h3>EXIF automático</h3>
-        <p>Detecta y corrige la orientación de fotos de móviles y cámaras, con panel de propiedades y metadatos integrado.</p>
-      </div>
-      <div class="card reveal">
-        <div class="ico">🎞️</div>
-        <h3>GIF animados fluidos</h3>
-        <p>Sincronización proporcional al tiempo transcurrido: si el sistema va retrasado se saltan fotogramas para no perder el ritmo.</p>
-      </div>
-      <div class="card reveal">
-        <div class="ico">🧠</div>
-        <h3>Caché LRU inteligente</h3>
-        <p>Prefetch en segundo plano a prioridad mínima, presupuesto de caché ajustado y devolución de RAM al sistema tras cada carga (Working Set Trim).</p>
-      </div>
-      <div class="card reveal">
-        <div class="ico">🖱️</div>
-        <h3>Navegación avanzada</h3>
-        <p>Flechas para imágenes y zoom, arrastre para panorámica, rueda centrada en el cursor, botones X1/X2 del ratón y dock con atajos de un clic.</p>
-      </div>
-      <div class="card reveal">
-        <div class="ico">🖼️</div>
-        <h3>Fondo y portapapeles</h3>
-        <p>Establece la imagen como fondo de escritorio con un atajo y copia al portapapeles en calidad máxima (exportación 100%).</p>
-      </div>
-      <div class="card reveal">
-        <div class="ico">🔄</div>
-        <h3>Auto-actualización integrada</h3>
-        <p>Comprueba GitHub Releases una vez al día en segundo plano y te avisa con una notificación discreta. Descarga verificada por SHA-256, instalación encadenada y reinicio transparente.</p>
-      </div>
-      <div class="card reveal">
-        <div class="ico">📤</div>
-        <h3>Guardar / exportar</h3>
-        <p>Exporta con rotación y volteos aplicados a PNG, JPEG (calidad 100%) o BMP mediante el diálogo nativo de Windows.</p>
-      </div>
-      <div class="card reveal">
-        <div class="ico">🛡️</div>
-        <h3>Ligero por diseño</h3>
-        <p>Arrastra y suelta, línea de comandos, presentación F5, pantalla completa F11 y arranque instantáneo. Sin telemetría, sin servicios en segundo plano.</p>
-      </div>
+    <div class="wrap">
+      <dl class="metrics">
+        <div class="metric"><dt>51</dt><dd>Formatos de imagen</dd></div>
+        <div class="metric"><dt>1:1</dt><dd>Píxel real a 100 %</dd></div>
+        <div class="metric"><dt>16384 px</dt><dd>Techo configurable</dd></div>
+        <div class="metric"><dt>64 MB</dt><dd>Caché de imágenes</dd></div>
+      </dl>
     </div>
-  </div>
-</section>
+  </section>
 
-<!-- ============================ RENDIMIENTO ============================ -->
-<section class="block alt" id="rendimiento">
-  <div class="wrap two-col">
-    <div>
-      <span class="kicker">Rendimiento y recursos</span>
-      <h2 class="sec-title">Rápido de verdad, no solo de apariencia</h2>
-      <p class="sec-sub" style="margin-bottom:26px;">
-        Cada fotograma se repinta por regiones (solo lo que cambió), los efectos se hornean una vez y los
-        buffers de decodificación vuelven al sistema. Así se ve el consumo real:
-      </p>
-      <div class="perf-list">
-        <div class="perf-item reveal">
-          <div class="tag">💾</div>
-          <div style="flex:1;">
-            <h4>Memoria durante la navegación</h4>
-            <p>Caché compacta de 4 imágenes con tope de 64 MB, sin copias duplicadas al rotar o voltear.</p>
-            <div class="bar"><i style="--w:12%"></i></div>
-          </div>
+  <section class="sec" id="render">
+    <div class="wrap">
+      <header class="sec-head">
+        <span class="sec-num">01</span>
+        <h2>Renderizado</h2>
+      </header>
+      <div class="split">
+        <div class="prose">
+          <p>La escena se compone en <strong>Direct2D</strong> sobre un render target por hardware. La textura se prepara al tamaño que tendrá en pantalla: al reducir se remuestrea en CPU con Mitchell, al ampliar con Catmull–Rom, y a 1:1 se dibuja el píxel nativo sin filtro alguno.</p>
+          <p>El repintado usa regiones sucias y conserva el fotograma anterior. Mover el cursor por el dock, mostrar el aviso de estado o animar el zoom no reconstruye la imagen completa: solo se rasteriza la franja que cambia.</p>
+          <p>Si el contexto gráfico falla, el visor no se queda en negro: libera el dispositivo, repinta con el trazador GDI+ y reintenta la GPU automáticamente.</p>
         </div>
-        <div class="perf-item reveal">
-          <div class="tag">⚡</div>
-          <div style="flex:1;">
-            <h4>CPU en reposo y al mover el ratón</h4>
-            <p>El dock y el OSD repintan solo su banda; el fotograma 4K no se vuelve a escalar en cada hover.</p>
-            <div class="bar"><i style="--w:3%"></i></div>
-          </div>
-        </div>
-        <div class="perf-item reveal">
-          <div class="tag">🎞️</div>
-          <div style="flex:1;">
-            <h4>Reproducción GIF animado</h4>
-            <p>Avance por temporizador con salto de fotogramas atrasados y subida al GPU solo cuando cambia el contenido.</p>
-            <div class="bar"><i style="--w:18%"></i></div>
-          </div>
-        </div>
-      </div>
-    </div>
-    <div>
-      <span class="kicker">Motor de imagen</span>
-      <h2 class="sec-title">Tres decodificadores, uno superior</h2>
-      <p class="sec-sub" style="margin-bottom:26px;">El código elige el mejor motor para cada archivo — calidad sin concesiones con el mínimo coste.</p>
-      <div class="perf-list">
-        <div class="perf-item">
-          <div class="tag outline">GPU</div>
-          <div>
-            <h4>Direct2D + DirectWrite</h4>
-            <p>Escena completa (foto, ajedrez, OSD, dock) por hardware. Interpolación lineal GPU con bloqueos al mínimo en reposo.</p>
-          </div>
-        </div>
-        <div class="perf-item">
-          <div class="tag outline">CPU</div>
-          <div>
-            <h4>GDI+ con trazado optimizado</h4>
-            <p>Respaldo automático (o forzable con <code>ARTPICST_NO_GPU=1</code>) con repintado parcial y patrón de transparencia en una llamada.</p>
-          </div>
-        </div>
-        <div class="perf-item">
-          <div class="tag outline">📂</div>
-          <div>
-            <h4>Decodificadores stb_image / WIC / GDI+</h4>
-            <p>stb para los formatos ligeros, Windows Imaging Component para WebP/HEIC/RAW y GDI+ para metarchivos. Decodificación en el hilo justo y prefetch a prioridad mínima.</p>
-          </div>
-        </div>
-      </div>
-    </div>
-  </div>
-</section>
-
-<!-- ============================ FORMATOS ============================ -->
-<section class="block" id="formatos">
-  <div class="wrap">
-    <span class="kicker">Formatos soportados</span>
-    <h2 class="sec-title">30+ formatos, sin complementos</h2>
-    <p class="sec-sub">Cada formato se enruta al motor que mejor lo decodifica, con límite de dimensiones para mantener la RAM contenida.</p>
-    <div class="fmt-grid">
-      <div class="fmt-card reveal">
-        <h3>stb_image</h3>
-        <ul><li>JPG</li><li>PNG</li><li>BMP</li><li>GIF</li><li>TGA</li><li>PSD</li><li>HDR</li><li>PIC</li><li>PNM/PPM/PGM</li></ul>
-      </div>
-      <div class="fmt-card reveal">
-        <h3>WIC (Windows)</h3>
-        <ul><li>TIFF</li><li>ICO</li><li>WebP</li><li>HEIC/HEIF</li><li>AVIF</li><li>JPEG-XR/WDP</li></ul>
-      </div>
-      <div class="fmt-card reveal">
-        <h3>WIC RAW</h3>
-        <ul><li>CR2</li><li>NEF</li><li>ARW</li><li>DNG</li><li>y otros RAW de cámaras</li></ul>
-      </div>
-      <div class="fmt-card reveal">
-        <h3>GDI+</h3>
-        <ul><li>TIFF</li><li>EMF</li><li>WMF</li><li>códecs del sistema</li></ul>
-      </div>
-    </div>
-  </div>
-</section>
-
-<!-- ============================ ATAJOS ============================ -->
-<section class="block alt" id="atajos">
-  <div class="wrap">
-    <span class="kicker">Controles y atajos</span>
-    <h2 class="sec-title">Todo a un toque de tecla</h2>
-    <p class="sec-sub">Del ratón a la papelera sin soltar el teclado. El dock inferior agrupa los accesos más usados con un clic.</p>
-    <div class="table-scroll reveal">
-      <div>
-        <table class="shortcuts">
-          <thead>
-            <tr><th>Acción</th><th>Atajo</th></tr>
-          </thead>
+        <table class="spec">
+          <caption>Comportamiento en tiempo de ejecución</caption>
           <tbody>
-            <tr><td>Siguiente imagen</td><td><kbd>→</kbd> <kbd>Espacio</kbd> <kbd>▶</kbd></td></tr>
-            <tr><td>Imagen anterior</td><td><kbd>←</kbd> <kbd>Retroceso</kbd> <kbd>◀</kbd></td></tr>
-            <tr><td>Zoom in / out</td><td><kbd>↑</kbd>/<kbd>↓</kbd> · rueda · <kbd>+</kbd>/<kbd>−</kbd></td></tr>
-            <tr><td>Primera / última imagen</td><td><kbd>Inicio</kbd> / <kbd>Fin</kbd></td></tr>
-            <tr><td>Ajustar a la ventana</td><td><kbd>F</kbd> o botón <b>Ajustar</b></td></tr>
-            <tr><td>Tamaño real 100%</td><td><kbd>1</kbd> o <kbd>0</kbd></td></tr>
-            <tr><td>Pantalla completa</td><td><kbd>F11</kbd> o doble clic · <kbd>Esc</kbd> para salir</td></tr>
-            <tr><td>Rotar 90° / antihorario</td><td><kbd>R</kbd> / <kbd>Shift</kbd>+<kbd>R</kbd></td></tr>
-            <tr><td>Volteo horizontal / vertical</td><td><kbd>H</kbd> / <kbd>V</kbd></td></tr>
-            <tr><td>Ultra-Claridad HDR</td><td><kbd>D</kbd></td></tr>
-            <tr><td>Escala de grises / invertir</td><td><kbd>G</kbd> / <kbd>N</kbd></td></tr>
-            <tr><td>Presentación</td><td><kbd>F5</kbd></td></tr>
-            <tr><td>Eliminar a la papelera</td><td><kbd>Supr</kbd></td></tr>
-            <tr><td>Mostrar en el Explorador</td><td><kbd>Ctrl</kbd>+<kbd>E</kbd></td></tr>
-            <tr><td>Copiar imagen / ruta</td><td><kbd>Ctrl</kbd>+<kbd>C</kbd> / <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd></td></tr>
-            <tr><td>Abrir archivo / carpeta</td><td><kbd>Ctrl</kbd>+<kbd>O</kbd> / <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>O</kbd></td></tr>
-            <tr><td>Panorámica</td><td>Clic izquierdo + arrastrar</td></tr>
-            <tr><td>Menú contextual / ayuda</td><td>Clic derecho / <kbd>F1</kbd></td></tr>
+            <tr><th scope="row">Escalado</th><td>Remuestreo multihilo, Catmull–Rom al ampliar y Mitchell al reducir; LOD en pasos de 1/8 de octava para reutilizar textura</td></tr>
+            <tr><th scope="row">Zoom</th><td>0,5 % a 512×, interpolación logarítmica y pivote fijado en el cursor</td></tr>
+            <tr><th scope="row">Presentación</th><td>vsync, contenidos retenidos y repintado por región sucia</td></tr>
+            <tr><th scope="row">Interacción</th><td>El arrastre y la animación reutilizan la textura ya subida; el remuestreo se hace al asentarse</td></tr>
+            <tr><th scope="row">Reserva</th><td>GDI+ con doble búfer si Direct2D no está disponible</td></tr>
           </tbody>
         </table>
       </div>
     </div>
-  </div>
-</section>
+  </section>
 
-<!-- ============================ DESCARGAR / COMPILAR ============================ -->
-<section class="block" id="descargar">
-  <div class="wrap">
-    <span class="kicker">Instalación y código</span>
-    <h2 class="sec-title">Descárgalo o compílalo tú mismo</h2>
-    <p class="sec-sub">El instalador es una unidad autocontenida: incrusta el visor, el módulo de actualización, el icono y la documentación, y despliega todo con un asistente gráfico pitch-black con consola de log en vivo. También puedes compilar desde el código con Visual Studio o MinGW.</p>
+  <section class="sec" id="decode">
+    <div class="wrap">
+      <header class="sec-head">
+        <span class="sec-num">02</span>
+        <h2>Decodificación y color</h2>
+      </header>
+      <ol class="steps">
+        <li><span class="n">01</span><strong>Contenedor</strong><span><code>WIC</code> para JPEG, PNG, TIFF, HEIF, AVIF, JXL y RAW; <code>stb_image</code> para GIF, TGA, PSD, HDR y PNM; <code>GDI+</code> para EMF y WMF.</span></li>
+        <li><span class="n">02</span><strong>Perfil de color</strong><span>Si el archivo trae un perfil ICC se transforma a sRGB una sola vez durante la decodificación. Sin perfil, se asume sRGB.</span></li>
+        <li><span class="n">03</span><strong>Orientación</strong><span>Las ocho orientaciones EXIF se resuelven con rotación y espejos, no reescribiendo el archivo.</span></li>
+        <li><span class="n">04</span><strong>Límites</strong><span>Presupuesto de decodificación independiente del de visualización: una panorámica de 12000 px se abre y se reduce después al límite de trabajo.</span></li>
+        <li><span class="n">05</span><strong>Memoria</strong><span>Búferes alineados a 64 B, caché LRU de 64 MB con búferes compartidos por referencia: abrir la misma imagen dos veces no duplica píxeles.</span></li>
+      </ol>
+      <p class="fineprint">HEIC, AVIF, JXL y los RAW necesitan el códec correspondiente instalado en Windows. Si un perfil ICC está dañado o el códec no lo expone, la imagen se abre igualmente sin transformar: el color nunca impide ver el archivo.</p>
+    </div>
+  </section>
 
-    <div class="dl-panel reveal">
-      <h3>Listo en dos minutos</h3>
-      <p>Descarga el instalador autocontenido (el mismo asset que instala el auto-actualizador) o llévate el ZIP portable a cualquier PC.</p>
-      <div class="dl-actions">
-        <a class="btn btn-primary" href="https://github.com/LiebeBlack/Pic/releases/latest/download/artpicst-installer.exe">⬇ artpicst-installer.exe</a>
-        <a class="btn btn-ghost" href="https://github.com/LiebeBlack/Pic/releases/latest/download/artpicst-portable.zip">⬇ artpicst-portable.zip</a>
+  <section class="sec" id="formats">
+    <div class="wrap">
+      <header class="sec-head">
+        <span class="sec-num">03</span>
+        <h2>Formatos</h2>
+      </header>
+      <div class="format-intro">
+        <div class="prose">
+          <p><strong>51 extensiones</strong>, una sola lista en el código. La misma tabla alimenta el visor, el diálogo de apertura, las asociaciones de archivo del instalador y las miniaturas del Explorador, así que un formato nuevo aparece en los cuatro sitios a la vez.</p>
+        </div>
+        <div class="prose">
+          <p>El escaneo de carpeta, el arrastrar y soltar y la navegación con teclado comparten el mismo filtro: nada que el visor pueda abrir queda fuera de la secuencia.</p>
+        </div>
       </div>
-      <div class="dl-checks">
-        <span><b>✓</b> Autocontenido</span>
-        <span><b>✓</b> Portable</span>
-        <span><b>✓</b> SHA-256 verificado</span>
-        <span><b>✓</b> Sin telemetría</span>
+      <ul class="formats" aria-label="Extensiones admitidas">
+        <li>.jpg</li><li>.jpeg</li><li>.jpe</li><li>.jfif</li><li>.jif</li><li>.exif</li>
+        <li>.png</li><li>.apng</li><li>.gif</li><li>.webp</li><li>.avif</li><li>.jxl</li>
+        <li>.bmp</li><li>.dib</li><li>.rle</li><li>.ico</li><li>.cur</li><li>.icon</li>
+        <li>.tif</li><li>.tiff</li><li>.jp2</li><li>.j2k</li><li>.jpx</li><li>.jxr</li>
+        <li>.wdp</li><li>.hdp</li><li>.heic</li><li>.heif</li><li>.hif</li><li>.tga</li>
+        <li>.tpic</li><li>.psd</li><li>.hdr</li><li>.pic</li><li>.pnm</li><li>.ppm</li>
+        <li>.pgm</li><li>.pbm</li><li>.dng</li><li>.cr2</li><li>.cr3</li><li>.nef</li>
+        <li>.arw</li><li>.orf</li><li>.rw2</li><li>.raf</li><li>.sr2</li><li>.kdc</li>
+        <li>.raw</li><li>.emf</li><li>.wmf</li>
+      </ul>
+      <p class="fineprint" style="padding-top:26px;">Lista canónica en <code style="font-family:var(--mono);font-size:12.5px;">include/artpicst_formats.hpp</code>. EMF y WMF se abren con el visor, pero no se anuncian como miniaturas del Explorador porque WIC no los rasteriza.</p>
+    </div>
+  </section>
+
+  <section class="sec" id="integrity">
+    <div class="wrap">
+      <header class="sec-head">
+        <span class="sec-num">04</span>
+        <h2>Integridad y despliegue</h2>
+      </header>
+      <div class="cols-2">
+        <ol class="list">
+          <li><h3>Actualizaciones verificadas</h3><p>El actualizador comprueba la versión publicada y valida el paquete con SHA-256 antes de ejecutarlo. Sin descargas silenciosas ni instalaciones forzadas.</p></li>
+          <li><h3>Asociaciones por usuario</h3><p>Los formatos se registran en HKEY_CURRENT_USER. No requiere privilegios de administrador y se puede revertir desde el propio visor con <code style="font-family:var(--mono);font-size:12.5px;">--unregister</code>.</p></li>
+        </ol>
+        <ol class="list">
+          <li><h3>Sin cuentas ni telemetría</h3><p>No hay registro, analítica ni envío de datos de uso. La única conexión saliente es la comprobación diaria de versión.</p></li>
+          <li><h3>Borrado reversible</h3><p>Eliminar una imagen la envía a la Papelera de reciclaje. El visor no borra de forma permanente.</p></li>
+        </ol>
       </div>
     </div>
+  </section>
 
-    <div class="card reveal" style="margin-bottom:24px; background:linear-gradient(135deg, color-mix(in srgb, var(--acc-a) 8%, var(--panel)), color-mix(in srgb, var(--acc-b) 8%, var(--panel))); border-color:var(--border2);">
-      <p style="font-size:14.5px;"><b class="grad-text">Novedades de la versión:</b> instalador rediseñado con barra lateral de pasos, nueva página de <b>carpeta de destino</b> (selector nativo, espacio libre real en disco y detección de instalaciones previas) y estadísticas reales al completar la instalación.</p>
-    </div>
-
-    <div class="grid" style="margin-bottom:44px;">
-      <div class="card reveal">
-        <div class="ico">📦</div>
-        <h3>Instalador autocontenido (recomendado)</h3>
-        <p>Asistente premium <b>rediseñado</b>: barra lateral con los 5 pasos del asistente, página de <b>carpeta de destino</b> con selector nativo, espacio libre real en disco y detección de instalaciones previas, instalación tradicional en <span class="inline-code">%ProgramFiles%\ARTPICST</span> (con UAC y degradación a instalación por usuario), accesos en escritorio y menú Inicio, asociación opcional de formatos sin secuestrar tu visor predeterminado, rollback automático, estadísticas reales al terminar y desinstalador gráfico integrado.</p>
-        <p style="margin-top:14px;"><a class="btn btn-primary btn-sm" href="https://github.com/LiebeBlack/Pic/releases/latest/download/artpicst-installer.exe">⬇ artpicst-installer.exe</a></p>
-        <p style="font-size:12.5px; color:var(--text-dim); margin-top:10px;">Enlace directo a la última versión publicada en GitHub Releases. Es el mismo asset que descarga e instala el auto-actualizador.</p>
-      </div>
-      <div class="card reveal">
-        <div class="ico">🧳</div>
-        <h3>Portable</h3>
-        <p>ZIP sin instalación con el visor, el módulo de actualización, el icono y la documentación: cópialo a un USB y llévalo contigo.</p>
-        <p style="margin-top:14px;"><a class="btn btn-ghost btn-sm" href="https://github.com/LiebeBlack/Pic/releases/latest/download/artpicst-portable.zip">⬇ artpicst-portable.zip</a></p>
-        <p style="font-size:12.5px; color:var(--text-dim); margin-top:10px;">Generado automáticamente por la CI en cada release.</p>
-      </div>
-    </div>
-
-    <div class="two-col" id="compilar">
+  <section class="cta" id="download">
+    <div class="wrap cta-grid">
       <div>
-        <span class="kicker">Compilar desde el código</span>
-        <h2 class="sec-title" style="font-size:clamp(22px,2.8vw,28px);">Requisitos</h2>
-        <div class="steps">
-          <div class="step">
-            <div><h4>Windows 10 / 11</h4>
-            <p>Sistema operativo de destino. La app detecta el tema claro/oscuro y escala por DPI del monitor.</p></div>
-          </div>
-          <div class="step">
-            <div><h4>Visual Studio 2019/2022+ con escritorio en C++ (o MinGW-w64)</h4>
-            <p>Los scripts detectan el toolchain automáticamente. Se ofrece un CMakeLists.txt para otros flujos, y Python 3 para el paso de payload.</p></div>
-          </div>
-          <div class="step">
-            <div><h4>Git</h4>
-            <p>Para clonar el repositorio: <span class="inline-code">git clone https://github.com/LiebeBlack/Pic</span></p></div>
-          </div>
+        <p class="eyebrow eyebrow-invert"><b>●</b>&nbsp; Descarga · versión 1.2.1</p>
+        <h2>Instalar en Windows</h2>
+        <p class="lede">Instalador autocontenido con asociaciones, miniaturas del Explorador y actualizador. También disponible en versión portable, sin instalación.</p>
+        <div class="actions">
+          <a class="btn btn-paper" href="https://github.com/LiebeBlack/Pic/releases/latest/download/artpicst-installer.exe">Instalador .exe <span aria-hidden="true">↓</span></a>
+          <a class="btn btn-line" href="https://github.com/LiebeBlack/Pic/releases/latest/download/artpicst-portable.zip">Portable .zip</a>
         </div>
+        <p class="meta">Windows 10 1809 o posterior · x64 · paquete verificado con SHA-256</p>
       </div>
+      <aside class="req" aria-label="Requisitos del sistema">
+        <p class="panel-title">Requisitos</p>
+        <dl>
+          <div class="row"><dt>Sistema</dt><dd>Windows 10 / 11</dd></div>
+          <div class="row"><dt>Arquitectura</dt><dd>x64</dd></div>
+          <div class="row"><dt>GPU</dt><dd>Direct2D o WARP</dd></div>
+          <div class="row"><dt>Permisos</dt><dd>Usuario</dd></div>
+          <div class="row"><dt>Red</dt><dd>Solo actualizaciones</dd></div>
+        </dl>
+      </aside>
+    </div>
+  </section>
+
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <div class="foot-grid">
       <div>
-        <span class="kicker">Build en tres sabores</span>
-        <h2 class="sec-title" style="font-size:clamp(22px,2.8vw,28px);">Compilación de un toque</h2>
-        <p style="margin-bottom:16px; color:var(--text-soft); font-size:14.5px;">Cualquiera de estos comandos produce los 3 binarios en <span class="inline-code">dist\</span>: visor, updater e instalador autocontenido.</p>
-
-        <div class="codebox">
-          <div class="codehead"><span class="lang">PowerShell · recomendada</span><button class="copy-btn" type="button">Copiar</button></div>
-          <pre><span class="c"># Compila visor + updater + instalador</span>
-powershell -ExecutionPolicy Bypass -File build.ps1</pre>
-        </div>
-        <div class="codebox">
-          <div class="codehead"><span class="lang">Batch</span><button class="copy-btn" type="button">Copiar</button></div>
-          <pre>build.bat</pre>
-        </div>
-        <div class="codebox">
-          <div class="codehead"><span class="lang">MinGW-w64</span><button class="copy-btn" type="button">Copiar</button></div>
-          <pre>build_mingw.bat</pre>
-        </div>
-        <p style="margin-top:14px; color:var(--text-dim); font-size:13px;">Orden interno: recursos → visor → updater (con selftest como control de calidad) → payload autocontenido (Python) → instalador. El asset oficial de release es <span class="inline-code">artpicst-installer.exe</span>; la CI (GitHub Actions) lo publica junto al ZIP portable en cada push.</p>
+        <div class="foot-brand"><span class="brand-mark" aria-hidden="true" style="background:#EDEAE2;"></span>ARTPICST</div>
+        <p>Visor de imágenes nativo para Windows. Desarrollo independiente, sin dependencias de terceros en tiempo de ejecución.</p>
+      </div>
+      <div class="foot-col">
+        <h3>Documentación</h3>
+        <ul>
+          <li><a href="INSTALL.md">Instalación</a></li>
+          <li><a href="PERFORMANCE.md">Rendimiento</a></li>
+          <li><a href="UPDATER.md">Actualizador</a></li>
+        </ul>
+      </div>
+      <div class="foot-col">
+        <h3>Proyecto</h3>
+        <ul>
+          <li><a href="https://github.com/LiebeBlack/Pic">Repositorio</a></li>
+          <li><a href="https://github.com/LiebeBlack/Pic/releases">Versiones</a></li>
+        </ul>
+      </div>
+      <div class="foot-col">
+        <h3>Soporte</h3>
+        <ul>
+          <li><a href="https://github.com/LiebeBlack/Pic/issues">Incidencias</a></li>
+          <li><a href="https://github.com/LiebeBlack/Pic/blob/main/CHANGELOG.md">Registro de cambios</a></li>
+        </ul>
       </div>
     </div>
-  </div>
-</section>
-
-<!-- ============================ CLI ============================ -->
-<section class="block alt" id="cli">
-  <div class="wrap">
-    <span class="kicker">Línea de comandos</span>
-    <h2 class="sec-title">Integra ARTPICST en tu flujo</h2>
-    <div class="two-col" style="align-items:start; margin-bottom:34px;">
-      <div class="codebox">
-        <div class="codehead"><span class="lang">Visor</span><button class="copy-btn" type="button">Copiar</button></div>
-        <pre><span class="c"># Abre el visor, una carpeta o una imagen concreta</span>
-artpicst.exe
-artpicst.exe "C:\Fotos"
-artpicst.exe "C:\Fotos\imagen.jpg"
-
-<span class="c"># Modos de ventana</span>
-artpicst.exe --maximized "C:\Fotos"
-artpicst.exe --fullscreen "C:\Fotos"</pre>
-      </div>
-      <div class="codebox">
-        <div class="codehead"><span class="lang">Instalador desatendido</span><button class="copy-btn" type="button">Copiar</button></div>
-        <pre><span class="c"># Instalación y desinstalación silenciosas</span>
-<span class="c"># (sin ventanas, exit codes estables)</span>
-artpicst_installer.exe --silent
-artpicst_installer.exe --uninstall --silent
-
-<span class="c"># Exit codes: 0 correcto · 1 fallo (rollback)</span>
-<span class="c"># 2 payload incompleto · 3 archivos en uso</span>
-
-<span class="c"># Actualización en cadena con payload externo</span>
-artpicst_installer.exe --update "nuevo_payload.exe" --dir "C:\Program Files\ARTPICST"</pre>
-      </div>
+    <div class="foot-base">
+      <span>© 2026 LiebeBlack · ARTPICST 1.2.1</span>
+      <span>Windows es una marca registrada de Microsoft Corporation.</span>
     </div>
-
-    <div class="codebox" style="max-width:640px;">
-      <div class="codehead"><span class="lang">Registro de formatos</span><button class="copy-btn" type="button">Copiar</button></div>
-      <pre><span class="c"># Asociar o desasociar formatos (opcional, sin secuestrar tu visor)</span>
-artpicst.exe --register
-artpicst.exe --unregister</pre>
-    </div>
-  </div>
-</section>
-
-<!-- ============================ ACTUALIZACIONES ============================ -->
-<section class="block" id="actualizar">
-  <div class="wrap">
-    <span class="kicker">Módulo Inteligente de Actualización</span>
-    <h2 class="sec-title">Siempre en la última versión, sin pensar en ello</h2>
-    <p class="sec-sub">Un componente independiente consulta GitHub Releases, compara versiones de forma inteligente y actualiza ARTPICST con verificación criptográfica — sin bloquear jamás la interfaz.</p>
-    <div class="grid">
-      <div class="card reveal">
-        <div class="ico">🌙</div>
-        <h3>Chequeo diario silencioso</h3>
-        <p>Entre 20 y 30 segundos después de abrir el visor, un hilo de baja prioridad consulta <span class="inline-code">releases/latest</span> como máximo una vez al día. Sin conexión o con rate-limit: silencio total.</p>
-      </div>
-      <div class="card reveal">
-        <div class="ico">🔔</div>
-        <h3>Notificación flotante minimalista</h3>
-        <p>Ventana compacta sin barra de título con <b>Instalar actualización ahora</b> / <b>Recordar más tarde</b> y opción de instalar futuras versiones automáticamente en segundo plano.</p>
-      </div>
-      <div class="card reveal">
-        <div class="ico">🔒</div>
-        <h3>Descarga verificada SHA-256</h3>
-        <p>Progreso real en MB y velocidad media. Si el release publica digest, se verifica la integridad del instalador antes de ejecutarlo; si falla, se descarta y se reintenta al día siguiente.</p>
-      </div>
-      <div class="card reveal">
-        <div class="ico">♻️</div>
-        <h3>Actualización encadenada</h3>
-        <p>El instalador recibe el payload con <span class="inline-code">--update</span>, aparta los binarios antiguos como <span class="inline-code">.old</span> (reversibles), despliega la nueva versión y relanza ARTPICST automáticamente.</p>
-      </div>
-    </div>
-    <div class="two-col" style="margin-top:36px;">
-      <div>
-        <span class="kicker">Control total</span>
-        <h3 style="font-size:20px; margin-bottom:10px;">Todo desde la línea de comandos</h3>
-        <p style="color:var(--text-soft); font-size:14.5px;">El módulo funciona también de forma autónoma, ideal para scripts y despliegues administrados: chequeos interactivos o silenciosos y un autotest integrado del parser JSON, SHA-256 y el comparador de versiones.</p>
-      </div>
-      <div class="codebox">
-        <div class="codehead"><span class="lang">Updater autónomo</span><button class="copy-btn" type="button">Copiar</button></div>
-        <pre><span class="c"># Buscar actualizaciones (interactivo)</span>
-artpicst_updater.exe --check
-artpicst_updater.exe --forced
-
-<span class="c"># Chequeo silencioso diario (lo llama el visor)</span>
-artpicst_updater.exe --background
-
-<span class="c"># Autotest del parser JSON, SHA-256 y versiones</span>
-artpicst_updater.exe --selftest</pre>
-      </div>
-    </div>
-  </div>
-</section>
-
-<!-- ============================ ARQUITECTURA ============================ -->
-<section class="block alt" id="arquitectura">
-  <div class="wrap">
-    <span class="kicker">Arquitectura</span>
-    <h2 class="sec-title">C++ nativo, sin dependencias pesadas</h2>
-    <div class="grid">
-      <div class="card reveal">
-        <div class="ico">⚙️</div>
-        <h3>Programa principal</h3>
-        <p>C++ con API Win32, GDI+, WIC, stb_image y Direct2D/DirectWrite. Todo el renderizado, la caché LRU, el prefetch y la animación de zoom viven en un único binario compacto.</p>
-      </div>
-      <div class="card reveal">
-        <div class="ico">🛠️</div>
-        <h3>Instalador</h3>
-        <p>C++ con GDI+: asistente gráfico "pitch-black" con barra lateral de pasos, página de destino con selector de carpeta y espacio en disco, consola de log en vivo, detección de DPI y estadísticas reales de la instalación. El visor, el updater, el icono y la documentación viajan incrustados como recursos.</p>
-      </div>
-      <div class="card reveal">
-        <div class="ico">🤖</div>
-        <h3>Integración continua</h3>
-        <p>GitHub Actions compila visor e instalador en cada push, empaqueta el ZIP portable y publica los artefactos en el release.</p>
-      </div>
-    </div>
-  </div>
-</section>
-
-<!-- ============================ FAQ / SOPORTE ============================ -->
-<section class="block" id="faq">
-  <div class="wrap">
-    <span class="kicker">Preguntas frecuentes</span>
-    <h2 class="sec-title">Soporte y dudas habituales</h2>
-    <p class="sec-sub">¿Algo no funciona? Abre un issue en GitHub con el error y el paso a paso; la respuesta suele llegar en horas.</p>
-    <div class="faq-list" style="max-width:860px;">
-      <details class="faq-item reveal">
-        <summary>¿Es realmente gratis?</summary>
-        <p>Sí. ARTPICST es gratuito y de código abierto: úsalo, cópialo y modifícalo libremente para fines personales. No está permitida su venta ni su redistribución comercial sin autorización previa.</p>
-      </details>
-      <details class="faq-item reveal">
-        <summary>¿Necesito internet para instalarlo?</summary>
-        <p>No. El instalador es 100% autocontenido: el visor, el módulo de actualización, el icono y la documentación viajan incrustados dentro del propio ejecutable. Solo se necesita conexión para el chequeo opcional de actualizaciones.</p>
-      </details>
-      <details class="faq-item reveal">
-        <summary>¿Necesito permisos de administrador para instalarlo?</summary>
-        <p>Por defecto sí: el asistente eleva con UAC e instala para <b>todos los usuarios</b> en <span class="inline-code">%ProgramFiles%\ARTPICST</span> (instalación tradicional, con entrada en "Aplicaciones instaladas" y desinstalador registrado). Si se rechaza la elevación o no hay permisos, degrada automáticamente a instalación por usuario en <span class="inline-code">%LOCALAPPDATA%\Programs\ARTPICST</span>, sin tocar HKLM.</p>
-      </details>
-      <details class="faq-item reveal">
-        <summary>¿Se actualiza solo? ¿Puedo desactivarlo?</summary>
-        <p>El visor comprueba GitHub Releases como máximo una vez al día, entre 20 y 30 segundos después de arrancar, y solo te avisa si hay versión nueva: tú decides si instalar. Puedes posponer con <b>Recordar más tarde</b> (1 h) o activar la instalación automática en segundo plano desde la propia notificación. Sin conexión, con rate-limit o si GitHub falla, permanece en silencio.</p>
-      </details>
-      <details class="faq-item reveal">
-        <summary>Mi equipo no tiene GPU. ¿Funcionará igual?</summary>
-        <p>Sí. Si Direct2D no está disponible, el visor usa automáticamente el trazador GDI+ optimizado (repintado parcial, patrones en una sola llamada). También puedes forzarlo con la variable de entorno <span class="inline-code">ARTPICST_NO_GPU=1</span>.</p>
-      </details>
-      <details class="faq-item reveal">
-        <summary>¿Puedo abrir fotos RAW de mi cámara?</summary>
-        <p>Sí: CR2, NEF, ARW, DNG y otros RAW se decodifican a través de Windows Imaging Component. El soporte depende de los códecs WIC instalados en tu Windows (los de tu marca de cámara si el RAW no está cubierto por defecto).</p>
-      </details>
-      <details class="faq-item reveal">
-        <summary>¿Cómo desinstalo ARTPICST?</summary>
-        <p>Abre <b>Menú Inicio → ARTPICST → Desinstalar ARTPICST</b>, usa <b>Configuración → Aplicaciones instaladas</b>, o ejecuta <span class="inline-code">artpicst_installer.exe --uninstall</span>. El desinstalador gráfico elimina archivos, accesos directos y asociaciones, y ofrece conservar tu configuración e historial si lo prefieres.</p>
-      </details>
-      <details class="faq-item reveal">
-        <summary>¿Se guarda mi configuración en la nube?</summary>
-        <p>No. ARTPICST no tiene telemetría, no crea cuentas ni envía datos a ningún servidor: al abrirlo solo lee la carpeta que le indiques y sigue el tema claro/oscuro de Windows.</p>
-      </details>
-    </div>
-  </div>
-</section>
-
-<footer>
-  <div class="wrap foot-flex">
-    <div><strong>ARTPICST</strong> v1.2.1 · Visor de imágenes premium para Windows</div>
-    <div>Hecho con C++ nativo · <a href="https://github.com/LiebeBlack/Pic">GitHub</a> · <a href="https://github.com/LiebeBlack/Pic/issues">Soporte</a></div>
   </div>
 </footer>
 
-<button id="topBtn" type="button" aria-label="Volver arriba" title="Volver arriba">↑</button>
-
-<script>
-  /* ===== Tema: detecta el sistema, permite alternar (como la propia app) ===== */
-  (function(){
-    var saved = null;
-    try { saved = localStorage.getItem('artpicst-theme'); } catch(e){}
-    var root = document.documentElement;
-    function apply(theme){
-      root.setAttribute('data-theme', theme);
-      document.getElementById('themeBtn').textContent = theme === 'dark' ? '🌙' : '☀️';
-    }
-    if (!saved){
-      var auto = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
-      saved = auto ? 'dark' : 'light';
-    }
-    apply(saved);
-    document.getElementById('themeBtn').addEventListener('click', function(){
-      var next = root.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
-      try { localStorage.setItem('artpicst-theme', next); } catch(e){}
-      apply(next);
-    });
-  })();
-
-  /* ===== Revelado suave al hacer scroll (también anima las barras) ===== */
-  var io = new IntersectionObserver(function(entries){
-    entries.forEach(function(en){
-      if (en.isIntersecting){ en.target.classList.add('on'); io.unobserve(en.target); }
-    });
-  }, {threshold: .12});
-  document.querySelectorAll('.reveal').forEach(function(el){ io.observe(el); });
-
-  /* ===== Navegación: resalta la sección visible (scrollspy) ===== */
-  var spy = new IntersectionObserver(function(entries){
-    entries.forEach(function(en){
-      if (en.isIntersecting){
-        var id = en.target.id;
-        document.querySelectorAll('.nav-links a').forEach(function(a){
-          a.classList.toggle('active', a.getAttribute('href') === '#' + id);
-        });
-      }
-    });
-  }, {rootMargin:'-35% 0px -60% 0px'});
-  ['caracteristicas','rendimiento','formatos','atajos','descargar','actualizar','faq'].forEach(function(id){
-    var el = document.getElementById(id);
-    if (el) spy.observe(el);
-  });
-
-  /* ===== Botones "Copiar" en los bloques de código ===== */
-  document.querySelectorAll('.copy-btn').forEach(function(btn){
-    btn.addEventListener('click', function(){
-      var box = btn.closest('.codebox');
-      var pre = box ? box.querySelector('pre') : null;
-      if (!pre) return;
-      var code = pre.textContent.replace(/^\n/, '');
-      var done = function(ok){
-        btn.textContent = ok ? '¡Copiado!' : 'Error';
-        setTimeout(function(){ btn.textContent = 'Copiar'; }, 1600);
-      };
-      if (navigator.clipboard && navigator.clipboard.writeText){
-        navigator.clipboard.writeText(code).then(function(){ done(true); }, function(){ done(false); });
-      } else {
-        var ta = document.createElement('textarea');
-        ta.value = code; document.body.appendChild(ta); ta.select();
-        var ok = false;
-        try { ok = document.execCommand('copy'); } catch(e){}
-        document.body.removeChild(ta);
-        done(ok);
-      }
-    });
-  });
-
-  /* ===== Botón "volver arriba" ===== */
-  (function(){
-    var btn = document.getElementById('topBtn');
-    var onScroll = function(){ btn.classList.toggle('show', window.scrollY > 600); };
-    window.addEventListener('scroll', onScroll, {passive:true});
-    onScroll();
-    btn.addEventListener('click', function(){ window.scrollTo({top:0, behavior:'smooth'}); });
-  })();
-</script>
 </body>
 </html>

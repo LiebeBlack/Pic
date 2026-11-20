@@ -62,7 +62,7 @@ SHELL_FLAGS    := -std=c++23 -O2 $(SIMD) $(SIMDDEF) $(WARN) -shared $(LINKSTATIC
 TEST_FLAGS     := -std=c++20 -O2 $(SIMD) $(SIMDDEF) $(WARN) -I. -Iinclude
 
 VIEWER_LIBS  := -lgdiplus -luser32 -lkernel32 -lshell32 -lshlwapi -lgdi32 -lmsimg32 \
-                -lole32 -loleaut32 -luuid -ldwmapi -lwindowscodecs -lcomdlg32 -ld2d1 -ldwrite
+                -lole32 -loleaut32 -luuid -ldwmapi -lwindowscodecs -lcomdlg32 -ld2d1 -ldwrite -lwinmm -ldxgi
 UPDATER_LIBS := -lwinhttp -lgdiplus -lshell32 -lshlwapi -luser32 -ladvapi32 -lgdi32 \
                 -lole32 -luuid -ldwmapi
 INSTALLER_LIBS := -lgdiplus -lshlwapi -lshell32 -lcomctl32 -ldwmapi -luser32 -ladvapi32 \

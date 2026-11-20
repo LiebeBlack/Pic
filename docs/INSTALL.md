@@ -27,8 +27,10 @@ ningún runtime externo: es un único archivo distribuible.
 3. Verificación del directorio de destino.
 4. Extracción del payload.
 5. Escritura del visor y del updater.
-6. Asociaciones de archivo (`OpenWithProgids`, **sin secuestrar** el programa
-   predeterminado del usuario).
+6. Asociaciones de archivo de **los 51 formatos soportados** (`OpenWithProgids`
+   y `SupportedTypes`, **sin secuestrar** el programa predeterminado del
+   usuario). La lista sale de `include/artpicst_formats.hpp`, la misma que usan
+   el visor y la extensión de shell.
 7. Accesos directos.
 8. Registro del desinstalador (`Uninstall\ARTPICST`, `App Paths`, ProgID,
    `RegisteredApplications`).
@@ -195,9 +197,12 @@ calcula recorriendo los archivos realmente instalados.
 ## 8. Actualización
 
 El auto-actualizador descarga `artpicst-installer.exe` desde GitHub Releases,
-verifica su **SHA-256** (fail-closed: si el hash no puede calcularse, se descarta)
-y lo ejecuta con `--update <payload> --dir <carpeta>`. El instalador sustituye los
-archivos, cierra el visor si sigue abierto y lo reinicia.
+comprueba el **tamaño** anunciado por la API, verifica su **SHA-256** cuando el
+release publica `digest` (fail-closed: si el hash no puede calcularse, se
+descarta) y lo ejecuta con `--update <payload> --dir <carpeta>`. El instalador
+verifica a su vez el SHA-256 de cada archivo de su payload incrustado antes de
+extraerlo, sustituye los archivos, cierra el visor si sigue abierto y lo
+reinicia.
 
 Renombra siempre `dist\artpicst_installer.exe` a **`artpicst-installer.exe`** al
 publicar: ese es el nombre de asset exacto que busca el auto-actualizador.

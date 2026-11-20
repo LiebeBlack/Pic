@@ -2,6 +2,232 @@
 
 ## [Sin publicar]
 
+### Cierre: robustez del fallback y consistencia
+- **El log se escribe en UTF-8 real.** Se usaba `wofstream`, que convierte
+`wchar_t` con la faceta "C": los acentos de los mensajes en español se perdían
+(o el flujo fallaba en MinGW/libstdc++) y la línea acababa solo en el depurador.
+Ahora se compone la línea y se escribe con `ofstream` binario + `WideToUtf8`,
+con CRLF.
+- **Tras un fallo de GPU se repinta TODA la ventana con GDI+.** Antes solo se
+rehacía la región sucia, así que un frame abortado a medias podía dejar media
+ventana con contenido viejo o incompleto hasta el siguiente repintado ajeno.
+- **Un fallo de subida de textura ya no destruye el render target.** El fallo es
+del contenido (VRAM/staging), no del contexto: se descarta solo el bitmap de la
+imagen y se conservan target/pinceles, evitando el parpadeo de recrear todo el
+contexto cada 1,5 s.
+- **Portapapeles: las imágenes grandes ya se copian.** Usaba el límite de
+visualización por lado (5000 px), así que una panorámica que ya se puede abrir
+fallaba al copiar en silencio; ahora valida solo desbordamiento.
+- **Fallos de DirectWrite o de pinceles del tema** se degradan a GDI+ una vez en
+lugar de reintentarse en cada frame.
+
+### Eficiencia final: menos trabajo repetido, menos hilos
+- **LOD de textura cuantizado a 1/8 de octava.** La identidad del bitmap se
+comparaba por float exacto, así que cada muesca de rueda (cada asentamiento del
+zoom) reconstruía la textura entera en CPU y la volvía a subir aunque el tamaño
+hubiera cambiado un 2 %. Ahora el LOD se ajusta en escalones del ~9 %: la textura
+se reutiliza entre muescas y la diferencia (±4,5 %) la absorbe el bilineal de la
+GPU, invisible en pantalla.
+- **Hilos de remuestreo proporcionales al trabajo.** Se pedían hasta 8 hilos
+siempre; ampliar una miniatura gastaba más en crear hilos que en remuestrear.
+Ahora se pide uno por cada 400 000 píxeles de salida (máx. núcleos/8, mín. 1), y
+con 1 no se crea ninguno.
+- **Textos de la interfaz al día**: la guía y el diálogo «Acerca de» anunciaban
+«más de 30 formatos» cuando la lista única tiene 51.
+
+### Decodificación y GPU: auditoría completa
+- **El ICC no se aplicaba a JPEG/PNG (corregido).** `stb_image` se intentaba
+primero y no lee perfiles de color, así que la conversión a sRGB del bloque ICC
+solo ocurría en los formatos que stb no entiende (HEIC/AVIF/TIFF/RAW): casi
+nunca en un JPEG o PNG de móvil, que es justo donde el perfil importa. Ahora WIC
+va primero en los formatos con gestión de color y stb sigue siendo el primero
+para GIF animado, TGA, PSD, HDR, PNM e ICO.
+- **Las panorámicas de más de 5000 px ya se abren.** El presupuesto de 100 MB se
+aplicaba por LADO *durante* la decodificación, así que los tres decodificadores
+rechazaban una 12000x3000 y `DownscaleImageIfTooLarge` era código muerto. Hay un
+presupuesto de decodificación aparte (256 MB de pico, techo de 16384 px por lado)
+y después se reduce con el remuestreo multihilo al límite de carga.
+- **Fuera un pase completo de WIC por imagen.** El `IWICBitmapFlipRotator` con
+transformación identidad recorría el fotograma entero para devolverlo igual; la
+orientación EXIF la aplica el visor.
+- **Pre-chequeo de dimensiones en stb (`stbi_info`)** antes de reservar
+`ancho*alto*4`, para no intentar gigabytes con una imagen "bomba".
+- **GDI+**: copia contigua cuando el stride de origen coincide (una sola copia en
+lugar de una por fila).
+- **Detección de gráficas por DXGI (nueva).** Se enumeran los adaptadores, se
+elige el de más VRAM dedicada, se distingue **integrada** (< 512 MB dedicados)
+de **dedicada** y se registra en el log; la guía (F1) muestra GPU, VRAM y el modo
+de aceleración activo.
+- **El render target se elige según el hardware.** HARDWARE solo si DXGI enumera
+un adaptador real; si falla se reintenta una vez con DEFAULT (WARP). Antes se
+forzaba HARDWARE y en escritorio remoto, máquinas virtuales o drivers rotos el
+visor se quedaba en GDI+ para siempre.
+- **Un fallo de GPU ya no se reintenta en cada frame.** `CreateHwndRenderTarget`,
+`EndDraw` y `GpuUpdateImage` marcan el fallo y arman el reintento de 1,5 s; antes
+cada `WM_PAINT` repetía la creación del target o el remuestreo completo.
+- **Presupuesto de textura por tipo de GPU**: 8 MP en integrada (comparte RAM y
+tiene menos ancho de banda de relleno), 12 MP en dedicada.
+
+### Latencia: menos trabajo por frame y temporizadores correctos
+- **La animación de zoom corre a 120 Hz de verdad.** Con la resolución de
+temporizador por omisión de Windows (~15,6 ms), un `SetTimer` de 8 ms dispara a
+~64 Hz: la animación pedía el doble de frames de los que recibía y se veía a
+escalones. Se eleva a 1 ms solo mientras dura la animación (`timeBeginPeriod`)
+y se restaura al terminar o cancelarla; `winmm` añadido a los cinco pipelines.
+- **Fuera una llamada al kernel por frame.** `GpuRenderFrame` llamaba a
+`KillTimer(TIMER_GPU_RETRY)` en cada frame pintado aunque no hubiera ningún
+reintento armado. Ahora solo se llama si el temporizador está realmente armado
+(`retryTimerArmed`), y las rutas que lo cancelan limpian el flag.
+- **Ruta de entrada más barata.** En `WM_MOUSEMOVE` el temporizador del dock se
+reprograma con un único `SetTimer` (antes `KillTimer` + `SetTimer` por evento,
+hasta 1000/s en ratones modernos) y no se hace hit-test del HUD mientras se
+arrastra la foto, porque el dock está oculto.
+- **El dock vuelve a ocultarse.** Al expirar su temporizador con el puntero
+quieto en la franja inferior no se re-armaba: si el usuario dejaba de mover el
+ratón, el dock quedaba dibujado hasta un repintado ajeno. Ahora se reprograma
+la comprobación.
+- **OSD y dock no se redibujan si la región sucia no los toca.** En arrastre o
+zoom la franja sucia es la foto; Direct2D recortaba el dibujo, pero se seguían
+preparando píldoras y glifos en cada frame.
+
+### Calidad HQ 4K: escalado multihilo y color gestionado
+- **Remuestreo de alta calidad repartido entre núcleos.** El escalado que
+  alimenta la textura GPU (y la reducción de imágenes que exceden el límite de
+  carga) usa ahora `stbir_build_samplers_with_splits` +
+  `stbir_resize_extended_split`: los coeficientes se calculan una vez y cada
+  hilo escribe una banda disjunta de la salida. Catmull-Rom al ampliar y
+  Mitchell al reducir, en espacio lineal sRGB: detalle sin halos inventados.
+- **Textura al tamaño exacto de pantalla también al AMPLIAR.** Antes solo se
+  remuestreaba al reducir; una foto de 2 MP mostrada en una ventana 4K pasaba
+  por el bilineal de Direct2D y se veía blanda. Ahora, en reposo y dentro del
+  presupuesto de píxeles, se reconstruye al tamaño de pantalla y se dibuja a
+  ~1:1. Cerca de 1:1 (0,98–1,25) no se toca: la textura nativa ya es óptima.
+- **Perfiles ICC convertidos a sRGB al decodificar.** Las fotos en Display P3
+  o Adobe RGB se mostraban sobresaturadas; WIC aplica ahora el perfil del
+  archivo y entrega sRGB. Si el perfil es ilegible o el códec no lo soporta, se
+  continúa sin transformar: el color nunca impide abrir la imagen.
+- **El búfer de subida ya no aplica el límite de decodificación.** Con el
+  límite de carga (5000 px por defecto), una textura ampliada a 4K/8K fallaba en
+  `GpuBakePixels` y se perdía el fotograma; ahora solo se comprueba desborde.
+
+### Renderizado GPU: repintados correctos y sin tirones
+- **El repintado incremental era incorrecto por contrato.** El target de
+  Direct2D se creaba con `D2D1_PRESENT_OPTIONS_NONE`, que *descarta el
+  fotograma al presentar*; sin embargo WM_PAINT solo redibujaba la región
+  sucia y contaba con que el resto siguiera en el back-buffer. Ahora se crea
+  con `D2D1_PRESENT_OPTIONS_RETAIN_CONTENTS`, de modo que mover el ratón por el
+  dock, mostrar el OSD o cambiar de estado no deja bandas con contenido viejo.
+- **Un `Resize` o un target nuevo tampoco conservan el contenido** (también
+  documentado). Se marca el frame como completo (`needsFullRedraw`) para que el
+  primer repintado tras crear o redimensionar cubra todo el cliente, y no solo
+  la región sucia.
+- **Se eliminó una subida de textura de hasta 64 MB al iniciar cada gesto.**
+  Durante el arrastre o la animación de zoom se forzaba escala 1.0 (resolución
+  completa), lo que re-subía la foto entera en el hilo de UI al empezar el pan
+  y volvía a remuestrear al soltar. Ahora se conserva el LOD ya subido: mismo
+  aspecto durante el gesto y fotograma nítido al terminar, sin picos de CPU ni
+  de ancho de banda.
+- **Se respeta el límite de textura del adaptador**
+  (`ID2D1RenderTarget::GetMaximumBitmapSize`, 16384 px en una RX 580, 8192 en
+  otras GPU). Antes, una imagen mayor hacía fallar `CreateBitmap` en cada
+  frame: el visor caía a GDI+ —mucho más lento— y reintentaba el remuestreo en
+  cada repintado. Ahora se reduce una vez al límite y se queda en GPU.
+- **Geometría 1:1 con el píxel físico en cualquier escala de Windows.** El
+  target se creaba con el DPI real del monitor mientras toda la geometría está
+  en píxeles de cliente. Direct2D escala cada unidad por `dpi/96`, así que al
+  125 % la foto se dibujaba un 25 % más grande (recortada por la ventana) y el
+  dock quedaba desplazado respecto de su zona clicable. Ahora el target usa
+  96 ppp (1 unidad = 1 píxel): GPU y GDI+ pintan exactamente igual y el zoom
+  100 % es 1:1 real.
+- **Bordes suavizados en la ruta GPU.** Se fija
+  `D2D1_ANTIALIAS_MODE_PER_PRIMITIVE` para que las esquinas redondeadas del
+  dock y del HUD tengan el mismo suavizado que la ruta GDI+.
+- Higiene: `lastUploadScale` se reinicia al liberar los recursos del target,
+  para que ninguna decisión de LOD use un valor de un target anterior.
+
+### Asociaciones de archivo completas y sin efectos colaterales
+- **Una sola lista de formatos** (`include/artpicst_formats.hpp`, 51
+extensiones): la recorren el instalador (asociaciones y «Abrir con»), el visor
+(escaneo de carpetas, filtro del diálogo «Abrir» y `--register`) y la extensión
+de shell (miniaturas y vista previa). Antes había tres listas que ya habían
+divergido: 51, 49 y 13 formatos.
+- **`--register` solo asociaba 13 formatos** y, además, escribía el ProgID como
+**valor predeterminado** de cada extensión: secuestraba el visor del usuario
+(el instalador nunca lo hacía). Ahora registra los 51 formatos en
+`OpenWithProgids`, `Applications\artpicst.exe\SupportedTypes` y
+`Capabilities\FileAssociations`, con `RegisteredApplications` y `App Paths`,
+sin tocar el valor predeterminado, y notifica al Explorador con
+`SHChangeNotify`.
+- **`--unregister` borraba claves `.ext` completas** (`RegDeleteTree(".png")`):
+destruía la lista de «Abrir con» de todos los programas y la asociación
+predeterminada del usuario. Ahora elimina solo los valores propios y, en
+instalaciones antiguas, el valor predeterminado únicamente si sigue apuntando
+a `ARTPICST.Image`.
+- **El filtro del diálogo «Abrir» cubría 23 formatos** (faltaban APNG, DIB, RLE,
+PNM/PPM/PGM/PBM, JP2/J2K/JPX, CR3, ORF, RW2, RAF, SR2, KDC, EXIF…): ahora se
+genera de la lista única y ofrece los 51.
+- **El instalador añade `SupportedTypes`**, de modo que ARTPICST aparece en
+«Abrir con» incluso en extensiones que aún no tienen ningún ProgID.
+
+### Integridad real del payload (SHA-256)
+- **El instalador verifica el payload que incrusta.** `installer/payload_manifest.hpp`
+  se generaba en cada build, pero el instalador nunca lo incluía: definía su
+  propia tabla sin hashes y se limitaba a comprobar que los recursos existían.
+  La «verificación de integridad» del wizard no verificaba nada. Ahora incluye el
+  manifest generado y compara el SHA-256 de los bytes de cada recurso `RCDATA`
+  **antes** de extraer nada a disco; una discrepancia aborta la instalación con
+  error explícito y `--silent` sale con código 2 (payload incompleto). Si el
+  manifest es el placeholder (build de desarrollo sin payload poblado) se avisa
+  en la consola de log en lugar de rechazar la instalación.
+- **Una sola implementación de SHA-256.** El algoritmo vivía duplicado en el
+  actualizador; se ha extraído a `installer/sha256.hpp`, que ahora comparten
+  instalador y actualizador (una primitiva de seguridad no debe tener dos copias
+  que puedan divergir).
+- **CMake genera el manifest** al compilar con `-DARTPICST_PACKAGE=ON`, así que
+  el instalador de CMake también verifica (antes compilaba con hashes vacíos).
+
+### Orientaciones EXIF 5 y 7 intercambiadas
+- **Las fotos con orientación 5 o 7 se mostraban reflejadas por la diagonal
+  equivocada.** El visor compone espejo→rotación (TransformBgra y la matriz de
+  visualización) y WIC también voltea antes de rotar (documentado por
+  Microsoft), pero el mapa EXIF pedía 90° para la 5 y 270° para la 7: eso da la
+  transpuesta invertida en lugar de la transpuesta. Ahora 5 = espejo H + 270° y
+  7 = espejo H + 90°, que es lo que describe el propio EXIF.
+- **La ruta de respaldo GDI+ se queda como estaba a propósito** (5 =
+  `Rotate90FlipX`, 7 = `Rotate270FlipX`): `RotateFlipType` rota antes de
+  voltear, así que su tabla equivalente es la simétrica. Queda comentado en el
+  código para que nadie «unifique» las dos tablas y vuelva a intercambiarlas.
+- La extensión de shell (miniaturas y vista previa) usa la misma corrección:
+  `WICBitmapTransformRotate270 | FlipHorizontal` para la 5 y `Rotate90 |
+  FlipHorizontal` para la 7.
+
+### Endurecimiento del updater y de la extensión de shell
+- **Tamaño del asset verificado** contra el `size` que publica la API, siempre
+  (no solo cuando hay `digest`): una descarga truncada o una respuesta de proxy
+  que devuelve HTML con HTTP 200 se descarta en vez de ejecutarse.
+- **Nombre del asset validado** antes de construir la ruta local: un nombre con
+  separadores, unidad o `..` ya no puede escribir fuera de la carpeta de
+  descargas.
+- **El shell ya no trunca el último bloque.** `IStream::Read` devuelve `S_FALSE`
+  cuando entrega menos bytes de los pedidos, y el bucle salía **antes** de
+  insertarlos: los archivos leídos por el respaldo `stb_image` (PSD, TGA,
+  PNM/PIC) se cortaban justo en su último bloque. Ahora se conservan los bytes y
+  después se comprueba `S_FALSE`.
+
+### CI: el instalador ya no lleva un updater falso
+- `.github/workflows/build.yml` copiaba `artpicst.exe` con el nombre
+  `artpicst_updater.exe` como placeholder (no compilaba el updater). El
+  instalador publicado desde ese workflow llevaba un auto-actualizador que en
+  realidad era el visor. Ahora compila `updater/artpicst_updater.cpp` con su
+  `.rc`, ejecuta `--selftest` como gate y prepara el payload con
+  `scripts/collect_app_payload.py` (que genera los hashes).
+
+### Orientación EXIF con XMP antes del EXIF
+- El lector de orientación abandonaba el escaneo en el **primer** APP1. Un JPEG
+  con el bloque XMP (`http://ns.adobe.com/xap/1.0/`) antes del bloque EXIF se
+  mostraba sin orientar. Ahora solo termina si ya encontró EXIF (o si el
+  segmento no se pudo leer completo); un APP1 ajeno se salta y el escaneo sigue.
+
 ### Miniaturas y vista previa del Explorador (extensión de shell propia)
 - **Nuevo `artpicst_shell.dll`**: servidor COM en proceso con
   `IThumbnailProvider` (Iconos grandes, Mosaicos y Contenido) e

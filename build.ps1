@@ -241,7 +241,7 @@ $viewerArgs = @(
     "/link",
     "gdiplus.lib", "user32.lib", "kernel32.lib", "shell32.lib", "shlwapi.lib", "gdi32.lib",
     "msimg32.lib", "ole32.lib", "oleaut32.lib", "uuid.lib", "dwmapi.lib", "windowscodecs.lib",
-    "comdlg32.lib", "d2d1.lib", "dwrite.lib", "advapi32.lib",
+    "comdlg32.lib", "d2d1.lib", "dwrite.lib", "advapi32.lib", "winmm.lib", "dxgi.lib",
     "/MANIFEST:EMBED", "/MANIFESTINPUT:artpicst.manifest", "/SUBSYSTEM:WINDOWS",
     "/LTCG", "/OPT:REF", "/OPT:ICF",
     "/GUARD:CF", "/DYNAMICBASE", "/HIGHENTROPYVA", "/NXCOMPAT"

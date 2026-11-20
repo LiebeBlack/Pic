@@ -9,10 +9,11 @@
 # corrupto o manipulado nunca se instala.
 #
 # Emite DOS artefactos:
-#   1. installer/payload_manifest.hpp  (tabla C++ compilada en el instalador)
-#   2. <dir>/payload.manifest          (texto "nombre sha256", incrustado
-#      como RCDATA 206 para que el instalador verifique TAMBIÉN el payload
-#      de OTRO ejecutable: --update <instalador-descargado>).
+#   1. installer/payload_manifest.hpp  (tabla C++ que el instalador INCLUYE y
+#      usa para verificar cada recurso RCDATA antes de extraerlo a disco)
+#   2. <dir>/payload.manifest          (texto "nombre sha256" junto al payload:
+#      artefacto de auditoría para revisar qué se empaquetó. NO se incrusta;
+#      los ids 201..206 del .rc son fijos y 206 es artpicst_shell.dll).
 #
 # Uso:  python scripts/gen_payload_manifest.py --dir resources/app \
 #           --out installer/payload_manifest.hpp
@@ -107,9 +108,11 @@ def main() -> int:
         HEADER_TEMPLATE.format(entries="\n".join(rows)), encoding="utf-8", newline="\n")
     print(f"  manifest: {args.out} escrito ({len(rows)} entradas)")
 
-    # Segundo artefacto: manifest de texto junto al payload. El .rc lo incrusta
-    # como RCDATA 206; en modo --update el instalador lo lee del ejecutable
-    # descargado para verificar el payload AJENO con sus propios hashes.
+    # Segundo artefacto: manifest de texto junto al payload, para auditoría del
+    # empaquetado (qué archivo con qué hash entró en resources/app/). No se
+    # incrusta en el instalador: la fuente de verdad en tiempo de ejecución es
+    # installer/payload_manifest.hpp, cuyos hashes se comparan contra los bytes
+    # de cada recurso RCDATA.
     text_lines = [f"{name} {digest}"
                   for (name, _sym, _rid), digest in zip(PAYLOAD, digests)]
     manifest_txt = payload_dir / "payload.manifest"

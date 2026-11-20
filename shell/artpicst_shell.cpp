@@ -124,23 +124,25 @@ constexpr wchar_t kPrevHostAppId[]     = L"{6D2B5079-2F0B-48DD-AB7F-97CEC514D30B
 constexpr wchar_t kThumbFriendly[]   = L"ARTPICST Thumbnail Provider";
 constexpr wchar_t kPreviewFriendly[] = L"ARTPICST Preview Handler";
 
-// Extensiones con integración de shell. Es la misma lista que ofrece el visor
-// (installer/artpicst_installer.cpp la usa para «Abrir con»). Los formatos de
-// metarchivo (EMF/WMF) quedan fuera a propósito: no son imágenes rasterizables
-// por WIC ni por stb.
-const wchar_t* const kShellExtensions[] = {
-    L".jpg", L".jpeg", L".jpe", L".jfif", L".jif",
-    L".png", L".apng", L".bmp", L".dib", L".rle", L".gif",
-    L".tif", L".tiff", L".webp", L".heic", L".heif", L".hif",
-    L".avif", L".jxl", L".jxr", L".wdp", L".hdp", L".ico",
-    L".cur", L".icon", L".tga", L".tpic", L".psd", L".hdr",
-    L".pic", L".pnm", L".ppm", L".pgm", L".pbm", L".jp2",
-    L".j2k", L".jpx", L".exif", L".dng", L".cr2", L".cr3",
-    L".nef", L".arw", L".orf", L".rw2", L".raf", L".sr2",
-    L".kdc", L".raw",
-};
-constexpr size_t kShellExtensionCount =
-    sizeof(kShellExtensions) / sizeof(kShellExtensions[0]);
+// Extensiones con integración de shell. Se derivan de la lista ÚNICA de
+// formatos (include/artpicst_formats.hpp), la misma que usan el instalador
+// para «Abrir con» y el visor para escanear carpetas. Se omiten los formatos
+// marcados sin miniatura (EMF/WMF): son metarchivos vectoriales que ni WIC ni
+// stb pueden rasterizar, y anunciar una miniatura que falla es peor que no
+// ofrecerla.
+#include "artpicst_formats.hpp"
+
+const std::vector<std::wstring>& ShellExtensions() {
+    static const std::vector<std::wstring> extensions = [] {
+        std::vector<std::wstring> list;
+        list.reserve(artpicst::kImageFormatCount);
+        for (const auto& format : artpicst::kImageFormats) {
+            if (format.shellThumbnail) list.emplace_back(format.extension);
+        }
+        return list;
+    }();
+    return extensions;
+}
 
 HINSTANCE g_hInstance = nullptr;
 volatile LONG g_objectCount = 0;   // objetos vivos (DllCanUnloadNow)
@@ -192,11 +194,15 @@ HRESULT ReadStreamToBuffer(IStream* stream, std::vector<BYTE>& out) {
     for (;;) {
         ULONG read = 0;
         const HRESULT hr = stream->Read(chunk, static_cast<ULONG>(sizeof(chunk)), &read);
-        if (hr == S_FALSE) break;          // fin de stream
         if (FAILED(hr)) return hr;
-        if (read == 0) break;
+        if (read == 0) break;              // fin de stream
         if (out.size() + read > kMaxInputBytes) return HRESULT_FROM_WIN32(ERROR_FILE_TOO_LARGE);
         out.insert(out.end(), chunk, chunk + read);
+        // S_FALSE significa «leí MENOS de lo pedido», no «no leí nada»: esos
+        // bytes están en 'read' y hay que conservarlos. Antes se salía del
+        // bucle antes de insertarlos, así que el archivo quedaba truncado en su
+        // último bloque (stb_image fallaba con PSD/TGA/PNM de cierto tamaño).
+        if (hr == S_FALSE) break;
     }
     return out.empty() ? E_FAIL : S_OK;
 }
@@ -252,16 +258,21 @@ UINT ReadExifOrientation(IWICBitmapFrameDecode* frame) {
 // Transformación WIC equivalente a cada orientación EXIF. WIC admite combinar
 // una rotación con un volteo, que es justo lo que necesitan 5 y 7 (transponer
 // y transponer invertido).
+//
+// ORDEN: IWICBitmapFlipRotator hace el volteo ANTES de la rotación (documentado
+// por Microsoft), igual que EXIF («espejo horizontal y giro 270/90»). Por eso 5
+// pide 270 y 7 pide 90; con la rotación primero (GDI+ RotateFlipType) serían al
+// revés y la miniatura saldría reflejada por la diagonal equivocada.
 WICBitmapTransformOptions TransformForOrientation(UINT orientation) {
     switch (orientation) {
         case 2: return static_cast<WICBitmapTransformOptions>(WICBitmapTransformFlipHorizontal);
         case 3: return static_cast<WICBitmapTransformOptions>(WICBitmapTransformRotate180);
         case 4: return static_cast<WICBitmapTransformOptions>(WICBitmapTransformFlipVertical);
         case 5: return static_cast<WICBitmapTransformOptions>(
-                        WICBitmapTransformRotate90 | WICBitmapTransformFlipHorizontal);
+                        WICBitmapTransformRotate270 | WICBitmapTransformFlipHorizontal);
         case 6: return static_cast<WICBitmapTransformOptions>(WICBitmapTransformRotate90);
         case 7: return static_cast<WICBitmapTransformOptions>(
-                        WICBitmapTransformRotate270 | WICBitmapTransformFlipHorizontal);
+                        WICBitmapTransformRotate90 | WICBitmapTransformFlipHorizontal);
         case 8: return static_cast<WICBitmapTransformOptions>(WICBitmapTransformRotate270);
         default: return WICBitmapTransformRotate0;
     }
@@ -1058,8 +1069,7 @@ bool RegisterHandler(HKEY root, const wchar_t* clsidText, const wchar_t* friendl
         ok = ok && SetRegString(root, base + L"\\AppID", nullptr, kPrevHostAppId);
     }
 
-    for (size_t i = 0; i < kShellExtensionCount; ++i) {
-        const std::wstring ext = kShellExtensions[i];
+    for (const auto& ext : ShellExtensions()) {
         const std::wstring additive =
             L"Software\\Classes\\SystemFileAssociations\\" + ext + L"\\ShellEx\\" + handlerTypeKey;
         ok = ok && SetRegString(root, additive, nullptr, clsidText);
@@ -1089,8 +1099,7 @@ void RemoveAssociationIfOurs(HKEY root, const std::wstring& subKey, const wchar_
 
 bool UnregisterHandler(HKEY root, const wchar_t* clsidText, const wchar_t* handlerTypeKey) {
     RegDeleteTreeW(root, (std::wstring(L"Software\\Classes\\CLSID\\") + clsidText).c_str());
-    for (size_t i = 0; i < kShellExtensionCount; ++i) {
-        const std::wstring ext = kShellExtensions[i];
+    for (const auto& ext : ShellExtensions()) {
         RemoveAssociationIfOurs(root,
             L"Software\\Classes\\SystemFileAssociations\\" + ext + L"\\ShellEx\\" + handlerTypeKey,
             clsidText);

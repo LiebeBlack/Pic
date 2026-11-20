@@ -160,7 +160,7 @@ if(WIN32)
         _WIN32_WINNT=0x0601
     )
     target_link_libraries(artpicst PRIVATE
-        gdiplus user32 kernel32 shell32 shlwapi gdi32 msimg32 ole32 oleaut32 uuid dwmapi windowscodecs comdlg32 d2d1 dwrite
+        gdiplus user32 kernel32 shell32 shlwapi gdi32 msimg32 ole32 oleaut32 uuid dwmapi windowscodecs comdlg32 d2d1 dwrite winmm dxgi
     )
     target_link_libraries(artpicst_updater PRIVATE
         gdiplus shell32 shlwapi user32 advapi32 gdi32 ole32 uuid dwmapi winhttp
@@ -300,6 +300,10 @@ if(ARTPICST_PACKAGE)
     set(ARTPICST_PAYLOAD_DIR "${CMAKE_CURRENT_SOURCE_DIR}/resources/app")
     set(ARTPICST_PAYLOAD_FILES artpicst.exe artpicst.ico version.json README.md artpicst_updater.exe artpicst_shell.dll)
 
+    # Script compartido que emite installer/payload_manifest.hpp con el SHA-256
+    # de cada archivo del payload (el mismo que usan build.ps1 y MinGW).
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+
     # Genera resources/app/ a partir de los binarios recién compilados. Antes
     # esto era un FATAL_ERROR de configuración que impedía cualquier build limpio.
     add_custom_command(
@@ -311,6 +315,11 @@ if(ARTPICST_PACKAGE)
         COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_CURRENT_SOURCE_DIR}/resources/artpicst.ico" "${ARTPICST_PAYLOAD_DIR}/artpicst.ico"
         COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_CURRENT_SOURCE_DIR}/version.json" "${ARTPICST_PAYLOAD_DIR}/version.json"
         COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_CURRENT_SOURCE_DIR}/README.md" "${ARTPICST_PAYLOAD_DIR}/README.md"
+        # Sin este paso el instalador compilaría con el placeholder de hashes
+        # vacíos y no verificaría nada: la comprobación SHA-256 quedaría muerta.
+        COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/scripts/gen_payload_manifest.py"
+                --dir "${ARTPICST_PAYLOAD_DIR}"
+                --out "${CMAKE_CURRENT_SOURCE_DIR}/installer/payload_manifest.hpp"
         COMMAND ${CMAKE_COMMAND} -E touch "${ARTPICST_PAYLOAD_DIR}/.payload-stamp"
         DEPENDS artpicst artpicst_updater artpicst_shell
         COMMENT "Poblando resources/app/ (payload autocontenido)"
@@ -324,7 +333,10 @@ if(ARTPICST_PACKAGE)
         installer/ui_theme.hpp
         installer/artpicst_installer.rc
     )
-    target_include_directories(artpicst_installer PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/installer)
+    target_include_directories(artpicst_installer PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/installer
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
     artpicst_enable_sse42(artpicst_installer)
     # El .rc incrusta el payload: el instalador no puede compilarse antes que él.
     add_dependencies(artpicst_installer artpicst_payload)

@@ -162,10 +162,15 @@ void DeleteTemp(const std::wstring& path) {
 
 void TestOrientationTransforms() {
     struct ExpectedTransform { int rotation; bool flipH; bool flipV; };
+    // Contrato de composición: el consumidor aplica PRIMERO el espejo y DESPUÉS
+    // la rotación (TransformBgra y la matriz del visor). Con esa convención
+    // EXIF 5 (transpuesta) es espejo H + 270° y EXIF 7 (antitranspuesta) es
+    // espejo H + 90°. La tabla contraria (90/270) producía la imagen reflejada
+    // por la diagonal equivocada.
     constexpr ExpectedTransform expected[] = {
         {0, false, false}, {0, false, false}, {0, true, false},
-        {180, false, false}, {0, false, true}, {90, true, false},
-        {90, false, false}, {270, true, false}, {270, false, false},
+        {180, false, false}, {0, false, true}, {270, true, false},
+        {90, false, false}, {90, true, false}, {270, false, false},
     };
     for (int orientation = 1; orientation <= 8; ++orientation) {
         const auto transform = artpicst::exif::TransformFromOrientation(orientation);

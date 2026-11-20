@@ -59,6 +59,8 @@
 
 #include "version.hpp"
 #include "ui_theme.hpp"
+#include "payload_manifest.hpp"   // GENERADO en build: SHA-256 de cada archivo del payload
+#include "sha256.hpp"            // misma implementación que usa el actualizador
 
 #ifdef _MSC_VER
 #pragma comment(lib, "gdiplus.lib")
@@ -659,18 +661,21 @@ bool InstallVCRedistributable(const std::wstring& srcDir, std::wstring& outStatu
 // extensión mediante OpenWithProgids, SIN sobrescribir el valor predeterminado
 // de la extensión: así el Explorador conserva su proveedor nativo de miniaturas.
 
+// La lista NO se escribe aquí: se recorre la tabla única de
+// include/artpicst_formats.hpp, compartida con el visor (--register) y con la
+// extensión de shell. Así ningún formato puede quedar asociado en un
+// componente y olvidado en otro.
+#include "artpicst_formats.hpp"
+
 const std::vector<std::wstring>& SupportedAssociationExtensions() {
-    static const std::vector<std::wstring> extensions = {
-        L".jpg", L".jpeg", L".jpe", L".jfif", L".jif",
-        L".png", L".apng", L".bmp", L".dib", L".rle", L".gif",
-        L".tif", L".tiff", L".webp", L".heic", L".heif", L".hif",
-        L".avif", L".jxl", L".jxr", L".wdp", L".hdp", L".ico",
-        L".cur", L".icon", L".tga", L".tpic", L".psd", L".hdr", L".pic",
-        L".pnm", L".ppm", L".pgm", L".pbm", L".jp2", L".j2k",
-        L".jpx", L".emf", L".wmf", L".exif", L".dng", L".cr2",
-        L".cr3", L".nef", L".arw", L".orf", L".rw2", L".raf",
-        L".sr2", L".kdc", L".raw"
-    };
+    static const std::vector<std::wstring> extensions = [] {
+        std::vector<std::wstring> list;
+        list.reserve(artpicst::kImageFormatCount);
+        for (const auto& format : artpicst::kImageFormats) {
+            list.emplace_back(format.extension);
+        }
+        return list;
+    }();
     return extensions;
 }
 
@@ -727,9 +732,18 @@ bool RegisterFileAssociations(const std::wstring& exePath) {
     ok = ok && SetRegStringValue(root, appPaths, L"Path", ParentDirectory(exePath));
 
     const std::wstring caps = AppKeyPath() + L"\\Capabilities";
+    // Cada formato se intenta SIEMPRE: encadenar con `ok = ok && ...` deja de
+    // escribir en cuanto una extensión falla (por ejemplo, una directiva de
+    // grupo que bloquea un tipo), y las siguientes se quedarían sin asociar.
     for (const auto& ext : SupportedAssociationExtensions()) {
-        ok = ok && SetRegStringValue(root, L"Software\\Classes\\" + ext + L"\\OpenWithProgids", fileType, L"");
-        ok = ok && SetRegStringValue(root, caps + L"\\FileAssociations", ext, fileType);
+        const bool openWith = SetRegStringValue(
+            root, L"Software\\Classes\\" + ext + L"\\OpenWithProgids", fileType, L"");
+        // SupportedTypes es lo que hace que el programa aparezca en «Abrir con»
+        // incluso cuando la extensión aún no tiene ningún ProgID registrado.
+        const bool supported = SetRegStringValue(root, appKey + L"\\SupportedTypes", ext, L"");
+        const bool capability =
+            SetRegStringValue(root, caps + L"\\FileAssociations", ext, fileType);
+        ok = ok && openWith && supported && capability;
     }
     ok = ok && SetRegStringValue(root, caps, L"ApplicationName", APP_NAME);
     ok = ok && SetRegStringValue(root, caps, L"ApplicationDescription",
@@ -973,10 +987,57 @@ bool TaskPrepareEnvironment(PipeUi& ui, const PipeJob& job, Pacer& clock, std::w
     return true;
 }
 
+// Hash SHA-256 de referencia (hex minúsculo) del archivo incrustado con ese id
+// de recurso, según installer/payload_manifest.hpp. Cadena vacía = sin
+// referencia (compilación de desarrollo sin payload poblado).
+const char* ExpectedSha256ForResource(UINT resId) {
+    for (const auto& entry : artpicst::manifest::kPayload) {
+        if (entry.resourceId == resId) return entry.sha256Hex ? entry.sha256Hex : "";
+    }
+    return "";
+}
+
+// SHA-256 (hex minúsculo) de los BYTES INCRUSTADOS del recurso. Se calcula en
+// memoria, sin escribir nada a disco: la verificación precede a cualquier
+// extracción, así que un instalador manipulado no llega a tocar el sistema.
+std::wstring Sha256OfResource(UINT resId) {
+    if (!g_state.hInstance) return {};
+    const HRSRC res = FindResourceW(g_state.hInstance, MAKEINTRESOURCEW(resId), RT_RCDATA);
+    if (!res) return {};
+    const HGLOBAL handle = LoadResource(g_state.hInstance, res);
+    if (!handle) return {};
+    const void* data = LockResource(handle);
+    const DWORD size = SizeofResource(g_state.hInstance, res);
+    if (!data || size == 0) return {};
+    return artpicst::sha256::Hex(data, static_cast<size_t>(size));
+}
+
 bool TaskVerifyPayload(PipeUi& ui, const PipeJob&, Pacer& clock, std::wstring& error) {
     int present = 0;
+    int verified = 0;
     for (const auto& entry : kPayload) {
-        if (IsResourcePresent(entry.id)) ++present;
+        if (!IsResourcePresent(entry.id)) continue;
+        ++present;
+
+        const char* expected = ExpectedSha256ForResource(entry.id);
+        if (!expected[0]) {
+            // Payload de desarrollo sin manifest generado: no se rechaza la
+            // instalación, pero queda por escrito que ese archivo no se verificó.
+            ui.Log(LogKind::Warn, clock.Elapsed(),
+                   L"[AVISO] %ls sin hash de referencia (build de desarrollo)", entry.fileName);
+            continue;
+        }
+
+        std::wstring expectedHex;
+        for (const char* p = expected; *p; ++p) expectedHex.push_back(static_cast<wchar_t>(*p));
+        const std::wstring actual = Sha256OfResource(entry.id);
+        if (actual.empty() || _wcsicmp(actual.c_str(), expectedHex.c_str()) != 0) {
+            error = std::wstring(L"El payload incrustado no coincide con su SHA-256 (") +
+                    entry.fileName +
+                    L"). El instalador está corrupto o ha sido manipulado; no se instala nada.";
+            return false;
+        }
+        ++verified;
     }
     const bool mainAvailable = IsResourcePresent(RES_APP_EXE) ||
         GetFileAttributesW((GetModuleFolder() + L"\\artpicst.exe").c_str()) != INVALID_FILE_ATTRIBUTES;
@@ -985,7 +1046,10 @@ bool TaskVerifyPayload(PipeUi& ui, const PipeJob&, Pacer& clock, std::wstring& e
         return false;
     }
     ui.Log(LogKind::Ok, clock.Elapsed(), L"[OK] Payload incrustado: %d/%d archivos", present, kPayloadCount);
-    ui.Log(LogKind::Info, clock.Elapsed(), L"Verificando firma digital del paquete...");
+    if (verified > 0) {
+        ui.Log(LogKind::Ok, clock.Elapsed(),
+               L"[OK] Integridad SHA-256 verificada en %d archivo(s)", verified);
+    }
     return true;
 }
 
@@ -1443,7 +1507,7 @@ bool TaskUninstallFiles(PipeUi& ui, const PipeJob& job, Pacer& clock, std::wstri
 
 const PipeTask kInstallTasks[] = {
     {  1.5, L"Preparando el entorno de instalación",      TaskPrepareEnvironment },
-    {  4.5, L"Verificando integridad y firmas digitales", TaskVerifyPayload },
+    {  4.5, L"Verificando integridad del payload (SHA-256)", TaskVerifyPayload },
     {  7.5, L"Diagnóstico del sistema y compatibilidad",  TaskSystemDiagnostics },
     { 11.0, L"Preparando registros del sistema",          TaskStageMainBinary },
     { 14.0, L"Descomprimiendo binarios y recursos",       TaskExtractResources },
@@ -3062,6 +3126,11 @@ static int RunSilent(AppMode mode) {
         // el script puede cerrar ARTPICST y reintentar.
         if (g_lastError.find(L"está en uso") != std::wstring::npos) {
             return kSilentExitFilesLocked;
+        }
+        // Payload corrupto o manipulado: mismo código que un payload ausente
+        // (2, "payload incompleto"), tal y como documenta README/BUILD.
+        if (g_lastError.find(L"SHA-256") != std::wstring::npos) {
+            return kSilentExitPayloadMissing;
         }
         return kSilentExitFailed;
     }

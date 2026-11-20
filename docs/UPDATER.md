@@ -70,8 +70,9 @@ trabajo ya terminó.
    (pospone 1 h sin gastar el chequeo diario) · checkbox *Instalar
    actualizaciones automáticas en segundo plano* (persiste en el registro).
 7. **Descarga.** A `%LOCALAPPDATA%\ARTPICST\updates` con progreso real (bytes,
-   velocidad media), guard de 60 s sin datos y verificación **SHA-256** si el
-   release publica `digest` (`sha256:...`). Descarga en `.part` + rename: nunca
+   velocidad media), guard de 60 s sin datos, comprobación del **tamaño**
+   anunciado por la API y verificación **SHA-256** si el release publica
+   `digest` (`sha256:...`). Descarga en `.part` + rename: nunca
    queda un archivo a medias con nombre definitivo. Ante un corte de red o un
    `.part` corrupto de una sesión anterior se reintenta UNA vez con limpieza
    previa de los restos; el guard de 60 s sin datos sí dispara (antes se
@@ -99,6 +100,9 @@ trabajo ya terminó.
 ## 4. Seguridad
 
 - **HTTPS obligatorio** (`WINHTTP_FLAG_SECURE`) en todas las peticiones.
+- **Tamaño** del asset comprobado contra el `size` que publica la API: una
+  descarga truncada o una respuesta de proxy/cautive portal se descarta aunque
+  el release no publique digest.
 - **SHA-256** del instalador descargado verificado contra el `digest` del
   release antes de ejecutarlo; si no coincide, se borra y se cancela.
 - **Escalada explícita**: el updater nunca se eleva; la elevación la pide el

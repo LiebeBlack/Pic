@@ -42,15 +42,23 @@ struct ImageTransform {
 
 // Descompone las orientaciones 1..8 en una rotación horaria y espejos.
 // Los valores ausentes, negativos o fuera del rango se tratan como normal.
+//
+// CONVENCIÓN DE COMPOSICIÓN: el consumidor aplica PRIMERO los espejos y DESPUÉS
+// la rotación (así lo hacen TransformBgra y la matriz de visualización de
+// main.cpp). EXIF describe 5 y 7 justo así («espejo horizontal y giro 270» / «y
+// giro 90»), de modo que esos son los ángulos que van aquí. Con la convención
+// contraria (rotar y luego voltear, la de GDI+ RotateFlipType) habría que
+// intercambiar 5 y 7 — por eso main.cpp mantiene su propia tabla para la ruta
+// de respaldo GDI+, que sí rota antes de voltear.
 inline constexpr ImageTransform TransformFromOrientation(int orientation) noexcept {
     switch (orientation) {
-        case 2: return {0, true, false};
-        case 3: return {180, false, false};
-        case 4: return {0, false, true};
-        case 5: return {90, true, false};
-        case 6: return {90, false, false};
-        case 7: return {270, true, false};
-        case 8: return {270, false, false};
+        case 2: return {0, true, false};      // espejo horizontal
+        case 3: return {180, false, false};   // giro 180
+        case 4: return {0, false, true};      // espejo vertical
+        case 5: return {270, true, false};    // espejo H + giro 270 = transpuesta
+        case 6: return {90, false, false};    // giro 90
+        case 7: return {90, true, false};     // espejo H + giro 90 = antitranspuesta
+        case 8: return {270, false, false};   // giro 270
         default: return {};
     }
 }
@@ -68,6 +76,7 @@ inline int ReadJpegOrientation(const wchar_t* filepath) {
     }
 
     int orientation = 1;
+    bool foundExif = false;
     while (true) {
         unsigned char marker[2];
         if (fread(marker, 1, 2, f) != 2 || marker[0] != 0xFF) break;
@@ -80,8 +89,10 @@ inline int ReadJpegOrientation(const wchar_t* filepath) {
 
         if (marker[1] == 0xE1 && len >= 14) {
             std::vector<unsigned char> data(static_cast<size_t>(len) - 2);
-            if (fread(data.data(), 1, len - 2, f) == static_cast<size_t>(len - 2)) {
+            const bool readOk = fread(data.data(), 1, len - 2, f) == static_cast<size_t>(len - 2);
+            if (readOk) {
                 if (memcmp(data.data(), "Exif\0\0", 6) == 0) {
+                    foundExif = true;
                     const unsigned char* tiff = data.data() + 6;
                     const size_t tiffLen = data.size() - 6;
                     if (tiffLen >= 8) {
@@ -119,7 +130,12 @@ inline int ReadJpegOrientation(const wchar_t* filepath) {
                     }
                 }
             }
-            break;
+            // Un APP1 que NO es EXIF (XMP, IPTC, ...) no es motivo para dejar de
+            // buscar: el bloque EXIF puede venir en un APP1 POSTERIOR. Antes se
+            // abandonaba aquí y esas fotos se mostraban sin orientar. Solo se
+            // sale si ya hay EXIF o si el segmento no se pudo leer completo.
+            if (foundExif || !readOk) break;
+            continue;
         } else {
             fseek(f, static_cast<long>(len) - 2, SEEK_CUR);
         }
