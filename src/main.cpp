@@ -2926,6 +2926,10 @@ bool LoadImageFromPath(const std::wstring& filepath) {
     if (!pixels) {
         std::wstring msg = L"No se pudo cargar: " + GetFileName(filepath);
         HandleError(msg, false);
+        // StopGifTimer() ya se había ejecutado arriba: si la imagen mostrada era
+        // un GIF, se quedaba congelado hasta navegar de nuevo. Al fallar la
+        // carga no se toca la imagen actual, así que su animación se reanuda.
+        StartGifTimer();
         return false;
     }
 
@@ -2943,11 +2947,20 @@ bool LoadImageFromPath(const std::wstring& filepath) {
 bool LoadImageByIndex(size_t index) {
     const std::wstring path = ImagePathAt(index);
     if (path.empty()) return false;
+    size_t previousIndex = 0;
     {
         std::lock_guard<std::mutex> lock(g_state.filesMutex);
+        previousIndex = g_state.currentImageIndex;
         g_state.currentImageIndex = index;
     }
-    return LoadImageFromPath(path);
+    if (LoadImageFromPath(path)) return true;
+    // La carga falló (archivo bloqueado, corrupto o borrado entre el escaneo y
+    // la pulsación): el índice se adelantaba a un archivo que NO se está
+    // mostrando, así que el título numeraba la imagen anterior con la posición
+    // de otra y las flechas seguían desde un punto falso. Se restaura.
+    std::lock_guard<std::mutex> lock(g_state.filesMutex);
+    if (previousIndex < g_state.imageFiles.size()) g_state.currentImageIndex = previousIndex;
+    return false;
 }
 
 void LoadInitialImageSafely() {
